@@ -1,5 +1,5 @@
 # tinymongo
-A quick and dirty wrapper to make a drop in raplacement for mongodb out of tinyDB
+A quick and dirty wrapper to make a drop in raplacement for mongodb out of TinyDB
 
 Current Requirements:
    TinyDB  https://github.com/msiemens/tinydb
