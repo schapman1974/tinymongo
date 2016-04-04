@@ -2,7 +2,7 @@
 A quick and dirty wrapper to make a drop in raplacement for mongodb out of tinyDB
 
 Current Requirements:
-   TinyDB
+   TinyDB  https://github.com/msiemens/tinydb
 
 This module is to attempt to add support for mongodb old and newer versions.  Currently I have tested against version 3.2.4 of pymongo for this version.  Most likely there are plenty of bugs in this alpha version so work with me.
 
