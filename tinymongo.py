@@ -164,32 +164,19 @@ if __name__=="__main__":
         os.remove("tinydb/pacelog.json")
     except:
         pass
-    tmc = TinyMongoClient()
-    #db = tmc.pacemain
-    atable = tmc.pacemain.userdb
-    theid=atable.insert_one({"_id":"56255a2b8f28086c0b95e282", "username":"admin","password":"admin","database":"pacemain","module":"ui_WEBIDE","skin":"skyblue","active":"true","fwmod":"WEBIDE","subdomain":"yes","grouping":"pacesoftware"})
-    btable = tmc.pacemain.idefiles
-    theid=btable.insert_one({"_id":"56e9a62ce1382347395e5e89", "username" : "admin", "adminonly" : "false"})
-    userinfo = btable.find_one({"_id":ObjectId("56e9a62ce1382347395e5e89")})
-    print userinfo
-    #print theid
-    #atable.insert_one({"id":"test5","someid":"nosometest", "great":2})
-    #atable.insert_one({"id":"test3","someid":"nosometest", "great":2})
-    #atable.insert_one({"id":"test2","someid":"nosometest", "great":1})
-    #atable.insert_one({"id":"test4","someid":"nosometest", "great":1})
-    #atable.insert_one({"id":"test6","someid":"nosometest", "great":1})
-    #cursor = atable.find({"someid":"nosometest","great":{"le":2}}).sort("id")
-    #print cursor.cursordat
-    #cursor = atable.find_one({"someid":"nosometest","great":{"le":-44}}).sort("id")
-    #print cursor.cursordat
-    #db = tmc.pacelog
-    #table = db.pacemain
-    #theid=table.insert_one({"id":"log1","logid":"loginfo", "boyhowdy":2})
-    #cursor = atable.find({})
-    #if "subdomain" in cursor:print cursor['subdomain']
-    #print cursor.cursordat
-    #upd = table.update({"boyhowdy":2},{"$set":{"logid":"ZZZNUF", "boyhowdy":99}})
-    #print upd
-    #cursor = table.find({})
-    #print cursor['boyhowdy']
+    # you can include a folder name as a parameter if not it will default to "tinydb"
+    tinyClient = TinyMongoClient()
+    
+    # either creates a new database file or accesses an existing one
+    tinyDatabase = tinyClient.tinyDatabase
+    
+    # either creates a new collection or accesses an existing one
+    tinyCollection = tinyDatabase.tinyCollection
+    
+    #insert data adds a new record returns _id
+    recordId = tinyCollection.insert({"username":"admin","password":"admin","module":"somemodule"}) 
+    userInfo = tinyCollection.find_one({"_id":recordId})  # returns the record inserted
+    
+    #update data returns boolean if successful
+    upd = table.update({"username":"admin"},{"$set":{"module":"someothermodule"}) 
     
