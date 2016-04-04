@@ -5,8 +5,6 @@ This module is to attempt to add support for mongodb old and newer versions.  Cu
 
 Example:
 
-.. code-block:: python
-
     tinyClient = TinyMongoClient()                # you can include a folder name as a parameter if not it will default to "tinydb"
     tinyDatabase = tinyClient.tinyDatabase        # either creates a new database file or accesses an existing one
     tinyCollection = tinyDatabase.tinyCollection  # either creates a new collection or access an existing one
@@ -17,5 +15,5 @@ Example:
     #update data
     upd = table.update({"username":"admin"},{"$set":{"module":"someothermodule"}) #returns boolean if successful
 
-
-I plan on adding 
+    
+I plan on also adding gridFS file support very shortly as well
