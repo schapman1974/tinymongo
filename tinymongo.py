@@ -178,5 +178,5 @@ if __name__=="__main__":
     userInfo = tinyCollection.find_one({"_id":recordId})  # returns the record inserted
     
     #update data returns boolean if successful
-    upd = table.update({"username":"admin"},{"$set":{"module":"someothermodule"}}) 
+    upd = tinyCollection.update({"username":"admin"},{"$set":{"module":"someothermodule"}}) 
     
