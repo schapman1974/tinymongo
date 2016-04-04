@@ -11,7 +11,7 @@ Example:
     # either creates a new database file or accesses an existing one
     tinyDatabase = tinyClient.tinyDatabase
     
-    # either creates a new collection or access an existing one
+    # either creates a new collection or accesses an existing one
     tinyCollection = tinyDatabase.tinyCollection
     
     #insert data adds a new record returns _id
@@ -20,6 +20,8 @@ Example:
     
     #update data returns boolean if successful
     upd = table.update({"username":"admin"},{"$set":{"module":"someothermodule"}) 
-'''
-    
-I plan on also adding gridFS file support very shortly as well
+```
+
+I will also be adding support for gridFS by storing the files somehow and indexing them in a db like mongo currently does
+
+More to come......
