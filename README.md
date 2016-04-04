@@ -5,11 +5,12 @@ This module is to attempt to add support for mongodb old and newer versions.  Cu
 
 Example:
 
-    tinyClient = TinyMongoClient()                # you can include a folder name as a parameter if not it will default to "tinydb"
+    tinyClient = TinyMongoClient()  # you can include a folder name as a parameter if not it will default to "tinydb"
     tinyDatabase = tinyClient.tinyDatabase        # either creates a new database file or accesses an existing one
     tinyCollection = tinyDatabase.tinyCollection  # either creates a new collection or access an existing one
     #insert data
-    recordId = tinyCollection.insert({"username":"admin","password":"admin","module":"somemodule"}) # adds a new record returns _id
+    # adds a new record returns _id
+    recordId = tinyCollection.insert({"username":"admin","password":"admin","module":"somemodule"}) 
     userInfo = tinyCollection.find_one({"_id":recordId})  # returns the record inserted
     print(userInfo)
     #update data
