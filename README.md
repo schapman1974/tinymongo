@@ -4,7 +4,7 @@ A simple wrapper to make a drop in raplacement for mongodb out of TinyDB
 Current Requirements:
    TinyDB  https://github.com/msiemens/tinydb
 
-This module is to attempt to add support for mongodb old and newer versions.  Currently I have tested against version 3.2.4 of pymongo for this version.  Most likely there are plenty of bugs in this alpha version so work with me.
+This module is to attempt to add support for mongodb old and newer versions.  Currently I have tested side by side with  version 3.2.4 of pymongo for this version.  Most likely there are a few bugs in this alpha version so work with me.  I do have it working on a small project I am working on.
 
 Example:
 ```python
@@ -28,3 +28,7 @@ Example:
 I will also be adding support for gridFS by storing the files somehow and indexing them in a db like mongo currently does
 
 More to come......
+
+# License
+
+MIT License
