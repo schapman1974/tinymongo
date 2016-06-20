@@ -8,6 +8,8 @@ This module is to attempt to add support for mongodb old and newer versions.  Cu
 
 Example:
 ```python
+    from tinymongo.tinymongo import *
+    
     # you can include a folder name as a parameter if not it will default to "tinydb"
     tinyClient = TinyMongoClient()
     
