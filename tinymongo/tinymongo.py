@@ -158,6 +158,15 @@ class TinyMongoCursor(object):
     def count(self):
         return len(self.cursordat)
 
+class TinyGridFS(object):
+    def __init__(self,*args,**kwargs):
+        self.database = None
+    
+    def GridFS(self,tinydatabase):
+        self.database = tinydatabase
+        return self
+
+
 if __name__=="__main__":
     try:
         os.remove("tinydb/pacemain.json")
