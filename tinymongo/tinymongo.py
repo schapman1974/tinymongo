@@ -113,7 +113,7 @@ class TinyMongoCollection(object):
         if allcond is None:return self.table.get({})
         return self.table.get(allcond)
         
-    def count():
+    def count(self):
         if self.table is None:self.buildTable()
         return self.table.count(self.lastcond)
         
