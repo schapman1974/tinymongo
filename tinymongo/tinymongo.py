@@ -110,7 +110,7 @@ class TinyMongoCollection(object):
     def find_one(self,query={},fields={}):
         if self.table is None:self.buildTable()
         allcond = self.parseQuery(query)
-        if allcond is None:return self.table.get({})
+        if allcond is None:return self.table.get(eid=1)
         return self.table.get(allcond)
         
     def count(self):
