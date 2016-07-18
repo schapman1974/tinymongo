@@ -87,8 +87,6 @@ class TinyMongoCollection(object):
             else:
                 allcond=allcond & (theop(self.query[akey],avalue))
             cnt+=1
-        if not allcond is None:self.lastcond = allcond
-        else:self.lastcond={}
         return allcond
         
     def update(self,query,data,argsdict={},**kwargs):
