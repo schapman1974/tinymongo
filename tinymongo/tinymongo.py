@@ -115,7 +115,7 @@ class TinyMongoCollection(object):
         
     def count(self):
         if self.table is None:self.buildTable()
-        return self.table.count(self.lastcond)
+        return len(self.table)
         
         
 class TinyMongoCursor(object):
