@@ -3,6 +3,7 @@ from tinydb import *
 from operator import itemgetter
 import operator
 from uuid import uuid1
+from bson.objectid import ObjectId
 
 
 class TinyMongoClient(object):

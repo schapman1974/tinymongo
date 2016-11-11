@@ -1,12 +1,12 @@
 from setuptools import setup, find_packages
 
-requirements = ['tinydb']
+requirements = ['tinydb', 'pymongo']
 
 setup(
     name='tinymongo',
     packages=find_packages(),
     version='0.1.1dev',
-    description='A flat file drop in replacement for mongodb.  Requires Tinydb',
+    description='A flat file drop in replacement for mongodb.  Requires Tinydb, pymongo',
     author='Stephen Chapman',
     author_email='schapman1974@gmail.com',
     url='https://github.com/schapman1974/tinymongo',
