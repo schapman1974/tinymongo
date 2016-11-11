@@ -25,12 +25,14 @@ tinyDatabase = tinyClient.tinyDatabase
 tinyCollection = tinyDatabase.tinyCollection
 
 # insert 10 records
+print('inserting records...')
 for i in range(5):
     recordId = tinyCollection.insert({"username": "user{}".format(i),
                                       "password": "admin{}".format(i),
                                       "module": "somemodule"})
 
 # show me all users, passwords, and 'modules'
+print('finding all documents in the collection')
 cursor = tinyCollection.find({})
 for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
@@ -42,10 +44,12 @@ else:
     print('db not updated')
 
 # print the updated results
+print('finding all documents in the collection to show the updates')
 cursor = tinyCollection.find({})
 for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
 
 # find one document by user name
+print('find a particular document by username, query = {"username": "user_2"}')
 user_info = tinyCollection.find_one({'username': 'user2'})
 print(user_info)
