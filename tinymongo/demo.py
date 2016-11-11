@@ -1,4 +1,5 @@
 import tinymongo as tm
+import os
 
 try:
     os.remove("tinydb/pacemain.json")
