@@ -1,7 +1,7 @@
 import tinymongo as tm
 import os
 
-db_name = 'demo_db'
+db_name = './demo_db'
 
 # remove the residual database to keep multiple iterations of this demo from continually adding to the same db
 try:
