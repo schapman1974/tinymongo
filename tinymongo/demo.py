@@ -24,7 +24,7 @@ tinyDatabase = tinyClient.tinyDatabase
 # either creates a new collection or accesses an existing one
 tinyCollection = tinyDatabase.tinyCollection
 
-# insert 10 records
+# insert records
 print('inserting records...')
 for i in range(5):
     recordId = tinyCollection.insert({"username": "user{}".format(i),
