@@ -2,18 +2,21 @@ import tinymongo as tm
 import os
 
 db_name = './demo_db'
+print('db directory: ', db_name)
 
 # remove the residual database to keep multiple iterations of this demo from continually adding to the same db
 try:
+    print('removing db files: {}'.format(os.listdir(os.path.join('.', db_name))))
     for f in os.listdir(os.path.join('.', db_name)):
         os.remove(os.path.join(db_name, f))
 except FileNotFoundError:
-    pass
+    print('no files found to remove')
 
 try:
-    os.rmdir('demo_db')
+    print('removing {}'.format(db_name))
+    os.rmdir(db_name)
 except FileNotFoundError:
-    pass
+    print('no directory found to remove')
 
 # you can include a folder name as a parameter if not it will default to "tinydb"
 tinyClient = tm.TinyMongoClient(db_name)
