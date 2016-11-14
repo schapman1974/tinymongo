@@ -1,9 +1,12 @@
 import os
+import logging
+import copy
+
 from tinydb import *
 from operator import itemgetter
-import operator
 from uuid import uuid1
-from bson.objectid import ObjectId
+
+logger = logging.getLogger(__name__)
 
 
 class TinyMongoClient(object):
@@ -11,7 +14,7 @@ class TinyMongoClient(object):
         self.foldername = foldername
         try:
             os.mkdir(foldername)
-        except:
+        except FileExistsError:
             pass
 
     def __getitem__(self, key):
@@ -34,88 +37,237 @@ class TinyMongoDatabase(object):
 
 
 class TinyMongoCollection(object):
+    """
+    This class represents a collection and all of the operations that are commonly performed on a collection
+    """
+
     def __init__(self, table, parent=None):
+        """
+        Initilialize the collection
+
+        :param table: the table name
+        :param parent: the parent db name
+        """
         self.tablename = table
         self.table = None
         self.parent = parent
-        self.query = Query()
-        self.insert_one = self.insert
-        self.insert_many = self.insert
-        self.update_one = self.update
-        self.update_many = self.update
 
     def __getattr__(self, name):
+        """
+
+        :param name:
+        :return:
+        """
         if self.table is None:
             self.tablename += "." + name
         return self
 
-    def buildTable(self):
+    def build_table(self):
+        """
+        Builds a new tinydb table at the parent database
+        :return:
+        """
         self.table = self.parent.tinydb.table(self.tablename)
 
-    def insert(self, data, **kwargs):
-        if self.table is None: self.buildTable()
-        if not type(data) is list: data = [data]
+    def insert_one(self, doc):
+        """
+        Inserts one document into the collection
+        :param doc: the document
+        :return: the ids of the documents that were inserted
+        """
+        if self.table is None:
+            self.build_table()
+
+        if not isinstance(doc, dict):
+            return 0
+
+        if not "_id" in doc:
+            theid = str(uuid1()).replace("-", "")
+            eid = theid
+            doc["_id"] = theid
+        else:
+            eid = doc["_id"]
+
+        self.table.insert(doc)
+
+        # todo: return the result object with 'inserted_id' property
+        return eid
+
+    def insert_many(self, docs):
+        """
+        Inserts several documents into the collection
+        :param docs: a list of documents
+        :return:
+        """
+        if self.table is None:
+            self.build_table()
+
+        if not isinstance(docs, list):
+            return []
+
         eids = []
-        for adat in data:
-            if not "_id" in adat:
-                theid = str(uuid1()).replace("-", "")
-                eids.append(theid)
-                adat["_id"] = theid
-            else:
-                eids.append(adat["_id"])
-            self.table.insert(adat)
-        if len(eids) == 1:
-            return eids[0]
+        for doc in docs:
+            eid = self.insert_one(doc)
+            eids.append(eid)
+
         return eids
 
-    def parseQuery(self, query):
-        if self.table is None: self.buildTable()
-        cnt = 0
-        allcond = None
-        for akey, avalue in query.items():
-            # set the operator
-            if type(avalue) == dict:
-                theop = operator.__dict__[avalue.keys()[0]]
-                avalue = avalue.values()[0]
-            elif "ObjectId" in str(type(avalue)):
-                theop = operator.eq
-                avalue = str(avalue)
-            # defalt to equals
-            else:
-                theop = operator.eq
+    def parse_query(self, query):
+        """
+        Creates a tinydb Query() object from the query dict
 
-            if cnt == 0:
-                allcond = (self.query[akey] == avalue)
-            else:
-                allcond = allcond & (theop(self.query[akey], avalue))
-            cnt += 1
-        return allcond
+        :param query: object containing the dictionary representation of the query
+        :return: composite Query()
+        """
+        logger.debug('query to parse2: {}'.format(query))
 
-    def update(self, query, data, argsdict={}, **kwargs):
-        if self.table is None: self.buildTable()
-        if "$set" in data: data = data["$set"]
-        allcond = self.parseQuery(query)
+        # this should find all records
+        if query == {}:
+            return (Query()._id != '-1')
+
+        q = None
+        # find the final result of the generator
+        for c in self.parse_condition(query):
+            q = c
+
+        logger.debug('new query item2: {}'.format(q))
+
+        return q
+
+    def parse_condition(self, query, prev_key=None):
+        """
+        Creates a recursive generator for parsing some types of Query() conditions
+
+        :param query: Query object
+        :param prev_key: The key at the next-higher level
+        :return: generator object, the last of which will be the complete Query() object containing all conditions
+        """
+        # use this to determine gt/lt/eq on prev_query
+        logger.debug('query: {} prev_query: {}'.format(query, prev_key))
+
+        q = Query()
+        conditions = None
+
+        # deal with the {'name': value} case by injecting a previous key
+        if not prev_key:
+            temp_query = copy.deepcopy(query)
+            k, v = temp_query.popitem()
+            prev_key = k
+
+        # deal with the conditions
+        for key, value in query.items():
+            logger.debug('conditions: {} {}'.format(key, value))
+
+            if key == '$gte':
+                conditions = (q[prev_key] >= value) if not conditions else (conditions & (q[prev_key] >= value))
+            elif key == '$gt':
+                conditions = (q[prev_key] > value) if not conditions else (conditions & (q[prev_key] > value))
+            elif key == '$lte':
+                conditions = (q[prev_key] <= value) if not conditions else (conditions & (q[prev_key] <= value))
+            elif key == '$lt':
+                conditions = (q[prev_key] < value) if not conditions else (conditions & (q[prev_key] < value))
+            else:
+                conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
+
+            logger.debug('c: {}'.format(conditions))
+            if isinstance(value, dict):
+                yield from self.parse_condition(value, key)
+            else:
+                yield conditions
+
+    def update_one(self, query, doc):
+        """
+        Updates one element of the collection
+
+        :param query: dictionary representing the mongo query
+        :param doc: dictionary representing the item to be updated
+        :return:
+        """
+        if self.table is None:
+            self.build_table()
+
+        if "$set" in doc:
+            doc = doc["$set"]
+
+        allcond = self.parse_query(query)
+
         try:
-            self.table.update(data, allcond)
+            self.table.update(doc, allcond)
         except:
+            # todo: exception too broad
             return False
+
+        # todo: return result with result.matched_count and result.modified_count
         return True
 
-    def find(self, query={}, fields={}):
-        if self.table is None: self.buildTable()
-        allcond = self.parseQuery(query)
-        if allcond is None: return TinyMongoCursor(self.table.all())
+    def find(self, query=None):
+        """
+        Finds all matching results
+
+        :param query: dictionary representing the mongo query
+        :return: cursor containing the search results
+        """
+        if self.table is None:
+            self.build_table()
+
+        allcond = self.parse_query(query)
+
+        if allcond is None:
+            return TinyMongoCursor(self.table.all())
+
         return TinyMongoCursor(self.table.search(allcond))
 
-    def find_one(self, query={}, fields={}):
-        if self.table is None: self.buildTable()
-        allcond = self.parseQuery(query)
-        if allcond is None: return self.table.get(eid=1)
+    def find_one(self, query=None):
+        """
+        Finds one matching query element
+
+        :param query: dictionary representing the mongo query
+        :return: the resulting document (if found)
+        """
+
+        if self.table is None:
+            self.build_table()
+
+        allcond = self.parse_query(query)
+
+        if allcond is None:
+            return self.table.get(eid=1)
+
         return self.table.get(allcond)
 
     def count(self):
-        if self.table is None: self.buildTable()
+        """
+        Returns the number of documents in a collection
+
+        :return: The number of documents in a collection
+        """
+        if self.table is None:
+            self.build_table()
+
         return len(self.table)
+
+    def delete_one(self, query):
+        """
+        Deletes one document from the collection
+
+        :param query: dictionary representing the mongo query
+        :return: None
+        """
+        item = self.find_one(query)
+        self.table.remove(where('_id') == item['_id'])
+
+        return None
+
+    def delete_many(self, query):
+        """
+        Removes all items matching the mongo query
+
+        :param query: dictionary representing the mongo query
+        :return:
+        """
+        items = self.find(query)
+        for item in items:
+            self.table.remove(where('_id') == item['_id'])
 
 
 class TinyMongoCursor(object):

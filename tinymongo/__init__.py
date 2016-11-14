@@ -1,1 +1,1 @@
-
+from tinymongo.tinymongo import *
