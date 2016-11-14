@@ -142,8 +142,11 @@ class TinyMongoCollection(object):
             else:
                 conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
 
-        logger.debug('c: {}'.format(conditions))
-        return conditions
+            logger.debug('c: {}'.format(conditions))
+            if isinstance(value, dict):
+                yield from (self.parse_condition(value), key, conditions)
+            else:
+                yield conditions
 
     def update(self, query, data, argsdict={}, **kwargs):
         if self.table is None:
