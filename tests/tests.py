@@ -65,6 +65,14 @@ def test_initialize_db(collection):
     assert count == 100
 
 
+def test_find_one(collection):
+    c = collection.find_one({'count': 3})
+
+    print(c)
+
+    assert c['countStr'] == '3'
+
+
 def test_delete_one(collection):
     collection.delete_one({'count': 3})
 
