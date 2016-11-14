@@ -113,7 +113,7 @@ class TinyMongoCollection(object):
                 for k, v in value.items():
                     logger.debug('k: {} v: {}'.format(k, v))
                     if k in ['$gte', '$gt', '$lte', 'lt']:
-                        cond = self.parse_numeric_condition(value, key)
+                        cond = self.parse_condition(value, key)
                         logger.debug('cond: {}'.format(cond))
                         c.append(cond)
 
@@ -122,29 +122,28 @@ class TinyMongoCollection(object):
 
         return q
 
-    def parse_numeric_condition(self, query, prev_key):
+    def parse_condition(self, query, prev_key=None, conditions=None):
         # use this to determine gt/lt/eq on prev_query
         logger.debug('query: {} prev_query: {}'.format(query, prev_key))
 
         q = Query()
-        c = None
 
         for key, value in query.items():
             logger.debug('conditions: {} {}'.format(key, value))
 
             if key == '$gte':
-                c = (q[prev_key] >= value) if not c else (c & (q[prev_key] >= value))
+                conditions = (q[prev_key] >= value) if not conditions else (conditions & (q[prev_key] >= value))
             elif key == '$gt':
-                c = (q[prev_key] > value) if not c else (c & (q[prev_key] > value))
+                conditions = (q[prev_key] > value) if not conditions else (conditions & (q[prev_key] > value))
             elif key == '$lte':
-                c = (q[prev_key] <= value) if not c else (c & (q[prev_key] <= value))
+                conditions = (q[prev_key] <= value) if not conditions else (conditions & (q[prev_key] <= value))
             elif key == '$lt':
-                c = (q[prev_key] < value) if not c else (c & (q[prev_key] < value))
+                conditions = (q[prev_key] < value) if not conditions else (conditions & (q[prev_key] < value))
             else:
-                c = (q[prev_key] == value) if not c else (c & (q[prev_key] == value))
+                conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
 
-        logger.debug('c: {}'.format(c))
-        return c
+        logger.debug('c: {}'.format(conditions))
+        return conditions
 
     def update(self, query, data, argsdict={}, **kwargs):
         if self.table is None:

@@ -46,8 +46,7 @@ tinyCollection.query = tm.Query()
 #    logger.debug('condition found: {}'.format(condition))
 q = {'user_number': {'$gte': 3, '$lte': 10}}
 
-c = tinyCollection.parseQuery2(q)
-condition2 = tinyCollection.parse_numeric_condition({'$gte': 3, '$lte': 6}, 'user_number')
+condition2 = tinyCollection.parse_condition({'$gte': 3, '$lte': 6}, 'user_number')
 print(condition2)
 
 #tinyCollection.query = tm.Query()
