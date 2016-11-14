@@ -3,7 +3,7 @@ import os
 import logging
 
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 db_name = './demo_db'
 print('db directory: ', db_name)
@@ -45,11 +45,11 @@ cursor = tinyCollection.find({})
 for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
 
+# removing one element
+tinyCollection.delete_one({'username': 'user1'})
+
 # update data returns boolean if successful
-if tinyCollection.update_one({"username": "user0"}, {"$set": {"module": "someothermodule"}}):
-    print('db updated!')
-else:
-    print('db not updated')
+tinyCollection.update_one({"username": "user0"}, {"$set": {"module": "someothermodule"}})
 
 # print the updated results
 print('finding all documents in the collection to show the updates')
@@ -57,11 +57,11 @@ cursor = tinyCollection.find({})
 for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
 
-# print where the number is greater than 3
-#print('finding all documents in the collection where the number is greater than 3')
-#cursor = tinyCollection.find({'user_number': {'$gt': 3}})
-#for c in cursor:
-#    print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
+# print where the number is >= 3
+print('finding all documents in the collection where the number >= 3')
+cursor = tinyCollection.find({'user_number': {'$gte': 3}})
+for c in cursor:
+    print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
 
 
 # find one document by user name
