@@ -25,9 +25,9 @@ tiny_collection = tiny_database.tinyCollection
 @pytest.fixture()
 def collection(request):
     # setup the db, clear if necessary
-    cursor = tiny_collection.find({})
-    for item in cursor:
-        item.remove()
+    # todo: the 'delete_many()' and 'drop()' function from pymongo should work in future revisions
+    #tiny_collection.delete_one({})
+    #tiny_collection.delete_many({})    # should delete all records in the collection
 
     # insert 100 integers, strings, floats, booleans, arrays, and objects
     for num in range(100):
@@ -63,4 +63,15 @@ def test_initialize_db(collection):
         count += 1
 
     assert count == 100
-    
+
+
+def test_delete_one(collection):
+    collection.delete_one({'count': 3})
+
+    c = collection.find({})
+
+    count = 0
+    for document in c:
+        count += 1
+
+    assert count == 99
