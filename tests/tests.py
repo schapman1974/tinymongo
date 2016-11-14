@@ -98,7 +98,7 @@ def test_update_one_set(collection):
     :return:
     """
     cu = collection.update_one({'count': 3}, {'$set': {'countStr': 'three'}})
-    assert cu == True
+    assert cu is True
 
     c = collection.find_one({'count': 3})
     assert c['countStr'] == 'three'
@@ -130,3 +130,18 @@ def test_delete_all(collection):
     c = collection.find({})
 
     assert c.count() == 0
+
+
+def test_insert_one(collection):
+    """
+    Testing the 'insert_one' method
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    collection.insert_one({'my_object_name': 'my object value', 'count': 1000})
+
+    c = collection.find({})
+
+    assert c.count() == 101
+    assert collection.find({'my_object_name': 'my object value'})['count'] == 1000
+    
