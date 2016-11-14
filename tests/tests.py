@@ -144,4 +144,21 @@ def test_insert_one(collection):
 
     assert c.count() == 101
     assert collection.find({'my_object_name': 'my object value'})['count'] == 1000
-    
+
+
+def test_insert_many(collection):
+    """
+    Testing the 'insert_many' method
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    items = []
+    for i in range(10):
+        value = 1000 + i
+        items.append({'count': value, 'countStr': str(value)})
+
+    collection.insert_many(items)
+
+    c = collection.find({})
+
+    assert c.count() == 110

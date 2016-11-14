@@ -53,10 +53,6 @@ class TinyMongoCollection(object):
         self.tablename = table
         self.table = None
         self.parent = parent
-        self.insert_one = self.insert_one
-        self.insert_many = self.insert_one
-        self.update_one = self.update_one
-        self.update_many = self.update_one
 
     def __getattr__(self, name):
         """
@@ -75,49 +71,46 @@ class TinyMongoCollection(object):
         """
         self.table = self.parent.tinydb.table(self.tablename)
 
-    def insert_one(self, data):
+    def insert_one(self, doc):
         """
         Inserts one document into the collection
-        :param data: the document
+        :param doc: the document
         :return: the ids of the documents that were inserted
         """
         if self.table is None:
             self.build_table()
 
-        if not isinstance(data, dict):
+        if not isinstance(doc, dict):
             return 0
 
-        eid = None
-        if not "_id" in data:
+        if not "_id" in doc:
             theid = str(uuid1()).replace("-", "")
             eid = theid
-            data["_id"] = theid
+            doc["_id"] = theid
         else:
-            eid = data["_id"]
-        self.table.insert(data)
+            eid = doc["_id"]
+
+        self.table.insert(doc)
 
         # todo: return the result object with 'inserted_id' property
         return eid
 
     def insert_many(self, docs):
+        """
+        Inserts several documents into the collection
+        :param docs: a list of documents
+        :return:
+        """
         if self.table is None:
             self.build_table()
 
         if not isinstance(docs, list):
-            data = [docs]
+            return []
 
         eids = []
-        for adat in docs:
-            if not "_id" in adat:
-                theid = str(uuid1()).replace("-", "")
-                eids.append(theid)
-                adat["_id"] = theid
-            else:
-                eids.append(adat["_id"])
-            self.table.insert(adat)
-
-        if len(eids) == 1:
-            return eids[0]
+        for doc in docs:
+            eid = self.insert_one(doc)
+            eids.append(eid)
 
         return eids
 
