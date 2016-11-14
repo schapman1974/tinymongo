@@ -29,8 +29,17 @@ def collection(request):
     for item in cursor:
         item.remove()
 
+    # insert 100 integers, strings, floats, booleans, arrays, and objects
     for num in range(100):
-        tiny_collection.insert({'count'.format(num): num})
+        new_obj = {}
+        new_obj['count'] = num
+        new_obj['countStr'] = str(num)
+        new_obj['countFloat'] = float(num) + 0.1
+        new_obj['countBool'] = True if num & 1 else False
+        new_obj['countArray'] = [num + i for i in range(5)]
+        # todo: add object to the db
+
+        tiny_collection.insert(new_obj)
 
     def fin():
         tiny_client.close()
@@ -41,6 +50,12 @@ def collection(request):
 
 
 def test_initialize_db(collection):
+    """
+    Ensure that the initial db is of the correct size
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
     c = collection.find({})
 
     count = 0
@@ -48,5 +63,4 @@ def test_initialize_db(collection):
         count += 1
 
     assert count == 100
-
-
+    
