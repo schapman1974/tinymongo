@@ -44,12 +44,14 @@ tinyCollection.query = tm.Query()
 #conditions2 = tinyCollection.parseQuery2(q)
 #for condition in conditions2:
 #    logger.debug('condition found: {}'.format(condition))
+
+
 q = {'user_number': {'$gte': 3, '$lte': 10}}
+#q = {'user_number': 3}
 
 #condition2 = tinyCollection.parse_condition({'$gte': 3, '$lte': 6}, 'user_number')
-condition2 = tinyCollection.parse_condition(q)
-for c in condition2:
-    print(c)
+condition2 = tinyCollection.parseQuery2(q)
+print('condition2: ', condition2)
 
 #tinyCollection.query = tm.Query()
 #conditions = tinyCollection.parseQuery(q)

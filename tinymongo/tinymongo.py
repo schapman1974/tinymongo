@@ -1,5 +1,6 @@
 import os
 import logging
+import copy
 
 from tinydb import *
 from operator import itemgetter
@@ -104,21 +105,11 @@ class TinyMongoCollection(object):
     def parseQuery2(self, query):
         logger.debug('query to parse2: {}'.format(query))
 
-        q = Query()
-        c = []
+        q = None
+        for c in self.parse_condition(query):
+            q = c
 
-        for key, value in query.items():
-            if isinstance(value, dict):
-                logger.debug('the value {} is a dict'.format(value))
-                for k, v in value.items():
-                    logger.debug('k: {} v: {}'.format(k, v))
-                    if k in ['$gte', '$gt', '$lte', 'lt']:
-                        cond = self.parse_condition(value, key)
-                        logger.debug('cond: {}'.format(cond))
-                        c.append(cond)
-
-
-        logger.debug('new query item: {}, {}'.format(q, c))
+        logger.debug('new query item2: {}'.format(q))
 
         return q
 
@@ -127,6 +118,10 @@ class TinyMongoCollection(object):
         logger.debug('query: {} prev_query: {}'.format(query, prev_key))
 
         q = Query()
+        if not prev_key:
+            temp_query = copy.deepcopy(query)
+            k, v = temp_query.popitem()
+            prev_key = k
 
         for key, value in query.items():
             logger.debug('conditions: {} {}'.format(key, value))
