@@ -75,9 +75,6 @@ def test_greater_than(collection):
     """
     c = collection.find({'count': {'$gte': 50}})
 
-    for doc in c:
-        print(doc)
-
     assert c.count() == 50
 
 
@@ -104,8 +101,18 @@ def test_delete_one(collection):
 
     c = collection.find({})
 
-    count = 0
-    for document in c:
-        count += 1
+    assert c.count() == 99
 
-    assert count == 99
+
+def test_delete_all(collection):
+    """
+    Testing the 'delete_many' method to remove all
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    collection.delete_many({})
+
+    c = collection.find({})
+
+    assert c.count() == 0
