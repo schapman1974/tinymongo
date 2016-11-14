@@ -66,13 +66,37 @@ def test_initialize_db(collection):
     assert c.count() == 100
 
 
+def test_greater_than(collection):
+    """
+    Testing the greater than operator
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({'count': {'$gt': 50}})
+
+    assert c.count() == 50
+
+
 def test_find_one(collection):
+    """
+    Testing the retrieval of an item using the 'find_one' method
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
     c = collection.find_one({'count': 3})
 
     assert c['countStr'] == '3'
 
 
 def test_delete_one(collection):
+    """
+    Testing the 'delete_one' method
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
     collection.delete_one({'count': 3})
 
     c = collection.find({})
