@@ -11,7 +11,7 @@ class TinyMongoClient(object):
         self.foldername = foldername
         try:
             os.mkdir(foldername)
-        except:
+        except FileExistsError:
             pass
 
     def __getitem__(self, key):
@@ -69,7 +69,9 @@ class TinyMongoCollection(object):
         return eids
 
     def parseQuery(self, query):
-        if self.table is None: self.buildTable()
+        if self.table is None:
+            self.buildTable()
+
         cnt = 0
         allcond = None
         for akey, avalue in query.items():
@@ -92,29 +94,48 @@ class TinyMongoCollection(object):
         return allcond
 
     def update(self, query, data, argsdict={}, **kwargs):
-        if self.table is None: self.buildTable()
-        if "$set" in data: data = data["$set"]
+        if self.table is None:
+            self.buildTable()
+
+        if "$set" in data:
+            data = data["$set"]
+
         allcond = self.parseQuery(query)
+
         try:
             self.table.update(data, allcond)
         except:
+            # todo: exception too broad
             return False
+
         return True
 
-    def find(self, query={}, fields={}):
-        if self.table is None: self.buildTable()
+    def find(self, query=None):
+        if self.table is None:
+            self.buildTable()
+
         allcond = self.parseQuery(query)
-        if allcond is None: return TinyMongoCursor(self.table.all())
+
+        if allcond is None:
+            return TinyMongoCursor(self.table.all())
+
         return TinyMongoCursor(self.table.search(allcond))
 
-    def find_one(self, query={}, fields={}):
-        if self.table is None: self.buildTable()
+    def find_one(self, query=None):
+        if self.table is None:
+            self.buildTable()
+
         allcond = self.parseQuery(query)
-        if allcond is None: return self.table.get(eid=1)
+
+        if allcond is None:
+            return self.table.get(eid=1)
+
         return self.table.get(allcond)
 
     def count(self):
-        if self.table is None: self.buildTable()
+        if self.table is None:
+            self.buildTable()
+
         return len(self.table)
 
 
