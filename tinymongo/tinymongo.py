@@ -115,6 +115,12 @@ class TinyMongoCollection(object):
         return eids
 
     def parse_query(self, query):
+        """
+        Creates a tinydb Query() object from the query dict
+
+        :param query: object containing the dictionary representation of the query
+        :return: composite Query()
+        """
         logger.debug('query to parse2: {}'.format(query))
 
         # this should find all records
@@ -130,11 +136,19 @@ class TinyMongoCollection(object):
 
         return q
 
-    def parse_condition(self, query, prev_key=None, conditions=None):
+    def parse_condition(self, query, prev_key=None):
+        """
+        Creates a recursive generator for parsing some types of Query() conditions
+
+        :param query: Query object
+        :param prev_key: The key at the next-higher level
+        :return: generator object, the last of which will be the complete Query() object containing all conditions
+        """
         # use this to determine gt/lt/eq on prev_query
         logger.debug('query: {} prev_query: {}'.format(query, prev_key))
 
         q = Query()
+        conditions = None
 
         # deal with the {'name': value} case by injecting a previous key
         if not prev_key:
@@ -163,17 +177,24 @@ class TinyMongoCollection(object):
             else:
                 yield conditions
 
-    def update_one(self, query, data, argsdict={}, **kwargs):
+    def update_one(self, query, doc):
+        """
+        Updates one element of the collection
+
+        :param query: dictionary representing the mongo query
+        :param doc: dictionary representing the item to be updated
+        :return:
+        """
         if self.table is None:
             self.build_table()
 
-        if "$set" in data:
-            data = data["$set"]
+        if "$set" in doc:
+            doc = doc["$set"]
 
         allcond = self.parse_query(query)
 
         try:
-            self.table.update(data, allcond)
+            self.table.update(doc, allcond)
         except:
             # todo: exception too broad
             return False
@@ -182,6 +203,12 @@ class TinyMongoCollection(object):
         return True
 
     def find(self, query=None):
+        """
+        Finds all matching results
+
+        :param query: dictionary representing the mongo query
+        :return: cursor containing the search results
+        """
         if self.table is None:
             self.build_table()
 
@@ -193,6 +220,13 @@ class TinyMongoCollection(object):
         return TinyMongoCursor(self.table.search(allcond))
 
     def find_one(self, query=None):
+        """
+        Finds one matching query element
+
+        :param query: dictionary representing the mongo query
+        :return: the resulting document (if found)
+        """
+
         if self.table is None:
             self.build_table()
 
@@ -204,18 +238,35 @@ class TinyMongoCollection(object):
         return self.table.get(allcond)
 
     def count(self):
+        """
+        Returns the number of documents in a collection
+
+        :return: The number of documents in a collection
+        """
         if self.table is None:
             self.build_table()
 
         return len(self.table)
 
     def delete_one(self, query):
+        """
+        Deletes one document from the collection
+
+        :param query: dictionary representing the mongo query
+        :return: None
+        """
         item = self.find_one(query)
         self.table.remove(where('_id') == item['_id'])
 
         return None
 
     def delete_many(self, query):
+        """
+        Removes all items matching the mongo query
+
+        :param query: dictionary representing the mongo query
+        :return:
+        """
         items = self.find(query)
         for item in items:
             self.table.remove(where('_id') == item['_id'])

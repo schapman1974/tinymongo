@@ -132,6 +132,20 @@ def test_delete_all(collection):
     assert c.count() == 0
 
 
+def test_delete_many(collection):
+    """
+    Testing the 'delete_many' method to remove some items
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    collection.delete_many({'count': {'$gte': 50}})
+
+    c = collection.find({})
+
+    assert c.count() == 50
+
+
 def test_insert_one(collection):
     """
     Testing the 'insert_one' method
