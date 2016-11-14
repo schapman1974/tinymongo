@@ -53,28 +53,61 @@ class TinyMongoCollection(object):
         self.tablename = table
         self.table = None
         self.parent = parent
-        self.insert_one = self.insert
-        self.insert_many = self.insert
+        self.insert_one = self.insert_one
+        self.insert_many = self.insert_one
         self.update_one = self.update_one
         self.update_many = self.update_one
 
     def __getattr__(self, name):
+        """
+
+        :param name:
+        :return:
+        """
         if self.table is None:
             self.tablename += "." + name
         return self
 
     def build_table(self):
+        """
+        Builds a new tinydb table at the parent database
+        :return:
+        """
         self.table = self.parent.tinydb.table(self.tablename)
 
-    def insert(self, data, **kwargs):
+    def insert_one(self, data):
+        """
+        Inserts one document into the collection
+        :param data: the document
+        :return: the ids of the documents that were inserted
+        """
         if self.table is None:
             self.build_table()
 
-        if not isinstance(data, list):
-            data = [data]
+        if not isinstance(data, dict):
+            return 0
+
+        eid = None
+        if not "_id" in data:
+            theid = str(uuid1()).replace("-", "")
+            eid = theid
+            data["_id"] = theid
+        else:
+            eid = data["_id"]
+        self.table.insert(data)
+
+        # todo: return the result object with 'inserted_id' property
+        return eid
+
+    def insert_many(self, docs):
+        if self.table is None:
+            self.build_table()
+
+        if not isinstance(docs, list):
+            data = [docs]
 
         eids = []
-        for adat in data:
+        for adat in docs:
             if not "_id" in adat:
                 theid = str(uuid1()).replace("-", "")
                 eids.append(theid)

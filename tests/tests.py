@@ -39,7 +39,7 @@ def collection(request):
         new_obj['countArray'] = [num + i for i in range(5)]
         # todo: add object to the db
 
-        tiny_collection.insert(new_obj)
+        tiny_collection.insert_one(new_obj)
 
     def fin():
         tiny_client.close()

@@ -34,7 +34,7 @@ tinyCollection = tinyDatabase.tinyCollection
 # insert records
 print('inserting records...')
 for i in range(5):
-    recordId = tinyCollection.insert({"username": "user{}".format(i),
+    recordId = tinyCollection.insert_one({"username": "user{}".format(i),
                                       "user_number": i,
                                       "password": "admin{}".format(i),
                                       "module": "somemodule"})
