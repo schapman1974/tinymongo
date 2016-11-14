@@ -39,27 +39,40 @@ class TinyMongoDatabase(object):
 
 
 class TinyMongoCollection(object):
+    """
+    This class represents a collection and all of the operations that are commonly performed on a collection
+    """
+
     def __init__(self, table, parent=None):
+        """
+        Initilialize the collection
+
+        :param table: the table name
+        :param parent: the parent db name
+        """
         self.tablename = table
         self.table = None
         self.parent = parent
-        self.query = Query()
         self.insert_one = self.insert
         self.insert_many = self.insert
-        self.update_one = self.update
-        self.update_many = self.update
+        self.update_one = self.update_one
+        self.update_many = self.update_one
 
     def __getattr__(self, name):
         if self.table is None:
             self.tablename += "." + name
         return self
 
-    def buildTable(self):
+    def build_table(self):
         self.table = self.parent.tinydb.table(self.tablename)
 
     def insert(self, data, **kwargs):
-        if self.table is None: self.buildTable()
-        if not type(data) is list: data = [data]
+        if self.table is None:
+            self.build_table()
+
+        if not isinstance(data, list):
+            data = [data]
+
         eids = []
         for adat in data:
             if not "_id" in adat:
@@ -69,40 +82,13 @@ class TinyMongoCollection(object):
             else:
                 eids.append(adat["_id"])
             self.table.insert(adat)
+
         if len(eids) == 1:
             return eids[0]
+
         return eids
 
-    def parseQuery(self, query):
-        logger.debug('query to parse: {}'.format(query))
-
-        if self.table is None:
-            self.buildTable()
-
-        cnt = 0
-        allcond = None
-        for akey, avalue in query.items():
-            # set the operator
-            if type(avalue) == dict:
-                theop = operator.__dict__[avalue.keys()[0]]
-                avalue = avalue.values()[0]
-            elif "ObjectId" in str(type(avalue)):
-                theop = operator.eq
-                avalue = str(avalue)
-            # defalt to equals
-            else:
-                theop = operator.eq
-
-            if cnt == 0:
-                allcond = (self.query[akey] == avalue)
-            else:
-                allcond = allcond & (theop(self.query[akey], avalue))
-            cnt += 1
-
-        logger.debug('all conditions from parsed query: {}'.format(allcond))
-        return allcond
-
-    def parseQuery2(self, query):
+    def parse_query(self, query):
         logger.debug('query to parse2: {}'.format(query))
 
         # this should find all records
@@ -151,28 +137,29 @@ class TinyMongoCollection(object):
             else:
                 yield conditions
 
-    def update(self, query, data, argsdict={}, **kwargs):
+    def update_one(self, query, data, argsdict={}, **kwargs):
         if self.table is None:
-            self.buildTable()
+            self.build_table()
 
         if "$set" in data:
             data = data["$set"]
 
-        allcond = self.parseQuery2(query)
+        allcond = self.parse_query(query)
 
         try:
-            self.table.update(data, allcond)
+            self.table.update_one(data, allcond)
         except:
             # todo: exception too broad
             return False
 
+        # todo: return result with result.matched_count and result.modified_count
         return True
 
     def find(self, query=None):
         if self.table is None:
-            self.buildTable()
+            self.build_table()
 
-        allcond = self.parseQuery2(query)
+        allcond = self.parse_query(query)
 
         if allcond is None:
             return TinyMongoCursor(self.table.all())
@@ -181,9 +168,9 @@ class TinyMongoCollection(object):
 
     def find_one(self, query=None):
         if self.table is None:
-            self.buildTable()
+            self.build_table()
 
-        allcond = self.parseQuery2(query)
+        allcond = self.parse_query(query)
 
         if allcond is None:
             return self.table.get(eid=1)
@@ -192,7 +179,7 @@ class TinyMongoCollection(object):
 
     def count(self):
         if self.table is None:
-            self.buildTable()
+            self.build_table()
 
         return len(self.table)
 
@@ -206,6 +193,7 @@ class TinyMongoCollection(object):
         items = self.find(query)
         for item in items:
             self.table.remove(where('_id') == item['_id'])
+
 
 class TinyMongoCursor(object):
     def __init__(self, cursordat):

@@ -90,6 +90,20 @@ def test_find_one(collection):
     assert c['countStr'] == '3'
 
 
+def test_update_one_set(collection):
+    """
+    Testing the update_one method of the collection
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    cu = collection.update_one({'count': 3}, {'$set': {'countStr': 'three'}})
+    assert cu == True
+
+    c = collection.find_one({'count': 3})
+    assert c['countStr'] == 'three'
+
+
 def test_delete_one(collection):
     """
     Testing the 'delete_one' method

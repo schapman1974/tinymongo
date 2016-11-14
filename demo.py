@@ -46,7 +46,7 @@ for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
 
 # update data returns boolean if successful
-if tinyCollection.update({"username": "user0"}, {"$set": {"module": "someothermodule"}}):
+if tinyCollection.update_one({"username": "user0"}, {"$set": {"module": "someothermodule"}}):
     print('db updated!')
 else:
     print('db not updated')
