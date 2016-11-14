@@ -105,7 +105,12 @@ class TinyMongoCollection(object):
     def parseQuery2(self, query):
         logger.debug('query to parse2: {}'.format(query))
 
+        # this should find all records
+        if query == {}:
+            return (Query()._id != '-1')
+
         q = None
+        # find the final result of the generator
         for c in self.parse_condition(query):
             q = c
 
@@ -118,11 +123,14 @@ class TinyMongoCollection(object):
         logger.debug('query: {} prev_query: {}'.format(query, prev_key))
 
         q = Query()
+
+        # deal with the {'name': value} case by injecting a previous key
         if not prev_key:
             temp_query = copy.deepcopy(query)
             k, v = temp_query.popitem()
             prev_key = k
 
+        # deal with the conditions
         for key, value in query.items():
             logger.debug('conditions: {} {}'.format(key, value))
 
@@ -139,7 +147,7 @@ class TinyMongoCollection(object):
 
             logger.debug('c: {}'.format(conditions))
             if isinstance(value, dict):
-                yield from (self.parse_condition(value, key))
+                yield from self.parse_condition(value, key)
             else:
                 yield conditions
 
@@ -150,7 +158,7 @@ class TinyMongoCollection(object):
         if "$set" in data:
             data = data["$set"]
 
-        allcond = self.parseQuery(query)
+        allcond = self.parseQuery2(query)
 
         try:
             self.table.update(data, allcond)
@@ -164,7 +172,7 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.buildTable()
 
-        allcond = self.parseQuery(query)
+        allcond = self.parseQuery2(query)
 
         if allcond is None:
             return TinyMongoCursor(self.table.all())
@@ -175,7 +183,7 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.buildTable()
 
-        allcond = self.parseQuery(query)
+        allcond = self.parseQuery2(query)
 
         if allcond is None:
             return self.table.get(eid=1)
@@ -188,6 +196,16 @@ class TinyMongoCollection(object):
 
         return len(self.table)
 
+    def delete_one(self, query):
+        item = self.find_one(query)
+        self.table.remove(where('_id') == item['_id'])
+
+        return None
+
+    def delete_many(self, query):
+        items = self.find(query)
+        for item in items:
+            self.table.remove(where('_id') == item['_id'])
 
 class TinyMongoCursor(object):
     def __init__(self, cursordat):

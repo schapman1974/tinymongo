@@ -27,7 +27,7 @@ def collection(request):
     # setup the db, clear if necessary
     # todo: the 'delete_many()' and 'drop()' function from pymongo should work in future revisions
     #tiny_collection.delete_one({})
-    #tiny_collection.delete_many({})    # should delete all records in the collection
+    tiny_collection.delete_many({})    # should delete all records in the collection
 
     # insert 100 integers, strings, floats, booleans, arrays, and objects
     for num in range(100):
@@ -73,7 +73,10 @@ def test_greater_than(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'count': {'$gt': 50}})
+    c = collection.find({'count': {'$gte': 50}})
+
+    for doc in c:
+        print(doc)
 
     assert c.count() == 50
 

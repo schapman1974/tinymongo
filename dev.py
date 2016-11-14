@@ -45,16 +45,18 @@ tinyCollection.query = tm.Query()
 #for condition in conditions2:
 #    logger.debug('condition found: {}'.format(condition))
 
-
-q = {'user_number': {'$gte': 3, '$lte': 10}}
+#q = {}
+#q = {'user_number': {'$gte': 3, '$lte': 10}}
 #q = {'user_number': 3}
+#q = {'$and': [{'user_number': 3}, {'user_number': 4}]}
 
 #condition2 = tinyCollection.parse_condition({'$gte': 3, '$lte': 6}, 'user_number')
-condition2 = tinyCollection.parseQuery2(q)
-print('condition2: ', condition2)
+#condition2 = tinyCollection.parseQuery2(q)
+#print('condition2: ', condition2)
 
 #tinyCollection.query = tm.Query()
 #conditions = tinyCollection.parseQuery(q)
 #logger.debug('condition found: {}'.format(conditions))
 
-
+item = tinyCollection.find_one({})
+print(item['_id'])
