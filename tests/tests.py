@@ -68,8 +68,6 @@ def test_initialize_db(collection):
 def test_find_one(collection):
     c = collection.find_one({'count': 3})
 
-    print(c)
-
     assert c['countStr'] == '3'
 
 
