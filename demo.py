@@ -1,5 +1,9 @@
 import tinymongo as tm
 import os
+import logging
+
+
+logging.basicConfig(level=logging.DEBUG)
 
 db_name = './demo_db'
 print('db directory: ', db_name)
@@ -31,6 +35,7 @@ tinyCollection = tinyDatabase.tinyCollection
 print('inserting records...')
 for i in range(5):
     recordId = tinyCollection.insert({"username": "user{}".format(i),
+                                      "user_number": i,
                                       "password": "admin{}".format(i),
                                       "module": "somemodule"})
 
@@ -51,6 +56,13 @@ print('finding all documents in the collection to show the updates')
 cursor = tinyCollection.find({})
 for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
+
+# print where the number is greater than 3
+#print('finding all documents in the collection where the number is greater than 3')
+#cursor = tinyCollection.find({'user_number': {'$gt': 3}})
+#for c in cursor:
+#    print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
+
 
 # find one document by user name
 print('find a particular document by username, query = {"username": "user_2"}')

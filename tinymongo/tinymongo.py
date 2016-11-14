@@ -105,9 +105,20 @@ class TinyMongoCollection(object):
         logger.debug('query to parse2: {}'.format(query))
 
         q = Query()
-        c = None
+        c = []
+
+        for key, value in query.items():
+            if isinstance(value, dict):
+                logger.debug('the value {} is a dict'.format(value))
+                for k, v in value.items():
+                    logger.debug('k: {} v: {}'.format(k, v))
+                    if k in ['$gte', '$gt', '$lte', 'lt']:
+                        cond = self.parse_numeric_condition(value, key)
+                        logger.debug('cond: {}'.format(cond))
+                        c.append(cond)
 
 
+        logger.debug('new query item: {}, {}'.format(q, c))
 
         return q
 
