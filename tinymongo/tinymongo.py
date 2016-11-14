@@ -144,7 +144,7 @@ class TinyMongoCollection(object):
 
             logger.debug('c: {}'.format(conditions))
             if isinstance(value, dict):
-                yield from (self.parse_condition(value), key, conditions)
+                yield from (self.parse_condition(value, key))
             else:
                 yield conditions
 
