@@ -5,7 +5,7 @@ requirements = ['tinydb', 'pymongo']
 setup(
     name='tinymongo',
     packages=find_packages(),
-    version='0.1.1dev',
+    version='0.1.2dev0',
     description='A flat file drop in replacement for mongodb.  Requires Tinydb, pymongo',
     author='Stephen Chapman',
     author_email='schapman1974@gmail.com',
