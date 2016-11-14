@@ -1,9 +1,13 @@
 import os
+import logging
+
 from tinydb import *
 from operator import itemgetter
 import operator
 from uuid import uuid1
 from bson.objectid import ObjectId
+
+logger = logging.getLogger(__name__)
 
 
 class TinyMongoClient(object):
@@ -69,6 +73,8 @@ class TinyMongoCollection(object):
         return eids
 
     def parseQuery(self, query):
+        logger.debug('query to parse: {}'.format(query))
+
         if self.table is None:
             self.buildTable()
 
@@ -91,7 +97,43 @@ class TinyMongoCollection(object):
             else:
                 allcond = allcond & (theop(self.query[akey], avalue))
             cnt += 1
+
+        logger.debug('all conditions from parsed query: {}'.format(allcond))
         return allcond
+
+    def parseQuery2(self, query):
+        logger.debug('query to parse2: {}'.format(query))
+
+        q = Query()
+        c = None
+
+
+
+        return q
+
+    def parse_numeric_condition(self, query, prev_key):
+        # use this to determine gt/lt/eq on prev_query
+        logger.debug('query: {} prev_query: {}'.format(query, prev_key))
+
+        q = Query()
+        c = None
+
+        for key, value in query.items():
+            logger.debug('conditions: {} {}'.format(key, value))
+
+            if key == '$gte':
+                c = (q[prev_key] >= value) if not c else (c & (q[prev_key] >= value))
+            elif key == '$gt':
+                c = (q[prev_key] > value) if not c else (c & (q[prev_key] > value))
+            elif key == '$lte':
+                c = (q[prev_key] <= value) if not c else (c & (q[prev_key] <= value))
+            elif key == '$lt':
+                c = (q[prev_key] < value) if not c else (c & (q[prev_key] < value))
+            else:
+                c = (q[prev_key] == value) if not c else (c & (q[prev_key] == value))
+
+        logger.debug('c: {}'.format(c))
+        return c
 
     def update(self, query, data, argsdict={}, **kwargs):
         if self.table is None:
