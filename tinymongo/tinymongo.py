@@ -147,7 +147,7 @@ class TinyMongoCollection(object):
         allcond = self.parse_query(query)
 
         try:
-            self.table.update_one(data, allcond)
+            self.table.update(data, allcond)
         except:
             # todo: exception too broad
             return False
