@@ -67,4 +67,4 @@ for c in cursor:
 # find one document by user name
 print('find a particular document by username, query = {"username": "user_2"}')
 user_info = tinyCollection.find_one({'username': 'user2'})
-print(user_info)
+print('\t{}'.format(user_info))
