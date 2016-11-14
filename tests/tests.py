@@ -63,6 +63,7 @@ def test_initialize_db(collection):
         count += 1
 
     assert count == 100
+    assert c.count() == 100
 
 
 def test_find_one(collection):
