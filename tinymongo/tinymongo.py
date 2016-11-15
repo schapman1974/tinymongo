@@ -166,6 +166,8 @@ class TinyMongoCollection(object):
                 conditions = (q[prev_key] <= value) if not conditions else (conditions & (q[prev_key] <= value))
             elif key == '$lt':
                 conditions = (q[prev_key] < value) if not conditions else (conditions & (q[prev_key] < value))
+            elif key == '$ne':
+                conditions = (q[prev_key] != value) if not conditions else (conditions & (q[prev_key] != value))
             else:
                 conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
 
