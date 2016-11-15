@@ -90,6 +90,41 @@ def test_find_one(collection):
     assert c['countStr'] == '3'
 
 
+def test_gte_lt(collection):
+    """
+    Testing the >= and < queries
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({'count': {'$gte': 50, '$lt': 51}})
+    assert c.count() == 1
+    assert c[0]['countStr'] == '50'
+
+
+def test_gt_lte(collection):
+    """
+    Testing the < and >= queries
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({'count': {'$gt': 50, '$lte': 51}})
+    assert c.count() == 1
+    assert c[0]['countStr'] == '51'
+
+
+def test_ne(collection):
+    """
+    Testing the < and >= queries
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({'count': {'$ne': 50}})
+    assert c.count() == 99
+
+    for item in c:
+        assert item['countStr'] != '50'
+
+
 def test_update_one_set(collection):
     """
     Testing the update_one method of the collection
