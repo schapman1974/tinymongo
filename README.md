@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=develop)](https://travis-ci.org/jjonesAtMoog/tinymongo)
+
 # Purpose
 
 A simple wrapper to make a drop in replacement for mongodb out of
@@ -7,7 +9,7 @@ attempt to add an interface familiar to those currently using pymongo.
 # Status
 
 Unit testing is currently being worked on and functionality is being
-added to the library.
+added to the library.  Currently working on versions 3.3+.
 
 # Installation
 
