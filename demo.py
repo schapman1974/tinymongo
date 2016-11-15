@@ -46,9 +46,11 @@ for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
 
 # removing one element
+print('deleting user 1')
 tinyCollection.delete_one({'username': 'user1'})
 
 # update data returns boolean if successful
+print('updating "module" of user0')
 tinyCollection.update_one({"username": "user0"}, {"$set": {"module": "someothermodule"}})
 
 # print the updated results
