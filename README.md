@@ -44,7 +44,7 @@ take a look at demo.py within the repository.
     userInfo = tinyCollection.find_one({"_id":recordId})  # returns the record inserted
     
     #update data returns True if successful and False if unsuccessful
-    upd = table.update({"username":"admin"},{"$set":{"module":"someothermodule"}) 
+    upd = table.update_one({"username":"admin"},{"$set":{"module":"someothermodule"}) 
 
 # Contributions
 
