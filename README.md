@@ -1,4 +1,6 @@
-[![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=develop)](https://travis-ci.org/jjonesAtMoog/tinymongo)
+
+* Master Branch [![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=master)](https://travis-ci.org/jjonesAtMoog/tinymongo)
+* Develop Branch [![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=develop)](https://travis-ci.org/jjonesAtMoog/tinymongo)
 
 # Purpose
 
