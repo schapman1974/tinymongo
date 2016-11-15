@@ -8,4 +8,4 @@ python:
 install: "pip install -r requirements.txt"
 
 # command to run tests
-script: pytest ./tests/test.py
+script: pytest ./tests/tests.py
