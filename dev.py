@@ -41,22 +41,5 @@ for i in range(5):
                                       "module": "somemodule"})
 
 tinyCollection.query = tm.Query()
-#conditions2 = tinyCollection.parseQuery2(q)
-#for condition in conditions2:
-#    logger.debug('condition found: {}'.format(condition))
-
-#q = {}
-#q = {'user_number': {'$gte': 3, '$lte': 10}}
-#q = {'user_number': 3}
-#q = {'$and': [{'user_number': 3}, {'user_number': 4}]}
-
-#condition2 = tinyCollection.parse_condition({'$gte': 3, '$lte': 6}, 'user_number')
-#condition2 = tinyCollection.parseQuery2(q)
-#print('condition2: ', condition2)
-
-#tinyCollection.query = tm.Query()
-#conditions = tinyCollection.parseQuery(q)
-#logger.debug('condition found: {}'.format(conditions))
-
-item = tinyCollection.find_one({})
-print(item['_id'])
+item = tinyCollection.find_one()
+print(item)

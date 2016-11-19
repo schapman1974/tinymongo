@@ -79,9 +79,9 @@ class TinyMongoCollection(object):
             self.build_table()
 
         if not isinstance(doc, dict):
-            return 0
+            raise ValueError('"doc" must be a dict')
 
-        if not "_id" in doc:
+        if '_id' not in doc:
             theid = str(uuid1()).replace("-", "")
             eid = theid
             doc["_id"] = theid
@@ -122,7 +122,7 @@ class TinyMongoCollection(object):
         logger.debug('query to parse2: {}'.format(query))
 
         # this should find all records
-        if query == {}:
+        if query == {} or query is None:
             return (Query()._id != '-1')
 
         q = None
@@ -214,9 +214,6 @@ class TinyMongoCollection(object):
 
         allcond = self.parse_query(query)
 
-        if allcond is None:
-            return TinyMongoCursor(self.table.all())
-
         return TinyMongoCursor(self.table.search(allcond))
 
     def find_one(self, query=None):
@@ -231,9 +228,6 @@ class TinyMongoCollection(object):
             self.build_table()
 
         allcond = self.parse_query(query)
-
-        if allcond is None:
-            return self.table.get(eid=1)
 
         return self.table.get(allcond)
 

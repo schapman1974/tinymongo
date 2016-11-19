@@ -211,3 +211,20 @@ def test_insert_many(collection):
     c = collection.find({})
 
     assert c.count() == 110
+
+
+def test_empty_find(collection):
+    """
+    Tests 'find' method when empty
+    :param collection:
+    :return:
+    """
+    c = collection.find()
+    assert c.count() == 100
+
+
+def test_insert_one_with_list_input(collection):
+    with pytest.raises(ValueError):
+        collection.insert_one([{'my_object_name': 'my object value', 'count': 1000}])
+
+
