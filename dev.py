@@ -40,6 +40,9 @@ for i in range(5):
                                       "password": "admin{}".format(i),
                                       "module": "somemodule"})
 
+# testing find
 tinyCollection.query = tm.Query()
-item = tinyCollection.find_one()
-print(item)
+item = tinyCollection.find().sort({'user_number': -1})
+
+for i in item:
+    print(i)

@@ -11,7 +11,7 @@ attempt to add an interface familiar to those currently using pymongo.
 # Status
 
 Unit testing is currently being worked on and functionality is being
-added to the library.  Current coverage is 79%.  Current builds tested
+added to the library.  Current coverage is 85%.  Current builds tested
 on versions 3.3+.
 
 # Installation

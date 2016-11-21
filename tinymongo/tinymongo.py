@@ -290,13 +290,28 @@ class TinyMongoCursor(object):
             return True
         return False
 
-    def sort(self, field, direction=1):
-        if not type(self.cursordat) is list:
-            pass
-        elif direction == -1:
-            self.cursordat = sorted(self.cursordat, key=itemgetter(field), reverse=True)
+    def sort(self, sort_specifier):
+        """
+        Sorts a cursor object based on the input
+
+        :param sort_specifier: a dict containing the sort specification, i.e. {'user_number': -1}
+        :return:
+        """
+        if not isinstance(sort_specifier, dict):
+            raise ValueError('invalid field specifier, must be a dict')
+
+        f = None
+        for item in sort_specifier.keys():
+            f = item
+        direction = sort_specifier[f]
+
+        if direction == -1:
+            self.cursordat = sorted(self.cursordat, key=itemgetter(f), reverse=True)
+            logger.debug('sort (reverse) based on {}'.format(f))
         else:
-            self.cursordat = sorted(self.cursordat, key=itemgetter(field))
+            self.cursordat = sorted(self.cursordat, key=itemgetter(f))
+            logger.debug('sort based on {}'.format(f))
+
         return self
 
     def next(self):

@@ -25,8 +25,7 @@ tiny_collection = tiny_database.tinyCollection
 @pytest.fixture()
 def collection(request):
     # setup the db, clear if necessary
-    # todo: the 'delete_many()' and 'drop()' function from pymongo should work in future revisions
-    #tiny_collection.delete_one({})
+    # todo: the 'drop()' function from pymongo should work in future revisions
     tiny_collection.delete_many({})    # should delete all records in the collection
 
     # insert 100 integers, strings, floats, booleans, arrays, and objects
@@ -76,6 +75,52 @@ def test_greater_than(collection):
     c = collection.find({'count': {'$gte': 50}})
 
     assert c.count() == 50
+
+
+def test_sort_wrong_input_type(collection):
+    """
+    Testing the sort method in the positive direction
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find()  # find all
+    with pytest.raises(ValueError):
+        c.sort('count')
+
+
+def test_sort_positive(collection):
+    """
+    Testing the sort method in the positive direction
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find()  # find all
+    c.sort({'count': 1})
+    assert c[0]['count'] == 0
+
+
+def test_sort_negative(collection):
+    """
+    Testing the sort method in the positive direction
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find()  # find all
+    c.sort({'count': -1})
+    assert c[0]['count'] == 99
+
+
+def test_empty_find(collection):
+    """
+    Tests 'find' method when empty
+    :param collection:
+    :return:
+    """
+    c = collection.find()
+    assert c.count() == 100
 
 
 def test_find_one(collection):
@@ -211,16 +256,6 @@ def test_insert_many(collection):
     c = collection.find({})
 
     assert c.count() == 110
-
-
-def test_empty_find(collection):
-    """
-    Tests 'find' method when empty
-    :param collection:
-    :return:
-    """
-    c = collection.find()
-    assert c.count() == 100
 
 
 def test_insert_one_with_list_input(collection):
