@@ -12,7 +12,7 @@ attempt to add an interface familiar to those currently using pymongo.
 
 Unit testing is currently being worked on and functionality is being
 added to the library.  Current coverage is 93%.  Current builds tested
-on versions 3.3+.
+on Python versions 2.7 and 3.3+.
 
 # Installation
 

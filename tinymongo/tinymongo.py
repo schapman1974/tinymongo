@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 import os
 import logging
 import copy
@@ -10,12 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 class TinyMongoClient(object):
-    def __init__(self, foldername="tinydb"):
+    def __init__(self, foldername=u"tinydb"):
         self.foldername = foldername
         try:
             os.mkdir(foldername)
-        except FileExistsError:
-            pass
+        except OSError as x:
+            logger.warning('{}'.format(x))
 
     def __getitem__(self, key):
         return TinyMongoDatabase(key, self.foldername)
@@ -30,19 +31,19 @@ class TinyMongoClient(object):
 class TinyMongoDatabase(object):
     def __init__(self, database, foldername):
         self.foldername = foldername
-        self.tinydb = TinyDB(os.path.join(foldername, database + ".json"))
+        self.tinydb = TinyDB(os.path.join(foldername, database + u".json"))
 
     def __getattr__(self, name):
         return TinyMongoCollection(name, self)
 
 
 class TinyMongoCollection(object):
-    """
+    u"""
     This class represents a collection and all of the operations that are commonly performed on a collection
     """
 
     def __init__(self, table, parent=None):
-        """
+        u"""
         Initilialize the collection
 
         :param table: the table name
@@ -53,24 +54,24 @@ class TinyMongoCollection(object):
         self.parent = parent
 
     def __getattr__(self, name):
-        """
+        u"""
 
         :param name:
         :return:
         """
         if self.table is None:
-            self.tablename += "." + name
+            self.tablename += u"." + name
         return self
 
     def build_table(self):
-        """
+        u"""
         Builds a new tinydb table at the parent database
         :return:
         """
         self.table = self.parent.tinydb.table(self.tablename)
 
     def insert_one(self, doc):
-        """
+        u"""
         Inserts one document into the collection
         :param doc: the document
         :return: the ids of the documents that were inserted
@@ -79,11 +80,15 @@ class TinyMongoCollection(object):
             self.build_table()
 
         if not isinstance(doc, dict):
-            raise ValueError('"doc" must be a dict')
+            raise ValueError(u'"doc" must be a dict')
 
-        theid = str(uuid1()).replace("-", "")
+        try:
+            theid = unicode(uuid1()).replace(u"-", u"")
+        except NameError:
+            theid = str(uuid1()).replace(u"-", u"")
+
         eid = theid
-        doc["_id"] = theid
+        doc[u"_id"] = theid
 
         self.table.insert(doc)
 
@@ -91,7 +96,7 @@ class TinyMongoCollection(object):
         return eid
 
     def insert_many(self, docs):
-        """
+        u"""
         Inserts several documents into the collection
         :param docs: a list of documents
         :return:
@@ -100,7 +105,7 @@ class TinyMongoCollection(object):
             self.build_table()
 
         if not isinstance(docs, list):
-            raise ValueError('"insert_many" requires a list input')
+            raise ValueError(u'"insert_many" requires a list input')
 
         eids = []
         for doc in docs:
@@ -110,29 +115,29 @@ class TinyMongoCollection(object):
         return eids
 
     def parse_query(self, query):
-        """
+        u"""
         Creates a tinydb Query() object from the query dict
 
         :param query: object containing the dictionary representation of the query
         :return: composite Query()
         """
-        logger.debug('query to parse2: {}'.format(query))
+        logger.debug(u'query to parse2: {}'.format(query))
 
         # this should find all records
         if query == {} or query is None:
-            return (Query()._id != '-1')
+            return (Query()._id != u'-1')
 
         q = None
         # find the final result of the generator
         for c in self.parse_condition(query):
             q = c
 
-        logger.debug('new query item2: {}'.format(q))
+        logger.debug(u'new query item2: {}'.format(q))
 
         return q
 
     def parse_condition(self, query, prev_key=None):
-        """
+        u"""
         Creates a recursive generator for parsing some types of Query() conditions
 
         :param query: Query object
@@ -140,7 +145,7 @@ class TinyMongoCollection(object):
         :return: generator object, the last of which will be the complete Query() object containing all conditions
         """
         # use this to determine gt/lt/eq on prev_query
-        logger.debug('query: {} prev_query: {}'.format(query, prev_key))
+        logger.debug(u'query: {} prev_query: {}'.format(query, prev_key))
 
         q = Query()
         conditions = None
@@ -153,29 +158,31 @@ class TinyMongoCollection(object):
 
         # deal with the conditions
         for key, value in query.items():
-            logger.debug('conditions: {} {}'.format(key, value))
+            logger.debug(u'conditions: {} {}'.format(key, value))
 
-            if key == '$gte':
+            if key == u'$gte':
                 conditions = (q[prev_key] >= value) if not conditions else (conditions & (q[prev_key] >= value))
-            elif key == '$gt':
+            elif key == u'$gt':
                 conditions = (q[prev_key] > value) if not conditions else (conditions & (q[prev_key] > value))
-            elif key == '$lte':
+            elif key == u'$lte':
                 conditions = (q[prev_key] <= value) if not conditions else (conditions & (q[prev_key] <= value))
-            elif key == '$lt':
+            elif key == u'$lt':
                 conditions = (q[prev_key] < value) if not conditions else (conditions & (q[prev_key] < value))
-            elif key == '$ne':
+            elif key == u'$ne':
                 conditions = (q[prev_key] != value) if not conditions else (conditions & (q[prev_key] != value))
             else:
                 conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
 
-            logger.debug('c: {}'.format(conditions))
+            logger.debug(u'c: {}'.format(conditions))
             if isinstance(value, dict):
-                yield from self.parse_condition(value, key)
+                #yield from self.parse_condition(value, key)
+                for parse_condition in self.parse_condition(value, key):
+                    yield parse_condition
             else:
                 yield conditions
 
     def update_one(self, query, doc):
-        """
+        u"""
         Updates one element of the collection
 
         :param query: dictionary representing the mongo query
@@ -185,8 +192,8 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        if "$set" in doc:
-            doc = doc["$set"]
+        if u"$set" in doc:
+            doc = doc[u"$set"]
 
         allcond = self.parse_query(query)
 
@@ -200,7 +207,7 @@ class TinyMongoCollection(object):
         return True
 
     def find(self, query=None):
-        """
+        u"""
         Finds all matching results
 
         :param query: dictionary representing the mongo query
@@ -214,7 +221,7 @@ class TinyMongoCollection(object):
         return TinyMongoCursor(self.table.search(allcond))
 
     def find_one(self, query=None):
-        """
+        u"""
         Finds one matching query element
 
         :param query: dictionary representing the mongo query
@@ -229,19 +236,19 @@ class TinyMongoCollection(object):
         return self.table.get(allcond)
 
     def delete_one(self, query):
-        """
+        u"""
         Deletes one document from the collection
 
         :param query: dictionary representing the mongo query
         :return: None
         """
         item = self.find_one(query)
-        self.table.remove(where('_id') == item['_id'])
+        self.table.remove(where(u'_id') == item[u'_id'])
 
         return None
 
     def delete_many(self, query):
-        """
+        u"""
         Removes all items matching the mongo query
 
         :param query: dictionary representing the mongo query
@@ -249,7 +256,7 @@ class TinyMongoCollection(object):
         """
         items = self.find(query)
         for item in items:
-            self.table.remove(where('_id') == item['_id'])
+            self.table.remove(where(u'_id') == item[u'_id'])
 
 
 class TinyMongoCursor(object):
@@ -268,7 +275,7 @@ class TinyMongoCursor(object):
         return self.currentrec[key]
 
     def sort(self, sort_specifier):
-        """
+        u"""
         Sorts a cursor object based on the input
 
         :param sort_specifier: a dict containing the sort specification, i.e. {'user_number': -1}
@@ -277,7 +284,7 @@ class TinyMongoCursor(object):
         # todo: make this method able to read multiple sort_specifiers (currently only reads one)
 
         if not isinstance(sort_specifier, dict):
-            raise ValueError('invalid field specifier, must be a dict')
+            raise ValueError(u'invalid field specifier, must be a dict')
 
         f = None
         for item in sort_specifier.keys():
@@ -286,15 +293,15 @@ class TinyMongoCursor(object):
 
         if direction == -1:
             self.cursordat = sorted(self.cursordat, key=itemgetter(f), reverse=True)
-            logger.debug('sort (reverse) based on {}'.format(f))
+            logger.debug(u'sort (reverse) based on {}'.format(f))
         else:
             self.cursordat = sorted(self.cursordat, key=itemgetter(f))
-            logger.debug('sort based on {}'.format(f))
+            logger.debug(u'sort based on {}'.format(f))
 
         return self
 
     def hasNext(self):
-        """
+        u"""
         Returns True if the cursor has a next position, False if not
         :return:
         """
@@ -307,7 +314,7 @@ class TinyMongoCursor(object):
             return False
 
     def next(self):
-        """
+        u"""
         Returns the next record
 
         :return:
@@ -316,7 +323,7 @@ class TinyMongoCursor(object):
         return self.cursordat[self.cursorpos]
 
     def count(self):
-        """
+        u"""
         Returns the number of records in the current cursor
 
         :return: number of records
