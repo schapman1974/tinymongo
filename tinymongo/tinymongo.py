@@ -79,14 +79,11 @@ class TinyMongoCollection(object):
             self.build_table()
 
         if not isinstance(doc, dict):
-            return 0
+            raise ValueError('"doc" must be a dict')
 
-        if not "_id" in doc:
-            theid = str(uuid1()).replace("-", "")
-            eid = theid
-            doc["_id"] = theid
-        else:
-            eid = doc["_id"]
+        theid = str(uuid1()).replace("-", "")
+        eid = theid
+        doc["_id"] = theid
 
         self.table.insert(doc)
 
@@ -103,7 +100,7 @@ class TinyMongoCollection(object):
             self.build_table()
 
         if not isinstance(docs, list):
-            return []
+            raise ValueError('"insert_many" requires a list input')
 
         eids = []
         for doc in docs:
@@ -122,7 +119,7 @@ class TinyMongoCollection(object):
         logger.debug('query to parse2: {}'.format(query))
 
         # this should find all records
-        if query == {}:
+        if query == {} or query is None:
             return (Query()._id != '-1')
 
         q = None
@@ -214,9 +211,6 @@ class TinyMongoCollection(object):
 
         allcond = self.parse_query(query)
 
-        if allcond is None:
-            return TinyMongoCursor(self.table.all())
-
         return TinyMongoCursor(self.table.search(allcond))
 
     def find_one(self, query=None):
@@ -232,21 +226,7 @@ class TinyMongoCollection(object):
 
         allcond = self.parse_query(query)
 
-        if allcond is None:
-            return self.table.get(eid=1)
-
         return self.table.get(allcond)
-
-    def count(self):
-        """
-        Returns the number of documents in a collection
-
-        :return: The number of documents in a collection
-        """
-        if self.table is None:
-            self.build_table()
-
-        return len(self.table)
 
     def delete_one(self, query):
         """
@@ -275,41 +255,72 @@ class TinyMongoCollection(object):
 class TinyMongoCursor(object):
     def __init__(self, cursordat):
         self.cursordat = cursordat
-        self.cursorpos = 0
-        if type(self.cursordat) is list:
-            if len(self.cursordat) == 0:
-                self.currentrec = None
-            else:
-                self.currentrec = self.cursordat[self.cursorpos]
+        self.cursorpos = -1
+
+        if len(self.cursordat) == 0:
+            self.currentrec = None
         else:
-            self.currentrec = self.cursordat
+            self.currentrec = self.cursordat[self.cursorpos]
 
     def __getitem__(self, key):
-        if type(key) is int:
+        if isinstance(key, int):
             return self.cursordat[key]
         return self.currentrec[key]
 
-    def __contains__(self, item):
-        if self.currentrec is None:
-            return False
-        if item in self.currentrec:
-            return True
-        return False
+    def sort(self, sort_specifier):
+        """
+        Sorts a cursor object based on the input
 
-    def sort(self, field, direction=1):
-        if not type(self.cursordat) is list:
-            pass
-        elif direction == -1:
-            self.cursordat = sorted(self.cursordat, key=itemgetter(field), reverse=True)
+        :param sort_specifier: a dict containing the sort specification, i.e. {'user_number': -1}
+        :return:
+        """
+        # todo: make this method able to read multiple sort_specifiers (currently only reads one)
+
+        if not isinstance(sort_specifier, dict):
+            raise ValueError('invalid field specifier, must be a dict')
+
+        f = None
+        for item in sort_specifier.keys():
+            f = item
+        direction = sort_specifier[f]
+
+        if direction == -1:
+            self.cursordat = sorted(self.cursordat, key=itemgetter(f), reverse=True)
+            logger.debug('sort (reverse) based on {}'.format(f))
         else:
-            self.cursordat = sorted(self.cursordat, key=itemgetter(field))
+            self.cursordat = sorted(self.cursordat, key=itemgetter(f))
+            logger.debug('sort based on {}'.format(f))
+
         return self
 
+    def hasNext(self):
+        """
+        Returns True if the cursor has a next position, False if not
+        :return:
+        """
+        cursor_pos = self.cursorpos + 1
+
+        try:
+            self.cursordat[cursor_pos]
+            return True
+        except IndexError:
+            return False
+
     def next(self):
+        """
+        Returns the next record
+
+        :return:
+        """
         self.cursorpos += 1
-        self.currentrec = self.cursordat[self.cursorpos]
+        return self.cursordat[self.cursorpos]
 
     def count(self):
+        """
+        Returns the number of records in the current cursor
+
+        :return: number of records
+        """
         return len(self.cursordat)
 
 
