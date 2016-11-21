@@ -231,17 +231,6 @@ class TinyMongoCollection(object):
 
         return self.table.get(allcond)
 
-    def count(self):
-        """
-        Returns the number of documents in a collection
-
-        :return: The number of documents in a collection
-        """
-        if self.table is None:
-            self.build_table()
-
-        return len(self.table)
-
     def delete_one(self, query):
         """
         Deletes one document from the collection
@@ -287,8 +276,10 @@ class TinyMongoCursor(object):
     def __contains__(self, item):
         if self.currentrec is None:
             return False
+
         if item in self.currentrec:
             return True
+
         return False
 
     def sort(self, sort_specifier):
