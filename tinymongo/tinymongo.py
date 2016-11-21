@@ -81,12 +81,9 @@ class TinyMongoCollection(object):
         if not isinstance(doc, dict):
             raise ValueError('"doc" must be a dict')
 
-        if '_id' not in doc:
-            theid = str(uuid1()).replace("-", "")
-            eid = theid
-            doc["_id"] = theid
-        else:
-            eid = doc["_id"]
+        theid = str(uuid1()).replace("-", "")
+        eid = theid
+        doc["_id"] = theid
 
         self.table.insert(doc)
 
