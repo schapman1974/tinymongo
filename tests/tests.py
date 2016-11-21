@@ -48,7 +48,18 @@ def collection(request):
     return tiny_collection
 
 
-def test_initialize_db(collection):
+def test_initialize_db():
+    """
+    Ensure that the db can be created, use two clients in order to increase coverage
+
+    :return:
+    """
+    tiny_client = tm.TinyMongoClient(db_name)
+    another_client = tm.TinyMongoClient(db_name)
+    assert True
+
+
+def test_initialize_collection(collection):
     """
     Ensure that the initial db is of the correct size
 
