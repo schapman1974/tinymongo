@@ -8,13 +8,13 @@ try:
     for f in os.listdir(os.path.join('.', db_name)):
         print('removing file ', f)
         os.remove(os.path.join(db_name, f))
-except (OSError, FileNotFoundError):
+except OSError:
     pass
 
 try:
     if len(os.listdir(db_name)) == 0:
         os.rmdir(db_name)
-except (OSError, FileNotFoundError):
+except OSError:
     pass
 
 tiny_client = tm.TinyMongoClient(db_name)
