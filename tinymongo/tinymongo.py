@@ -271,7 +271,7 @@ class TinyMongoCursor(object):
         self.cursordat = cursordat
         self.cursorpos = 0
 
-        if isinstance(self.cursordata, list):
+        if isinstance(self.cursordat, list):
             if len(self.cursordat) == 0:
                 self.currentrec = None
             else:
