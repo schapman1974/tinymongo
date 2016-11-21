@@ -103,7 +103,7 @@ class TinyMongoCollection(object):
             self.build_table()
 
         if not isinstance(docs, list):
-            return []
+            raise ValueError('"insert_many" requires a list input')
 
         eids = []
         for doc in docs:
@@ -260,27 +260,15 @@ class TinyMongoCursor(object):
         self.cursordat = cursordat
         self.cursorpos = -1
 
-        if isinstance(self.cursordat, list):
-            if len(self.cursordat) == 0:
-                self.currentrec = None
-            else:
-                self.currentrec = self.cursordat[self.cursorpos]
+        if len(self.cursordat) == 0:
+            self.currentrec = None
         else:
-            self.currentrec = self.cursordat
+            self.currentrec = self.cursordat[self.cursorpos]
 
     def __getitem__(self, key):
         if isinstance(key, int):
             return self.cursordat[key]
         return self.currentrec[key]
-
-    def __contains__(self, item):
-        if self.currentrec is None:
-            return False
-
-        if item in self.currentrec:
-            return True
-
-        return False
 
     def sort(self, sort_specifier):
         """

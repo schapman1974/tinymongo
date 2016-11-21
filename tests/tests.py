@@ -289,7 +289,23 @@ def test_insert_many(collection):
     assert c.count() == 110
 
 
+def test_insert_many_wrong_input(collection):
+    """
+    Testing the 'insert_many' method with a non-list input
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    item = {'my_key': 'my value'}
+    with pytest.raises(ValueError):
+        collection.insert_many(item)
+
+
 def test_insert_one_with_list_input(collection):
+    """
+    Testing the 'insert_one' method with a list input
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
     with pytest.raises(ValueError):
         collection.insert_one([{'my_object_name': 'my object value', 'count': 1000}])
 
