@@ -270,7 +270,8 @@ class TinyMongoCursor(object):
     def __init__(self, cursordat):
         self.cursordat = cursordat
         self.cursorpos = 0
-        if type(self.cursordat) is list:
+
+        if isinstance(self.cursordata, list):
             if len(self.cursordat) == 0:
                 self.currentrec = None
             else:
@@ -279,7 +280,7 @@ class TinyMongoCursor(object):
             self.currentrec = self.cursordat
 
     def __getitem__(self, key):
-        if type(key) is int:
+        if isinstance(key, int):
             return self.cursordat[key]
         return self.currentrec[key]
 
@@ -297,6 +298,8 @@ class TinyMongoCursor(object):
         :param sort_specifier: a dict containing the sort specification, i.e. {'user_number': -1}
         :return:
         """
+        # todo: make this method able to read multiple sort_specifiers (currently only reads one)
+
         if not isinstance(sort_specifier, dict):
             raise ValueError('invalid field specifier, must be a dict')
 
