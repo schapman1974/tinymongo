@@ -99,6 +99,7 @@ def test_sort_positive(collection):
     c = collection.find()  # find all
     c.sort({'count': 1})
     assert c[0]['count'] == 0
+    assert c[1]['count'] == 1
 
 
 def test_sort_negative(collection):
@@ -111,6 +112,7 @@ def test_sort_negative(collection):
     c = collection.find()  # find all
     c.sort({'count': -1})
     assert c[0]['count'] == 99
+    assert c[1]['count'] == 98
 
 
 def test_empty_find(collection):
