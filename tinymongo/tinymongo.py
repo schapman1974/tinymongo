@@ -258,7 +258,7 @@ class TinyMongoCollection(object):
 class TinyMongoCursor(object):
     def __init__(self, cursordat):
         self.cursordat = cursordat
-        self.cursorpos = 0
+        self.cursorpos = -1
 
         if isinstance(self.cursordat, list):
             if len(self.cursordat) == 0:
@@ -308,11 +308,34 @@ class TinyMongoCursor(object):
 
         return self
 
+    def hasNext(self):
+        """
+        Returns True if the cursor has a next position, False if not
+        :return:
+        """
+        cursor_pos = self.cursorpos + 1
+
+        try:
+            self.cursordat[cursor_pos]
+            return True
+        except IndexError:
+            return False
+
     def next(self):
+        """
+        Returns the next record
+
+        :return:
+        """
         self.cursorpos += 1
-        self.currentrec = self.cursordat[self.cursorpos]
+        return self.cursordat[self.cursorpos]
 
     def count(self):
+        """
+        Returns the number of records in the current cursor
+
+        :return: number of records
+        """
         return len(self.cursordat)
 
 

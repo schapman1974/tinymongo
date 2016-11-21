@@ -115,6 +115,35 @@ def test_sort_negative(collection):
     assert c[1]['count'] == 98
 
 
+def test_has_next(collection):
+    """
+    Testing hasNext
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find().sort({'count': 1})
+
+    assert c.hasNext() is True
+    assert c.next()['count'] == 0
+
+
+def test_not_has_next(collection):
+    """
+    Testing hasNext when it should be false
+
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({'count': {'$gte': 98}}).sort({'count': 1})
+
+    assert c.hasNext() is True
+    assert c.next()['count'] == 98
+    assert c.hasNext() is True
+    assert c.next()['count'] == 99
+    assert c.hasNext() is False
+
+
 def test_empty_find(collection):
     """
     Tests 'find' method when empty
