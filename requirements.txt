@@ -1,0 +1,5 @@
+colorama>=0.3.7
+py>=1.4.31
+pytest>=3.0.4
+tinydb>=3.2.1
+wheel>=0.24.0
