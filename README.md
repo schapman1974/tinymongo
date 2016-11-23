@@ -39,12 +39,15 @@ take a look at demo.py within the repository.
     # either creates a new collection or accesses an existing one
     tinyCollection = tinyDatabase.tinyCollection
     
-    #insert data adds a new record returns _id
-    recordId = tinyCollection.insert_one({"username":"admin","password":"admin","module":"somemodule"})
+    # insert data adds a new record returns _id
+    recordId = tinyCollection.insert_one({"username": "admin", "password": "admin", "module":"somemodule"})
     userInfo = tinyCollection.find_one({"_id":recordId})  # returns the record inserted
     
+    # returns a list of all users of 'module'
+    users = tinyCollection.find({'module': 'module'})
+    
     #update data returns True if successful and False if unsuccessful
-    upd = table.update_one({"username":"admin"},{"$set":{"module":"someothermodule"}) 
+    upd = table.update_one({"username": "admin"}, {"$set": {"module":"someothermodule"}}) 
 
 # Contributions
 
