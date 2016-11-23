@@ -130,7 +130,8 @@ class TinyMongoCollection(object):
         q = None
         # find the final result of the generator
         for c in self.parse_condition(query):
-            q = c
+            if q is None:q = c
+            else:q = q & c
 
         logger.debug(u'new query item2: {}'.format(q))
 
@@ -170,6 +171,8 @@ class TinyMongoCollection(object):
                 conditions = (q[prev_key] < value) if not conditions else (conditions & (q[prev_key] < value))
             elif key == u'$ne':
                 conditions = (q[prev_key] != value) if not conditions else (conditions & (q[prev_key] != value))
+            elif key == u'$and':
+                pass
             else:
                 #conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
                 #dont want to use the previous key if this is a secondary key (fixes multiple item query that includes $ codes)
@@ -181,6 +184,10 @@ class TinyMongoCollection(object):
                 #yield from self.parse_condition(value, key)
                 for parse_condition in self.parse_condition(value, key):
                     yield parse_condition
+            elif isinstance(value,list) and key=="$and":
+                for spec in value:
+                    for parse_condition in self.parse_condition(spec):
+                        yield parse_condition
             else:
                 yield conditions
 
