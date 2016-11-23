@@ -171,7 +171,9 @@ class TinyMongoCollection(object):
             elif key == u'$ne':
                 conditions = (q[prev_key] != value) if not conditions else (conditions & (q[prev_key] != value))
             else:
-                conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
+                #conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
+                #dont want to use the previous key if this is a secondary key (fixes multiple item query that includes $ codes)
+                conditions = (q[key] == value) if not conditions else (conditions & (q[key] == value))
 
             logger.debug(u'c: {}'.format(conditions))
             if isinstance(value, dict):
