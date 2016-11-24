@@ -173,21 +173,32 @@ class TinyMongoCollection(object):
                 conditions = (q[prev_key] != value) if not conditions else (conditions & (q[prev_key] != value))
             elif key == u'$and':
                 pass
+            elif key == u'$or':
+                pass
             else:
                 #conditions = (q[prev_key] == value) if not conditions else (conditions & (q[prev_key] == value))
                 #dont want to use the previous key if this is a secondary key (fixes multiple item query that includes $ codes)
-                conditions = (q[key] == value) if not conditions else (conditions & (q[key] == value))
-                prev_key = key
+                if not isinstance(value,dict) and not isinstance(value,list):
+                    conditions = (q[key] == value) if not conditions else (conditions & (q[key] == value))
+                    prev_key = key
 
             logger.debug(u'c: {}'.format(conditions))
             if isinstance(value, dict):
                 #yield from self.parse_condition(value, key)
                 for parse_condition in self.parse_condition(value, key):
                     yield parse_condition
-            elif isinstance(value,list) and key=="$and":
+            elif isinstance(value,list) and key == "$and":
+                grouped_conditions = None
                 for spec in value:
                     for parse_condition in self.parse_condition(spec):
-                        yield parse_condition
+                        grouped_conditions = parse_condition if not grouped_conditions else grouped_conditions & parse_condition
+                yield grouped_conditions
+            elif isinstance(value,list) and key == "$or":
+                grouped_conditions = None
+                for spec in value:
+                    for parse_condition in self.parse_condition(spec):
+                        grouped_conditions = parse_condition if not grouped_conditions else grouped_conditions | parse_condition
+                yield grouped_conditions
             else:
                 yield conditions
 
