@@ -328,3 +328,7 @@ def test_and(collection):
     """
     c = collection.find({"$and":[{"count":{"$gt":10}},{"count":{"$lte":50}}]})
     assert c.count() == 40
+
+def test_or(collection):
+    c = collection.find({"$or":[{"count":{"$lt":10}},{"count":{"$gte":90}}]})
+    assert c.count() == 20
