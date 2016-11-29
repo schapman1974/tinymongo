@@ -320,4 +320,15 @@ def test_insert_one_with_list_input(collection):
     with pytest.raises(ValueError):
         collection.insert_one([{'my_object_name': 'my object value', 'count': 1000}])
 
+def test_and(collection):
+    """
+    Testing the '$and' query
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({"$and":[{"count":{"$gt":10}},{"count":{"$lte":50}}]})
+    assert c.count() == 40
 
+def test_or(collection):
+    c = collection.find({"$or":[{"count":{"$lt":10}},{"count":{"$gte":90}}]})
+    assert c.count() == 20
