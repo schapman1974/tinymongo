@@ -26,7 +26,7 @@ tiny_collection = tiny_database.tinyCollection
 def collection(request):
     # setup the db, clear if necessary
     # todo: the 'drop()' function from pymongo should work in future revisions
-    tiny_collection.delete_many({})    # should delete all records in the collection
+    tiny_collection.delete_many({})  # should delete all records in the collection
 
     # insert 100 integers, strings, floats, booleans, arrays, and objects
     for num in range(100):
@@ -320,15 +320,22 @@ def test_insert_one_with_list_input(collection):
     with pytest.raises(ValueError):
         collection.insert_one([{'my_object_name': 'my object value', 'count': 1000}])
 
+
 def test_and(collection):
     """
     Testing the '$and' query
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({"$and":[{"count":{"$gt":10}},{"count":{"$lte":50}}]})
+    c = collection.find({"$and": [{"count": {"$gt": 10}}, {"count": {"$lte": 50}}]})
     assert c.count() == 40
 
+
 def test_or(collection):
-    c = collection.find({"$or":[{"count":{"$lt":10}},{"count":{"$gte":90}}]})
+    """
+    Testing the '$or' query
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({"$or": [{"count": {"$lt": 10}}, {"count": {"$gte": 90}}]})
     assert c.count() == 20
