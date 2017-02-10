@@ -84,6 +84,11 @@ def test_initialize_collection(collection):
     assert c.count() == 100
 
 
+def test_find_with_filter_named_parameter(collection):
+    c = collection.find(filter={})
+    assert c.count() == 100
+
+
 def test_greater_than(collection):
     """
     Testing the greater than operator
@@ -182,6 +187,11 @@ def test_find_one(collection):
     """
     c = collection.find_one({'count': 3})
 
+    assert c['countStr'] == '3'
+
+
+def test_find_one_with_filter_named_parameter(collection):
+    c = collection.find_one(filter={'count': 3})
     assert c['countStr'] == '3'
 
 
