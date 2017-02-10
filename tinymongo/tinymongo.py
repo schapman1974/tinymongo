@@ -231,7 +231,7 @@ class TinyMongoCollection(object):
         # todo: return result with result.matched_count and result.modified_count
         return True
 
-    def find(self, query=None):
+    def find(self, filter=None):
         u"""
         Finds all matching results
 
@@ -241,11 +241,11 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        allcond = self.parse_query(query)
+        allcond = self.parse_query(filter)
 
         return TinyMongoCursor(self.table.search(allcond))
 
-    def find_one(self, query=None):
+    def find_one(self, filter=None):
         u"""
         Finds one matching query element
 
@@ -256,7 +256,7 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        allcond = self.parse_query(query)
+        allcond = self.parse_query(filter)
 
         return self.table.get(allcond)
 
