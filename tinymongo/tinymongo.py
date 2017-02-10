@@ -36,6 +36,9 @@ class TinyMongoDatabase(object):
     def __getattr__(self, name):
         return TinyMongoCollection(name, self)
 
+    def __getitem__(self, name):
+        return TinyMongoCollection(name, self)
+
 
 class TinyMongoCollection(object):
     u"""

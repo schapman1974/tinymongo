@@ -59,6 +59,14 @@ def test_initialize_db():
     assert True
 
 
+def test_access_database_by_subscription():
+    assert isinstance(tiny_client['tinyDatabase'], tm.TinyMongoDatabase)
+
+
+def test_access_collection_by_subscription():
+    assert isinstance(tiny_database['tinyCollection'], tm.TinyMongoCollection)
+
+
 def test_initialize_collection(collection):
     """
     Ensure that the initial db is of the correct size
