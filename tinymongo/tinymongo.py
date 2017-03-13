@@ -3,7 +3,7 @@ import os
 import logging
 import copy
 
-from tinydb import *
+from tinydb import TinyDB, where, Query
 from operator import itemgetter
 from uuid import uuid1
 
@@ -16,7 +16,7 @@ class TinyMongoClient(object):
         try:
             os.mkdir(foldername)
         except OSError as x:
-            logger.warning('{}'.format(x))
+            logger.info('{}'.format(x))
 
     def __getitem__(self, key):
         return TinyMongoDatabase(key, self.foldername)
@@ -42,7 +42,8 @@ class TinyMongoDatabase(object):
 
 class TinyMongoCollection(object):
     u"""
-    This class represents a collection and all of the operations that are commonly performed on a collection
+    This class represents a collection and all of the operations that are
+    commonly performed on a collection
     """
 
     def __init__(self, table, parent=None):
@@ -56,14 +57,19 @@ class TinyMongoCollection(object):
         self.table = None
         self.parent = parent
 
+    def __repr__(self):
+        return self.tablename
+
     def __getattr__(self, name):
         u"""
 
         :param name:
         :return:
         """
+        # if self.table is None:
+        #     self.tablename += u"." + name
         if self.table is None:
-            self.tablename += u"." + name
+            self.build_table()
         return self
 
     def build_table(self):
@@ -72,6 +78,12 @@ class TinyMongoCollection(object):
         :return:
         """
         self.table = self.parent.tinydb.table(self.tablename)
+
+    def insert(self, docs, *args, **kwargs):
+        if isinstance(docs, list):
+            return self.insert_many(docs, *args, **kwargs)
+        else:
+            return self.insert_one(docs, *args, **kwargs)
 
     def insert_one(self, doc):
         u"""
@@ -121,7 +133,8 @@ class TinyMongoCollection(object):
         u"""
         Creates a tinydb Query() object from the query dict
 
-        :param query: object containing the dictionary representation of the query
+        :param query: object containing the dictionary representation of the
+        query
         :return: composite Query()
         """
         logger.debug(u'query to parse2: {}'.format(query))
@@ -144,11 +157,13 @@ class TinyMongoCollection(object):
 
     def parse_condition(self, query, prev_key=None):
         u"""
-        Creates a recursive generator for parsing some types of Query() conditions
+        Creates a recursive generator for parsing some types of Query()
+        conditions
 
         :param query: Query object
         :param prev_key: The key at the next-higher level
-        :return: generator object, the last of which will be the complete Query() object containing all conditions
+        :return: generator object, the last of which will be the complete
+        Query() object containing all conditions
         """
         # use this to determine gt/lt/eq on prev_query
         logger.debug(u'query: {} prev_query: {}'.format(query, prev_key))
@@ -167,22 +182,34 @@ class TinyMongoCollection(object):
             logger.debug(u'conditions: {} {}'.format(key, value))
 
             if key == u'$gte':
-                conditions = (q[prev_key] >= value) if not conditions else (conditions & (q[prev_key] >= value))
+                conditions = (
+                    q[prev_key] >= value
+                ) if not conditions else (conditions & (q[prev_key] >= value))
             elif key == u'$gt':
-                conditions = (q[prev_key] > value) if not conditions else (conditions & (q[prev_key] > value))
+                conditions = (
+                    q[prev_key] > value
+                ) if not conditions else (conditions & (q[prev_key] > value))
             elif key == u'$lte':
-                conditions = (q[prev_key] <= value) if not conditions else (conditions & (q[prev_key] <= value))
+                conditions = (
+                    q[prev_key] <= value
+                ) if not conditions else (conditions & (q[prev_key] <= value))
             elif key == u'$lt':
-                conditions = (q[prev_key] < value) if not conditions else (conditions & (q[prev_key] < value))
+                conditions = (
+                    q[prev_key] < value
+                ) if not conditions else (conditions & (q[prev_key] < value))
             elif key == u'$ne':
-                conditions = (q[prev_key] != value) if not conditions else (conditions & (q[prev_key] != value))
+                conditions = (
+                    q[prev_key] != value
+                ) if not conditions else (conditions & (q[prev_key] != value))
             elif key in ['$and', '$or']:
                 pass
             else:
                 # don't want to use the previous key if this is a secondary key
                 # (fixes multiple item query that includes $ codes)
                 if not isinstance(value, dict) and not isinstance(value, list):
-                    conditions = (q[key] == value) if not conditions else (conditions & (q[key] == value))
+                    conditions = (
+                        q[key] == value
+                    ) if not conditions else (conditions & (q[key] == value))
                     prev_key = key
 
             logger.debug(u'c: {}'.format(conditions))
@@ -195,16 +222,33 @@ class TinyMongoCollection(object):
                     grouped_conditions = None
                     for spec in value:
                         for parse_condition in self.parse_condition(spec):
-                            grouped_conditions = parse_condition if not grouped_conditions else grouped_conditions & parse_condition
+                            grouped_conditions = (
+                                parse_condition
+                                if not grouped_conditions
+                                else grouped_conditions & parse_condition
+                            )
                     yield grouped_conditions
                 elif key == '$or':
                     grouped_conditions = None
                     for spec in value:
                         for parse_condition in self.parse_condition(spec):
-                            grouped_conditions = parse_condition if not grouped_conditions else grouped_conditions | parse_condition
+                            grouped_conditions = (
+                                parse_condition
+                                if not grouped_conditions
+                                else grouped_conditions | parse_condition
+                            )
                     yield grouped_conditions
             else:
                 yield conditions
+
+    def update(self, query, doc, *args, **kwargs):
+        if isinstance(doc, list):
+            return [
+                self.update_one(query, item, *args, **kwargs)
+                for item in doc
+            ]
+        else:
+            return self.update_one(query, doc, *args, **kwargs)
 
     def update_one(self, query, doc):
         u"""
@@ -228,10 +272,11 @@ class TinyMongoCollection(object):
             # todo: exception too broad
             return False
 
-        # todo: return result with result.matched_count and result.modified_count
+        # todo: return result with result.matched_count
+        # and result.modified_count
         return True
 
-    def find(self, filter=None):
+    def find(self, filter=None, *args, **kwargs):
         u"""
         Finds all matching results
 
@@ -243,7 +288,12 @@ class TinyMongoCollection(object):
 
         allcond = self.parse_query(filter)
 
-        return TinyMongoCursor(self.table.search(allcond))
+        try:
+            result = self.table.search(allcond)
+        except (AttributeError, TypeError):
+            result = []
+
+        return TinyMongoCursor(result)
 
     def find_one(self, filter=None):
         u"""
@@ -259,6 +309,11 @@ class TinyMongoCollection(object):
         allcond = self.parse_query(filter)
 
         return self.table.get(allcond)
+
+    def remove(self, spec_or_id, multi=True, *args, **kwargs):
+        if multi:
+            return self.delete_many(spec_or_id)
+        return self.delete_one(spec_or_id)
 
     def delete_one(self, query):
         u"""
@@ -303,10 +358,12 @@ class TinyMongoCursor(object):
         u"""
         Sorts a cursor object based on the input
 
-        :param sort_specifier: a dict containing the sort specification, i.e. {'user_number': -1}
+        :param sort_specifier: a dict containing the sort specification,
+        i.e. {'user_number': -1}
         :return:
         """
-        # todo: make this method able to read multiple sort_specifiers (currently only reads one)
+        # todo: make this method able to read multiple sort_specifiers
+        # (currently only reads one)
 
         if not isinstance(sort_specifier, dict):
             raise ValueError(u'invalid field specifier, must be a dict')
@@ -317,7 +374,9 @@ class TinyMongoCursor(object):
         direction = sort_specifier[f]
 
         if direction == -1:
-            self.cursordat = sorted(self.cursordat, key=itemgetter(f), reverse=True)
+            self.cursordat = sorted(
+                self.cursordat, key=itemgetter(f), reverse=True
+            )
             logger.debug(u'sort (reverse) based on {}'.format(f))
         else:
             self.cursordat = sorted(self.cursordat, key=itemgetter(f))
