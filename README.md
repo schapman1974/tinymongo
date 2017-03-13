@@ -28,6 +28,7 @@ compilers or tools besides those contained within Python itself.
 The quick start is shown below.  For a more detailed look at tinymongo,
 take a look at demo.py within the repository.
 
+```python
     from tinymongo import *
     
     # you can include a folder name as a parameter if not it will default to "tinydb"
@@ -48,6 +49,7 @@ take a look at demo.py within the repository.
     
     #update data returns True if successful and False if unsuccessful
     upd = table.update_one({"username": "admin"}, {"$set": {"module":"someothermodule"}}) 
+```
 
 # Contributions
 
