@@ -1,6 +1,7 @@
 
-* Master Branch [![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=master)](https://travis-ci.org/jjonesAtMoog/tinymongo)
-* Develop Branch [![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=develop)](https://travis-ci.org/jjonesAtMoog/tinymongo)
+![logo](artwork/tinymongo.png)
+
+[![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=master)](https://travis-ci.org/jjonesAtMoog/tinymongo)
 
 # Purpose
 
@@ -16,10 +17,17 @@ on Python versions 2.7 and 3.3+.
 
 # Installation
 
-The latest release can be installed via `pip install tinymongo`.  The
-library is currently under rapid development and a more recent version
-may be desired.  In this case, simply clone this repository, navigate
-to the root project directory, and `python setup.py install`.  This
+The latest stable release can be installed via `pip install tinymongo`.
+
+The library is currently under rapid development and a more recent version
+may be desired.
+
+In this case, simply clone this repository, navigate
+to the root project directory, and `python setup.py install`
+
+or use `pip install git+https://github.com/schapman1974/tinymongo.git#egg=tinymongo`
+
+This
 is a pure python distribution and - thus - should require no external
 compilers or tools besides those contained within Python itself.
 
@@ -29,37 +37,63 @@ The quick start is shown below.  For a more detailed look at tinymongo,
 take a look at demo.py within the repository.
 
 ```python
-    from tinymongo import *
-    
-    # you can include a folder name as a parameter if not it will default to "tinydb"
-    tinyClient = TinyMongoClient()
-    
-    # either creates a new database file or accesses an existing one
-    tinyDatabase = tinyClient.tinyDatabase
-    
-    # either creates a new collection or accesses an existing one
-    tinyCollection = tinyDatabase.tinyCollection
-    
+    from tinymongo import TinyMongoClient
+
+    # you can include a folder name or absolute path
+    # as a parameter if not it will default to "tinydb"
+    connection = TinyMongoClient()
+
+    # either creates a new database file or accesses an existing one named `my_tiny_database`
+    db = connection.my_tiny_database
+
+    # either creates a new collection or accesses an existing one named `users`
+    collection = db.users
+
     # insert data adds a new record returns _id
-    recordId = tinyCollection.insert_one({"username": "admin", "password": "admin", "module":"somemodule"})
-    userInfo = tinyCollection.find_one({"_id":recordId})  # returns the record inserted
-    
+    record_id = collection.insert_one({"username": "admin", "password": "admin", "module":"somemodule"})
+    user_info = collection.find_one({"_id": record_id})  # returns the record inserted
+
+    # you can also use it directly
+    db.users.insert_one({"username": "admin"})
+
     # returns a list of all users of 'module'
-    users = tinyCollection.find({'module': 'module'})
-    
+    users = db.users.find({'module': 'module'})
+
     #update data returns True if successful and False if unsuccessful
-    upd = table.update_one({"username": "admin"}, {"$set": {"module":"someothermodule"}}) 
+    upd = db.users.update_one({"username": "admin"}, {"$set": {"module":"someothermodule"}})
+
+    # Sorting users by its username DESC
+    # omitting `filter` returns all records
+    db.users.find(sort={'username': -1})
+
+    # Pagination of the results
+    # Getting the first 20 records
+    db.users.find(sort={'username': -1}, skip=0, limit=20)
+    # Getting next 20 records
+    db.users.find(sort={'username': -1}, skip=20, limit=20)
+
+    # Getting the total of records
+    db.users.count()
+
 ```
+
+# Flask-Admin
+
+This extension can work with Flask-Admin which gives a web based administrative
+panel to your TinyDB. Flask-Admin has features like filtering, search, web forms to
+perform CRUD (Create, Read, Update, Delete) of the TinyDB records.
+
+You can find the example of Flask-Admin with TinyMongo in [Flask-Admin Examples Repository](https://github.com/flask-admin/flask-admin/tree/master/examples/tinymongo)
 
 # Contributions
 
 Contributions are welcome!  Currently, the most valuable contributions
 would be:
 
- * adding test cases
- * adding functionality consistent with pymongo
- * documentation
- * identifying bugs and issues
+* adding test cases
+* adding functionality consistent with pymongo
+* documentation
+* identifying bugs and issues
 
 # Future Development
 
