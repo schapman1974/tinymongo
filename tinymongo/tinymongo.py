@@ -11,6 +11,14 @@ from operator import itemgetter
 from uuid import uuid1
 
 from tinydb import Query, TinyDB, where
+from .results import (
+    InsertOneResult,
+    InsertManyResult,
+    UpdateResult,
+    DeleteResult
+)
+from .errors import DuplicateKeyError
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +110,12 @@ class TinyMongoCollection(object):
         else:
             return self.insert_one(docs, *args, **kwargs)
 
-    def insert_one(self, doc):
+    def insert_one(self, doc, *args, **kwargs):
         """
         Inserts one document into the collection
+        If contains '_id' key it is used, else it is generated.
         :param doc: the document
-        :return: the ids of the documents that were inserted
+        :return: InsertOneResult
         """
         if self.table is None:
             self.build_table()
@@ -114,24 +123,30 @@ class TinyMongoCollection(object):
         if not isinstance(doc, dict):
             raise ValueError(u'"doc" must be a dict')
 
-        try:
-            theid = unicode(uuid1()).replace(u"-", u"")
-        except NameError:
-            theid = str(uuid1()).replace(u"-", u"")
+        _id = doc[u'_id'] = doc.get('_id') or generate_id()
 
-        eid = theid
-        doc[u"_id"] = theid
+        bypass_document_validation = kwargs.get('bypass_document_validation')
+        if bypass_document_validation is True:
+            # insert doc without validation of duplicated `_id`
+            eid = self.table.insert(doc)
+        else:
+            existing = self.find_one({'_id': _id})
+            if existing is None:
+                eid = self.table.insert(doc)
+            else:
+                raise DuplicateKeyError(
+                    u'_id:{0} already exists in collection:{1}'.format(
+                        _id, self.tablename
+                    )
+                )
 
-        self.table.insert(doc)
+        return InsertOneResult(eid=eid, inserted_id=_id)
 
-        # todo: return the result object with 'inserted_id' property
-        return eid
-
-    def insert_many(self, docs):
+    def insert_many(self, docs, *args, **kwargs):
         """
         Inserts several documents into the collection
         :param docs: a list of documents
-        :return:
+        :return: InsertManyResult
         """
         if self.table is None:
             self.build_table()
@@ -139,12 +154,15 @@ class TinyMongoCollection(object):
         if not isinstance(docs, list):
             raise ValueError(u'"insert_many" requires a list input')
 
-        eids = []
+        results = []
         for doc in docs:
-            eid = self.insert_one(doc)
-            eids.append(eid)
+            result = self.insert_one(doc, *args, **kwargs)
+            results.append(result)
 
-        return eids
+        return InsertManyResult(
+            eids=[res.eid for res in results],
+            inserted_ids=[res.inserted_id for res in results]
+        )
 
     def parse_query(self, query):
         """
@@ -274,7 +292,7 @@ class TinyMongoCollection(object):
 
         :param query: dictionary representing the mongo query
         :param doc: dictionary representing the item to be updated
-        :return:
+        :return: UpdateResult
         """
         if self.table is None:
             self.build_table()
@@ -285,14 +303,13 @@ class TinyMongoCollection(object):
         allcond = self.parse_query(query)
 
         try:
-            self.table.update(doc, allcond)
+            result = self.table.update(doc, allcond)
         except:
-            # todo: exception too broad
-            return False
+            # TODO: check table.update result
+            # check what pymongo does in that case
+            result = None
 
-        # todo: return result with result.matched_count
-        # and result.modified_count
-        return True
+        return UpdateResult(raw_result=result)
 
     def find(self, filter=None, sort=None, skip=None, limit=None,
              *args, **kwargs):
@@ -347,28 +364,33 @@ class TinyMongoCollection(object):
         Deletes one document from the collection
 
         :param query: dictionary representing the mongo query
-        :return: None
+        :return: DeleteResult
         """
         item = self.find_one(query)
-        self.table.remove(where(u'_id') == item[u'_id'])
+        result = self.table.remove(where(u'_id') == item[u'_id'])
 
-        return None
+        return DeleteResult(raw_result=result)
 
     def delete_many(self, query):
         """
         Removes all items matching the mongo query
 
         :param query: dictionary representing the mongo query
-        :return:
+        :return: DeleteResult
         """
         items = self.find(query)
-        for item in items:
+        result = [
             self.table.remove(where(u'_id') == item[u'_id'])
+            for item in items
+        ]
+        return DeleteResult(raw_result=result)
 
 
 class TinyMongoCursor(object):
+    """Mongo iterable cursor"""
+
     def __init__(self, cursordat, sort=None, skip=None, limit=None):
-        """Represents the mongo iterable cursor"""
+        """Initialize the mongo iterable cursor with data"""
         self.cursordat = cursordat
         self.cursorpos = -1
 
@@ -478,3 +500,12 @@ class TinyGridFS(object):
         """TODO: Must implement yet"""
         self.database = tinydatabase
         return self
+
+
+def generate_id():
+    """Generate new UUID"""
+    # TODO: Use six.string_type to Py3 compat
+    try:
+        return unicode(uuid1()).replace(u"-", u"")
+    except NameError:
+        return str(uuid1()).replace(u"-", u"")

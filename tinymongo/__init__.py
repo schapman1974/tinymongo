@@ -1,4 +1,4 @@
 try:
-    from tinymongo.tinymongo import *
+    from tinymongo.tinymongo import *  # noqa
 except ImportError:
-    from tinymongo import *
+    from tinymongo import *  # noqa
