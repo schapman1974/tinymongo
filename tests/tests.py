@@ -238,7 +238,8 @@ def test_update_one_set(collection):
     :return:
     """
     cu = collection.update_one({'count': 3}, {'$set': {'countStr': 'three'}})
-    assert cu is True
+    # cu.raw_result contains the updated ids
+    assert len(cu.raw_result) is 1  # only one is updated
 
     c = collection.find_one({'count': 3})
     assert c['countStr'] == 'three'
