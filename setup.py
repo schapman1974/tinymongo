@@ -1,5 +1,7 @@
 from setuptools import setup, find_packages
 
+long_description = open('README.md').read()
+
 with open('requirements.txt') as f:
     requirements = f.read().splitlines()
 
@@ -13,6 +15,7 @@ setup(
     url='https://github.com/schapman1974/tinymongo',
     download_url='https://github.com/schapman1974/tinymongo/archive/master.zip',
     keywords=['mongodb', 'drop-in', 'database', 'tinydb'],
+    long_description = long_description,
     classifiers=[],
     install_requires=requirements
 )
