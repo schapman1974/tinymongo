@@ -32,3 +32,4 @@ setup(
     long_description = parse_md_to_rst("README.md"),
     classifiers=[],
     install_requires=requirements
+)
