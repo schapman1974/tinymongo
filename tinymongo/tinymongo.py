@@ -25,9 +25,10 @@ logger = logging.getLogger(__name__)
 
 class TinyMongoClient(object):
     """Represents the Tiny `db` client"""
-    def __init__(self, foldername=u"tinydb"):
+    def __init__(self, foldername=u"tinydb", storage=None):
         """Initialize container folder"""
-        self.foldername = foldername
+        self._foldername = foldername
+        self._storage = storage or TinyDB.DEFAULT_STORAGE
         try:
             os.mkdir(foldername)
         except OSError as x:
@@ -35,7 +36,7 @@ class TinyMongoClient(object):
 
     def __getitem__(self, key):
         """Gets a new or existing database based in key"""
-        return TinyMongoDatabase(key, self.foldername)
+        return TinyMongoDatabase(key, self._foldername, self._storage)
 
     def close(self):
         """Do nothing"""
@@ -43,16 +44,19 @@ class TinyMongoClient(object):
 
     def __getattr__(self, name):
         """Gets a new or existing database based in attribute"""
-        return TinyMongoDatabase(name, self.foldername)
+        return TinyMongoDatabase(name, self._foldername, self._storage)
 
 
 class TinyMongoDatabase(object):
     """Representation of a Pymongo database"""
-    def __init__(self, database, foldername):
+    def __init__(self, database, foldername, storage):
         """Initialize a TinyDB file named as the db name in the given folder
         """
-        self.foldername = foldername
-        self.tinydb = TinyDB(os.path.join(foldername, database + u".json"))
+        self._foldername = foldername
+        self.tinydb = TinyDB(
+            os.path.join(foldername, database + u".json"),
+            storage=storage
+        )
 
     def __getattr__(self, name):
         """Gets a new or existing collection"""
