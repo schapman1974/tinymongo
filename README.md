@@ -77,6 +77,57 @@ take a look at demo.py within the repository.
 
 ```
 
+# Serializers
+
+To convert your data to a format that is writable to disk TinyDB uses the Python JSON module by default. It’s great when only simple data types are involved but it cannot handle more complex data types like custom classes.
+
+To support serialization of complex types you can write
+your own serializers using the `tinydb-serialization` extension.
+
+First you need to install it `pip install tinydb-serialization`
+
+## Handling datetime objects
+
+You can create a serializer for the python `datetime` using
+the following snippet:
+
+```python
+    from datetime import datetime
+    from tinydb_serialization import Serializer
+
+    class DatetimeSerializer(Serializer):
+        OBJ_CLASS = datetime
+
+        def __init__(self, format='%Y-%m-%dT%H:%M:%S', *args, **kwargs):
+            super(DatetimeSerializer, self).__init__(*args, **kwargs)
+            self._format = format
+
+        def encode(self, obj):
+            return obj.strftime(self._format)
+
+        def decode(self, s):
+            return datetime.strptime(s, self._format)
+```
+
+> NOTE: this serializer is available in `tinymongo.serializers.DateTimeSerializer`
+
+
+Now you have to use that serializer when creating your TinyMongo connection
+
+```python
+    from tinymongo import TinyMongoClient
+    from tinydb_serialization import SerializationMiddleware
+    from tinymongo.serializers import DateTimeSerializer
+
+    serialization = SerializationMiddleware()
+    serialization.register_serializer(DateTimeSerializer(), 'TinyDate')
+    # you can register more custom serializers here
+
+    connection = TinyMongoClient('/path/to/folder', storage=serialization)
+```
+
+> NOTE: If you have other middlewares e.g: CachingMiddleware you can group them by passing `storage=CachingMiddleware(OtherMiddleware(serialization))` the `serialization` must be last to enable serialization to other middlewares.
+
 # Flask-Admin
 
 This extension can work with Flask-Admin which gives a web based administrative
@@ -84,6 +135,8 @@ panel to your TinyDB. Flask-Admin has features like filtering, search, web forms
 perform CRUD (Create, Read, Update, Delete) of the TinyDB records.
 
 You can find the example of Flask-Admin with TinyMongo in [Flask-Admin Examples Repository](https://github.com/flask-admin/flask-admin/tree/master/examples/tinymongo)
+
+> NOTE: To use Flask-Admin you need to register a DateTimeSerialization as showed in the previous topic.
 
 # Contributions
 
