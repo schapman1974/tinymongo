@@ -77,7 +77,35 @@ take a look at demo.py within the repository.
 
 ```
 
-# Serializers
+# Custom Storages and Serializers
+
+> HINT: Learn more about TinyDB storages and Serializers in [documentation](https://tinydb.readthedocs.io/en/latest/usage.html#storages-middlewares)
+
+## Custom Storages
+
+You have to subclass `TinyMongoClient` and provide custom storages like
+CachingMiddleware or other available TinyDB Extension.
+
+### Caching Middleware
+
+```python
+    from tinymongo import TinyMongoClient
+    from tinydb.storages import JSONStorage
+    from tinydb.middlewares import CachingMiddleware
+
+    class CachedClient(TinyMongoClient):
+        """This client has cache"""
+        @property
+        def _storage(self):
+            return CachingMiddleware(JSONStorage)
+
+    connection = CachedClient('/path/to/folder')
+```
+
+> HINT: You can nest middlewares: `FirstMiddleware(SecondMiddleware(JSONStorage))`
+
+
+## Serializers
 
 To convert your data to a format that is writable to disk TinyDB uses the Python JSON module by default. It’s great when only simple data types are involved but it cannot handle more complex data types like custom classes.
 
@@ -112,21 +140,25 @@ the following snippet:
 > NOTE: this serializer is available in `tinymongo.serializers.DateTimeSerializer`
 
 
-Now you have to use that serializer when creating your TinyMongo connection
+Now you have to subclass `TinyMongoClient` and provide customs storage.
 
 ```python
     from tinymongo import TinyMongoClient
-    from tinydb_serialization import SerializationMiddleware
     from tinymongo.serializers import DateTimeSerializer
+    from tinydb_serialization import SerializationMiddleware
 
-    serialization = SerializationMiddleware()
-    serialization.register_serializer(DateTimeSerializer(), 'TinyDate')
-    # you can register more custom serializers here
 
-    connection = TinyMongoClient('/path/to/folder', storage=serialization)
+    class CustomClient(TinyMongoClient):
+        @property
+        def _storage(self):
+            serialization = SerializationMiddleware()
+            serialization.register_serializer(DateTimeSerializer(), 'TinyDate')
+            # register other custom serializers
+            return serialization
+
+
+    connection = CustomClient('/path/to/folder')
 ```
-
-> NOTE: If you have other middlewares e.g: CachingMiddleware you can group them by passing `storage=CachingMiddleware(OtherMiddleware(serialization))` the `serialization` must be last to enable serialization to other middlewares.
 
 # Flask-Admin
 

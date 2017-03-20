@@ -25,14 +25,40 @@ logger = logging.getLogger(__name__)
 
 class TinyMongoClient(object):
     """Represents the Tiny `db` client"""
-    def __init__(self, foldername=u"tinydb", storage=None):
+    def __init__(self, foldername=u"tinydb"):
         """Initialize container folder"""
         self._foldername = foldername
-        self._storage = storage or TinyDB.DEFAULT_STORAGE
         try:
             os.mkdir(foldername)
         except OSError as x:
             logger.info('{}'.format(x))
+
+    @property
+    def _storage(self):
+        """By default return Tiny.DEFAULT_STORAGE and can be overwritten to
+        return custom storages and middlewares.
+
+            class CustomClient(TinyMongoClient):
+                @property
+                def _storage(self):
+                    return CachingMiddleware(OtherMiddleware(JSONMiddleware))
+
+        This property is also useful to define Serializers using required
+        `tinydb-serialization` module.
+
+            from tinymongo.serializers import DateTimeSerializer
+            from tinydb_serialization import SerializationMiddleware
+            class CustomClient(TinyMongoClient):
+                @property
+                def _storage(self):
+                    serialization = SerializationMiddleware()
+                    serialization.register_serializer(
+                        DateTimeSerializer(), 'TinyDate')
+                    # register other custom serializers
+                    return serialization
+
+        """
+        return TinyDB.DEFAULT_STORAGE
 
     def __getitem__(self, key):
         """Gets a new or existing database based in key"""
