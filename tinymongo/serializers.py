@@ -11,12 +11,12 @@ except ImportError:
 class DateTimeSerializer(Serializer):
     OBJ_CLASS = datetime
 
-    def __init__(self, format='%Y-%m-%dT%H:%M:%S', *args, **kwargs):
-        super(DateTimeSerializer, self).__init__(*args, **kwargs)
-        self._format = format
+    def __init__(self, dateformat='%Y-%m-%dT%H:%M:%S', *args, **kwargs):
+        # super(DateTimeSerializer, self).__init__(*args, **kwargs)
+        self._format = dateformat
 
     def encode(self, obj):
         return obj.strftime(self._format)
 
     def decode(self, s):
-        return datetime.strptime(s, self._format)
+        return self.OBJ_CLASS.strptime(s, self._format)
