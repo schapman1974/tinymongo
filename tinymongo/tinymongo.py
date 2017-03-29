@@ -266,6 +266,14 @@ class TinyMongoCollection(object):
                 conditions = (
                     q[prev_key] != value
                 ) if not conditions else (conditions & (q[prev_key] != value))
+            elif key == u'$regex':
+                value = value.replace('\\\\\\', '|||')
+                value = value.replace('\\\\', '|||')
+                regex = value.replace('\\', '')
+                regex = regex.replace('|||', '\\')
+                conditions = (
+                    where(prev_key).matches(regex)
+                ) if not conditions else (conditions & (where(prev_key).matches(regex)))
             elif key in ['$and', '$or']:
                 pass
             else:
