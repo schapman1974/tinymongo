@@ -229,6 +229,29 @@ def test_ne(collection):
     for item in c:
         assert item['countStr'] != '50'
 
+def test_regex(collection):
+    """
+    Testing the regex query
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({'countStr': {'$regex': r'[5]{1,2}'}})
+    assert c.count() == 11
+    
+    c.sort({'count': 1})
+    assert c[0]['count'] == 5
+    assert c[1]['count'] == 50
+    assert c[2]['count'] == 51
+    assert c[10]['count'] == 59
+    
+    c = collection.find({'countStr': {'$regex': r'[^5][5]{1}'}})
+    assert c.count() == 8
+    
+    c.sort({'count': 1})
+    assert c[0]['count'] == 15
+    assert c[1]['count'] == 25
+    assert c[4]['count'] == 65
+    assert c[7]['count'] == 95
 
 def test_update_one_set(collection):
     """
