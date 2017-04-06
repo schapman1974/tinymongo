@@ -59,4 +59,11 @@ target/
 .idea
 .idea/*
 
+# Eclipse/virtualenv
+.project
+.pydevproject
+.settings/*
+venv/*
+
+# test database folder
 test_db/
