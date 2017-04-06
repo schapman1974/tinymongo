@@ -235,7 +235,7 @@ def test_regex(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'countStr': {'$regex': r'[5]{1,2}'}})
+    c = collection.find({'countStr': {'$regex': r'[5]{1,2}'}}).sort({'count': 1})
     assert c.count() == 11
     
     c.sort({'count': 1})
@@ -244,7 +244,7 @@ def test_regex(collection):
     assert c[2]['count'] == 51
     assert c[10]['count'] == 59
     
-    c = collection.find({'countStr': {'$regex': r'[^5][5]{1}'}})
+    c = collection.find({'countStr': {'$regex': r'[^5][5]{1}'}}).sort({'count': 1})
     assert c.count() == 8
     
     c.sort({'count': 1})
@@ -252,6 +252,30 @@ def test_regex(collection):
     assert c[1]['count'] == 25
     assert c[4]['count'] == 65
     assert c[7]['count'] == 95
+    
+def test_in(collection):
+    """
+    Testing the $in query with list of values as parameter
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    # int value testing
+    c = collection.find({'count': {'$in': [22,44,66,88]}}).sort({'count': 1})
+    assert c.count() == 4
+    assert c[0]['count'] == 22
+    assert c[1]['count'] == 44
+    assert c[2]['count'] == 66
+    assert c[3]['count'] == 88
+    
+    # str value testing
+    c = collection.find({'countStr': {'$in': ['11','33','55','77','99']}}).sort({'count': 1})
+    assert c.count() == 5
+    assert c[0]['count'] == 11
+    assert c[1]['count'] == 33
+    assert c[2]['count'] == 55
+    assert c[3]['count'] == 77
+    assert c[4]['count'] == 99
+    
 
 def test_update_one_set(collection):
     """

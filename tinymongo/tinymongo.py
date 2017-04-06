@@ -271,10 +271,9 @@ class TinyMongoCollection(object):
                 value = value.replace('\\\\', '|||')
                 regex = value.replace('\\', '')
                 regex = regex.replace('|||', '\\')
-                conditions = (
-                    where(prev_key).matches(regex)
-                ) if not conditions else (conditions & (where(prev_key).matches(regex)))
-            elif key in ['$and', '$or']:
+                currCond = (where(prev_key).matches(regex))
+                conditions = currCond if not conditions else (conditions & currCond)
+            elif key in ['$and', '$or', '$in']:
                 pass
             else:
                 # don't want to use the previous key if this is a secondary key
@@ -305,6 +304,16 @@ class TinyMongoCollection(object):
                     grouped_conditions = None
                     for spec in value:
                         for parse_condition in self.parse_condition(spec):
+                            grouped_conditions = (
+                                parse_condition
+                                if not grouped_conditions
+                                else grouped_conditions | parse_condition
+                            )
+                    yield grouped_conditions
+                elif key == '$in':
+                    grouped_conditions = None
+                    for val in value:
+                        for parse_condition in self.parse_condition({prev_key : val}):
                             grouped_conditions = (
                                 parse_condition
                                 if not grouped_conditions
