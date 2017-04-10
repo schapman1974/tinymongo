@@ -24,7 +24,7 @@ def parse_md_to_rst(file):
 
 
 with open('requirements.txt') as f:
-    REQUIREMENTS = f.read().splitlines()
+    requirements = f.read().splitlines()
 
 
 setup(
@@ -39,6 +39,5 @@ setup(
     keywords=['mongodb', 'drop-in', 'database', 'tinydb'],
     long_description=parse_md_to_rst("README.md"),
     classifiers=[],
-    package_data={'':['requirements.txt', 'README.md', 'LICENSE.txt']},
-    install_requires=REQUIREMENTS
+    install_requires=requirements
 )
