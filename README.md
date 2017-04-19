@@ -107,7 +107,7 @@ CachingMiddleware or other available TinyDB Extension.
 
 ## Serializers
 
-To convert your data to a format that is writable to disk TinyDB uses the Python JSON module by default. It’s great when only simple data types are involved but it cannot handle more complex data types like custom classes.
+To convert your data to a format that is writable to disk TinyDB uses the Python JSON module by default. It's great when only simple data types are involved but it cannot handle more complex data types like custom classes.
 
 To support serialization of complex types you can write
 your own serializers using the `tinydb-serialization` extension.
