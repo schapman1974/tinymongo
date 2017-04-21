@@ -220,7 +220,7 @@ class TinyMongoCollection(object):
 
         return q
 
-    def parse_condition(self, query, prev_key=None):
+    def parse_condition(self, query, prev_key=None, last_prev_key=None):
         """
         Creates a recursive generator for parsing some types of Query()
         conditions
@@ -249,23 +249,43 @@ class TinyMongoCollection(object):
             if key == u'$gte':
                 conditions = (
                     q[prev_key] >= value
-                ) if not conditions else (conditions & (q[prev_key] >= value))
+                ) if not conditions and prev_key != "$not" \
+                else (conditions & (q[prev_key] >= value)) if prev_key != "$not" \
+                else (q[last_prev_key] < value)
             elif key == u'$gt':
                 conditions = (
                     q[prev_key] > value
-                ) if not conditions else (conditions & (q[prev_key] > value))
+                ) if not conditions and prev_key != "$not" \
+                else (conditions & (q[prev_key] > value)) if prev_key != "$not" \
+                else (q[last_prev_key] <= value)
             elif key == u'$lte':
                 conditions = (
                     q[prev_key] <= value
-                ) if not conditions else (conditions & (q[prev_key] <= value))
+                ) if not conditions and prev_key != "$not" \
+                else (conditions & (q[prev_key] <= value)) if prev_key != "$not" \
+                else (q[last_prev_key] > value)
             elif key == u'$lt':
                 conditions = (
                     q[prev_key] < value
-                ) if not conditions else (conditions & (q[prev_key] < value))
+                ) if not conditions and prev_key != "$not" \
+                else (conditions & (q[prev_key] < value)) if prev_key != "$not" \
+                else (q[last_prev_key] >= value)
             elif key == u'$ne':
                 conditions = (
                     q[prev_key] != value
-                ) if not conditions else (conditions & (q[prev_key] != value))
+                ) if not conditions and prev_key != "$not" \
+                else (conditions & (q[prev_key] != value))if prev_key != "$not" \
+                else (q[last_prev_key] == value)
+            elif key == u'$not':
+                if not isinstance(value, dict) and not isinstance(value, list):
+                    conditions = (
+                        q[prev_key] != value
+                    ) if not conditions and prev_key != "$not" \
+                    else (conditions & (q[prev_key] != value)) \
+                    if prev_key != "$not" else (q[last_prev_key] >= value)
+                else:
+                    # let the value's condition be parsed below
+                    pass
             elif key == u'$regex':
                 value = value.replace('\\\\\\', '|||')
                 value = value.replace('\\\\', '|||')
@@ -287,7 +307,7 @@ class TinyMongoCollection(object):
             logger.debug(u'c: {}'.format(conditions))
             if isinstance(value, dict):
                 # yield from self.parse_condition(value, key)
-                for parse_condition in self.parse_condition(value, key):
+                for parse_condition in self.parse_condition(value, key, prev_key):
                     yield parse_condition
             elif isinstance(value, list):
                 if key == '$and':
