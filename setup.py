@@ -30,7 +30,7 @@ with open('requirements.txt') as f:
 setup(
     name='tinymongo',
     packages=find_packages(),
-    version='0.1.8.dev0',
+    version='0.1.9.dev0',
     description='A flat file drop in replacement for mongodb.  Requires Tinydb',
     author='Stephen Chapman, Jason Jones',
     author_email='schapman1974@gmail.com',
