@@ -405,3 +405,12 @@ def test_or(collection):
     """
     c = collection.find({"$or": [{"count": {"$lt": 10}}, {"count": {"$gte": 90}}]})
     assert c.count() == 20
+
+def test_not(collection):
+    """
+    Testing the '$not' query
+    :param collection: pytest fixture that returns the collection
+    :return:
+    """
+    c = collection.find({"count": {"$not": { "$gte": 90, "$lt": 10}}})
+    assert c.count() == 80
