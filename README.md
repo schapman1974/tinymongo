@@ -50,7 +50,7 @@ take a look at demo.py within the repository.
     collection = db.users
 
     # insert data adds a new record returns _id
-    record_id = collection.insert_one({"username": "admin", "password": "admin", "module":"somemodule"})
+    record_id = collection.insert_one({"username": "admin", "password": "admin", "module":"somemodule"}).inserted_id
     user_info = collection.find_one({"_id": record_id})  # returns the record inserted
 
     # you can also use it directly
