@@ -1,7 +1,7 @@
 import io
 import os
 from setuptools import setup, find_packages
-
+from setuptools.command.test import test as TestCommand
 
 def read(*names, **kwargs):
     """Read a file."""
@@ -23,9 +23,35 @@ def parse_md_to_rst(file):
         return read(file)
 
 
-with open('requirements.txt') as f:
-    requirements = f.read().splitlines()
+class PyTest(TestCommand):
+    """PyTest cmdclass hook for test-at-buildtime functionality
 
+    http://doc.pytest.org/en/latest/goodpractices.html#manual-integration
+
+    """
+    user_options = [('pytest-args=', 'a', "Arguments to pass to pytest")]
+
+    def initialize_options(self):
+        TestCommand.initialize_options(self)
+        self.pytest_args = [
+            'tests/',
+            '-rx'
+        ]    #load defaults here
+
+    def run_tests(self):
+        import shlex
+        #import here, cause outside the eggs aren't loaded
+        import pytest
+        pytest_commands = []
+        try:    #read commandline
+            pytest_commands = shlex.split(self.pytest_args)
+        except AttributeError:  #use defaults
+            pytest_commands = self.pytest_args
+        errno = pytest.main(pytest_commands)
+        exit(errno)
+
+#with open('requirements.txt') as f:
+#    requirements = f.read().splitlines()
 
 setup(
     name='tinymongo',
@@ -39,5 +65,14 @@ setup(
     keywords=['mongodb', 'drop-in', 'database', 'tinydb'],
     long_description=parse_md_to_rst("README.md"),
     classifiers=[],
-    install_requires=requirements
+    install_requires=[
+        'tinydb>=3.2.1',
+        'tinydb_serialization>=1.0.4'
+    ],
+    tests_require=[
+        'pytest>=3.0.4'
+    ],
+    cmdclass={
+        'test':PyTest
+    }
 )
