@@ -9,7 +9,7 @@ python:
 
 # command to install dependencies
 install:
-  - "pip install pytest -U"
+  - "pip install pytest -U" #needed for py3.3 testpass
   - "pip install -e ."
 
 # command to run tests

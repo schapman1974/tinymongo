@@ -50,9 +50,6 @@ class PyTest(TestCommand):
         errno = pytest.main(pytest_commands)
         exit(errno)
 
-#with open('requirements.txt') as f:
-#    requirements = f.read().splitlines()
-
 setup(
     name='tinymongo',
     packages=find_packages(),
@@ -64,7 +61,13 @@ setup(
     download_url='https://github.com/schapman1974/tinymongo/archive/master.zip',
     keywords=['mongodb', 'drop-in', 'database', 'tinydb'],
     long_description=parse_md_to_rst("README.md"),
-    classifiers=[],
+    classifiers=[
+        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6'
+    ],
     install_requires=[
         'tinydb>=3.2.1',
         'tinydb_serialization>=1.0.4'
