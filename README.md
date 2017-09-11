@@ -23,9 +23,9 @@ The library is currently under rapid development and a more recent version
 may be desired.
 
 In this case, simply clone this repository, navigate
-to the root project directory, and `python setup.py install`
+to the root project directory, and `pip install -e .`
 
-or use `pip install git+https://github.com/schapman1974/tinymongo.git#egg=tinymongo`
+or use `pip install -e git+https://github.com/schapman1974/tinymongo.git#egg=tinymongo`
 
 This
 is a pure python distribution and - thus - should require no external
