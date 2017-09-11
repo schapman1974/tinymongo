@@ -14,5 +14,4 @@ install:
 
 # command to run tests
 script: 
-  - "pip freeze"
   - "python setup.py test"
