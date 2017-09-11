@@ -70,7 +70,7 @@ setup(
         'tinydb_serialization>=1.0.4'
     ],
     tests_require=[
-        'pytest>=3.0.4'
+        'pytest>=3.2.0'
     ],
     cmdclass={
         'test':PyTest
