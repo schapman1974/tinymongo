@@ -92,6 +92,10 @@ class TinyMongoDatabase(object):
         """Gets a new or existing collection"""
         return TinyMongoCollection(name, self)
 
+    def collection_names(self):
+        """Get a list of all the collection names in this database"""
+        return list(self.tinydb.tables())
+
 
 class TinyMongoCollection(object):
     """
