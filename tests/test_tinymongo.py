@@ -75,7 +75,7 @@ def test_list_collections():
     tinyTable = tiny_database.tinyTable
     tinyTable.insert_one({'testing': 'collection_names'})
     tables = tiny_database.collection_names()
-    assert tables == [u'_default', u'tinyTable']
+    assert tables == [u'_default', u'tinyCollection', u'tinyTable']
 
 
 def test_initialize_collection(collection):
@@ -288,7 +288,7 @@ def test_in(collection):
     assert c[4]['count'] == 99
 
     # find in list testing
-    c = table.find({'countArray': {'$in': [22, 50]}}).sort({'count': 1})
+    c = collection.find({'countArray': {'$in': [22, 50]}}).sort({'count': 1})
     assert c.count() == 10
     for doc in c:
         if doc['count'] <= 22:
