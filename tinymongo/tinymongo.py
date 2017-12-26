@@ -335,7 +335,7 @@ class TinyMongoCollection(object):
                             )
                     yield grouped_conditions
                 elif key == '$in':
-                    grouped_conditions = None
+                    grouped_conditions = q[prev_key].any(value)
                     for val in value:
                         for parse_condition in self.parse_condition({prev_key : val}):
                             grouped_conditions = (
