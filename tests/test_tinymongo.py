@@ -72,10 +72,9 @@ def test_list_collections():
     Testing db.collection_names()
     Should list out all collections/tables in database
     """
-    tinyTable = tiny_database.tinyTable
-    tinyTable.insert_one({'testing': 'collection_names'})
     tables = tiny_database.collection_names()
-    assert tables == [u'_default', u'tinyCollection', u'tinyTable']
+    assert '_default' in tables
+    assert 'tinyCollection' in tables
 
 
 def test_initialize_collection(collection):
