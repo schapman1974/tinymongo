@@ -67,6 +67,17 @@ def test_access_collection_by_subscription():
     assert isinstance(tiny_database['tinyCollection'], tm.TinyMongoCollection)
 
 
+def test_list_collections():
+    """
+    Testing db.collection_names()
+    Should list out all collections/tables in database
+    """
+    tinyTable = tiny_database.tinyTable
+    tinyTable.insert_one({'testing': 'collection_names'})
+    tables = tiny_database.collection_names()
+    assert tables == [u'_default', u'tinyTable']
+
+
 def test_initialize_collection(collection):
     """
     Ensure that the initial db is of the correct size
