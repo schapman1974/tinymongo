@@ -286,6 +286,15 @@ def test_in(collection):
     assert c[2]['count'] == 55
     assert c[3]['count'] == 77
     assert c[4]['count'] == 99
+
+    # find in list testing
+    c = table.find({'countArray': {'$in': [22, 50]}}).sort({'count': 1})
+    assert c.count() == 10
+    for doc in c:
+        if doc['count'] <= 22:
+            assert 22 in doc['countArray']
+        elif doc['count'] <= 50:
+            assert 50 in doc['countArray']
     
 
 def test_update_one_set(collection):
