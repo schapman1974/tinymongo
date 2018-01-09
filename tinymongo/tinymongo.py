@@ -92,6 +92,10 @@ class TinyMongoDatabase(object):
         """Gets a new or existing collection"""
         return TinyMongoCollection(name, self)
 
+    def collection_names(self):
+        """Get a list of all the collection names in this database"""
+        return list(self.tinydb.tables())
+
 
 class TinyMongoCollection(object):
     """
@@ -331,7 +335,8 @@ class TinyMongoCollection(object):
                             )
                     yield grouped_conditions
                 elif key == '$in':
-                    grouped_conditions = None
+                    # use `any` to find with list, before comparing to single string
+                    grouped_conditions = q[prev_key].any(value)
                     for val in value:
                         for parse_condition in self.parse_condition({prev_key : val}):
                             grouped_conditions = (
