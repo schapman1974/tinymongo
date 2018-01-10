@@ -1,5 +1,7 @@
 import os
+import copy
 import pytest
+import pymongo
 import tinymongo as tm
 
 # setup the db
@@ -21,12 +23,17 @@ tiny_client = tm.TinyMongoClient(db_name)
 tiny_database = tiny_client.tinyDatabase
 tiny_collection = tiny_database.tinyCollection
 
+mongo_client = pymongo.MongoClient("localhost:27017")
+mongo_database = mongo_client["test-mongodb"]
+mongo_collection = mongo_database["test-collection"]
+
 
 @pytest.fixture()
 def collection(request):
     # setup the db, clear if necessary
     # todo: the 'drop()' function from pymongo should work in future revisions
     tiny_collection.delete_many({})  # should delete all records in the collection
+    mongo_collection.delete_many({})
 
     # insert 100 integers, strings, floats, booleans, arrays, and objects
     for num in range(100):
@@ -36,16 +43,30 @@ def collection(request):
         new_obj['countFloat'] = float(num) + 0.1
         new_obj['countBool'] = True if num & 1 else False
         new_obj['countArray'] = [num + i for i in range(5)]
+        new_obj['countDict'] = {
+            'odd': bool(num & 1),
+            'even': not(num & 1),
+            'three': not(num % 3),
+            'five': not(num % 5),
+        }
+        new_obj['nestedArray'] = [[num + i] for i in range(5)]
+        new_obj['dictArray'] = [{'number': num + i} for i in range(5)]
+        new_obj['mixedDict'] = copy.deepcopy(new_obj)
         # todo: add object to the db
 
         tiny_collection.insert_one(new_obj)
+        mongo_collection.insert_one(new_obj)
 
     def fin():
         tiny_client.close()
+        mongo_client.close()
 
     request.addfinalizer(finalizer=fin)
 
-    return tiny_collection
+    return {
+        'tiny': tiny_collection, 
+        'mongo': mongo_collection
+    }
 
 
 def test_initialize_db():
@@ -84,7 +105,7 @@ def test_initialize_collection(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({})
+    c = collection['tiny'].find({})
 
     count = 0
     for doc in c:
@@ -95,7 +116,7 @@ def test_initialize_collection(collection):
 
 
 def test_find_with_filter_named_parameter(collection):
-    c = collection.find(filter={})
+    c = collection['tiny'].find(filter={})
     assert c.count() == 100
 
 
@@ -106,7 +127,7 @@ def test_greater_than(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'count': {'$gte': 50}})
+    c = collection['tiny'].find({'count': {'$gte': 50}})
 
     assert c.count() == 50
 
@@ -118,7 +139,7 @@ def test_sort_wrong_input_type(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find()  # find all
+    c = collection['tiny'].find()  # find all
     with pytest.raises(ValueError):
         c.sort('count')
 
@@ -130,7 +151,7 @@ def test_sort_positive(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find()  # find all
+    c = collection['tiny'].find()  # find all
     c.sort({'count': 1})
     assert c[0]['count'] == 0
     assert c[1]['count'] == 1
@@ -143,7 +164,7 @@ def test_sort_negative(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find()  # find all
+    c = collection['tiny'].find()  # find all
     c.sort({'count': -1})
     assert c[0]['count'] == 99
     assert c[1]['count'] == 98
@@ -156,7 +177,7 @@ def test_has_next(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find().sort({'count': 1})
+    c = collection['tiny'].find().sort({'count': 1})
 
     assert c.hasNext() is True
     assert c.next()['count'] == 0
@@ -169,7 +190,7 @@ def test_not_has_next(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'count': {'$gte': 98}}).sort({'count': 1})
+    c = collection['tiny'].find({'count': {'$gte': 98}}).sort({'count': 1})
 
     assert c.hasNext() is True
     assert c.next()['count'] == 98
@@ -184,7 +205,7 @@ def test_empty_find(collection):
     :param collection:
     :return:
     """
-    c = collection.find()
+    c = collection['tiny'].find()
     assert c.count() == 100
 
 
@@ -195,13 +216,13 @@ def test_find_one(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find_one({'count': 3})
+    c = collection['tiny'].find_one({'count': 3})
 
     assert c['countStr'] == '3'
 
 
 def test_find_one_with_filter_named_parameter(collection):
-    c = collection.find_one(filter={'count': 3})
+    c = collection['tiny'].find_one(filter={'count': 3})
     assert c['countStr'] == '3'
 
 
@@ -211,7 +232,7 @@ def test_gte_lt(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'count': {'$gte': 50, '$lt': 51}})
+    c = collection['tiny'].find({'count': {'$gte': 50, '$lt': 51}})
     assert c.count() == 1
     assert c[0]['countStr'] == '50'
 
@@ -222,7 +243,7 @@ def test_gt_lte(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'count': {'$gt': 50, '$lte': 51}})
+    c = collection['tiny'].find({'count': {'$gt': 50, '$lte': 51}})
     assert c.count() == 1
     assert c[0]['countStr'] == '51'
 
@@ -233,7 +254,7 @@ def test_ne(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'count': {'$ne': 50}})
+    c = collection['tiny'].find({'count': {'$ne': 50}})
     assert c.count() == 99
 
     for item in c:
@@ -245,7 +266,7 @@ def test_regex(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({'countStr': {'$regex': r'[5]{1,2}'}}).sort({'count': 1})
+    c = collection['tiny'].find({'countStr': {'$regex': r'[5]{1,2}'}}).sort({'count': 1})
     assert c.count() == 11
     
     c.sort({'count': 1})
@@ -254,7 +275,7 @@ def test_regex(collection):
     assert c[2]['count'] == 51
     assert c[10]['count'] == 59
     
-    c = collection.find({'countStr': {'$regex': r'[^5][5]{1}'}}).sort({'count': 1})
+    c = collection['tiny'].find({'countStr': {'$regex': r'[^5][5]{1}'}}).sort({'count': 1})
     assert c.count() == 8
     
     c.sort({'count': 1})
@@ -270,7 +291,7 @@ def test_in(collection):
     :return:
     """
     # int value testing
-    c = collection.find({'count': {'$in': [22,44,66,88]}}).sort({'count': 1})
+    c = collection['tiny'].find({'count': {'$in': [22,44,66,88]}}).sort({'count': 1})
     assert c.count() == 4
     assert c[0]['count'] == 22
     assert c[1]['count'] == 44
@@ -278,7 +299,7 @@ def test_in(collection):
     assert c[3]['count'] == 88
     
     # str value testing
-    c = collection.find({'countStr': {'$in': ['11','33','55','77','99']}}).sort({'count': 1})
+    c = collection['tiny'].find({'countStr': {'$in': ['11','33','55','77','99']}}).sort({'count': 1})
     assert c.count() == 5
     assert c[0]['count'] == 11
     assert c[1]['count'] == 33
@@ -287,7 +308,7 @@ def test_in(collection):
     assert c[4]['count'] == 99
 
     # find in list testing
-    c = collection.find({'countArray': {'$in': [22, 50]}}).sort({'count': 1})
+    c = collection['tiny'].find({'countArray': {'$in': [22, 50]}}).sort({'count': 1})
     assert c.count() == 10
     for doc in c:
         if doc['count'] <= 22:
@@ -303,11 +324,11 @@ def test_update_one_set(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    cu = collection.update_one({'count': 3}, {'$set': {'countStr': 'three'}})
+    cu = collection['tiny'].update_one({'count': 3}, {'$set': {'countStr': 'three'}})
     # cu.raw_result contains the updated ids
     assert len(cu.raw_result) is 1  # only one is updated
 
-    c = collection.find_one({'count': 3})
+    c = collection['tiny'].find_one({'count': 3})
     assert c['countStr'] == 'three'
 
 
@@ -318,9 +339,9 @@ def test_delete_one(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    collection.delete_one({'count': 3})
+    collection['tiny'].delete_one({'count': 3})
 
-    c = collection.find({})
+    c = collection['tiny'].find({})
 
     assert c.count() == 99
 
@@ -332,9 +353,9 @@ def test_delete_all(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    collection.delete_many({})
+    collection['tiny'].delete_many({})
 
-    c = collection.find({})
+    c = collection['tiny'].find({})
 
     assert c.count() == 0
 
@@ -346,9 +367,9 @@ def test_delete_many(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    collection.delete_many({'count': {'$gte': 50}})
+    collection['tiny'].delete_many({'count': {'$gte': 50}})
 
-    c = collection.find({})
+    c = collection['tiny'].find({})
 
     assert c.count() == 50
 
@@ -359,12 +380,12 @@ def test_insert_one(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    collection.insert_one({'my_object_name': 'my object value', 'count': 1000})
+    collection['tiny'].insert_one({'my_object_name': 'my object value', 'count': 1000})
 
-    c = collection.find({})
+    c = collection['tiny'].find({})
 
     assert c.count() == 101
-    assert collection.find({'my_object_name': 'my object value'})['count'] == 1000
+    assert collection['tiny'].find({'my_object_name': 'my object value'})['count'] == 1000
 
 
 def test_insert_many(collection):
@@ -378,9 +399,9 @@ def test_insert_many(collection):
         value = 1000 + i
         items.append({'count': value, 'countStr': str(value)})
 
-    collection.insert_many(items)
+    collection['tiny'].insert_many(items)
 
-    c = collection.find({})
+    c = collection['tiny'].find({})
 
     assert c.count() == 110
 
@@ -393,7 +414,7 @@ def test_insert_many_wrong_input(collection):
     """
     item = {'my_key': 'my value'}
     with pytest.raises(ValueError):
-        collection.insert_many(item)
+        collection['tiny'].insert_many(item)
 
 
 def test_insert_one_with_list_input(collection):
@@ -403,7 +424,7 @@ def test_insert_one_with_list_input(collection):
     :return:
     """
     with pytest.raises(ValueError):
-        collection.insert_one([{'my_object_name': 'my object value', 'count': 1000}])
+        collection['tiny'].insert_one([{'my_object_name': 'my object value', 'count': 1000}])
 
 
 def test_and(collection):
@@ -412,7 +433,7 @@ def test_and(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({"$and": [{"count": {"$gt": 10}}, {"count": {"$lte": 50}}]})
+    c = collection['tiny'].find({"$and": [{"count": {"$gt": 10}}, {"count": {"$lte": 50}}]})
     assert c.count() == 40
 
 
@@ -422,7 +443,7 @@ def test_or(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({"$or": [{"count": {"$lt": 10}}, {"count": {"$gte": 90}}]})
+    c = collection['tiny'].find({"$or": [{"count": {"$lt": 10}}, {"count": {"$gte": 90}}]})
     assert c.count() == 20
 
 def test_not(collection):
@@ -431,5 +452,5 @@ def test_not(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection.find({"count": {"$not": { "$gte": 90, "$lt": 10}}})
+    c = collection['tiny'].find({"count": {"$not": { "$gte": 90, "$lt": 10}}})
     assert c.count() == 80
