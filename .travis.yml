@@ -7,6 +7,9 @@ python:
   - "3.5-dev" # 3.5 development branch
   - "3.6-dev" # 3.6 development branch
 
+services:
+  - mongodb
+
 # command to install dependencies
 install:
   - "pip install pytest -U" #needed for py3.3 testpass

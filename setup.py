@@ -70,7 +70,8 @@ setup(
     ],
     install_requires=[
         'tinydb>=3.2.1',
-        'tinydb_serialization>=1.0.4'
+        'tinydb_serialization>=1.0.4',
+        'pymongo>=3.4.0'
     ],
     tests_require=[
         'pytest>=3.2.0',
