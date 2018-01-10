@@ -11,7 +11,7 @@ mongo_collection = mongo_database["test-collection"]
 def collection(request):
     # setup the db, clear if necessary
     # todo: the 'drop()' function from pymongo should work in future revisions
-    mongo_collection.delete_many({})
+    #mongo_collection.delete_many({})
 
     mongo_collection.insert_one({"Hello": "World"})
 
