@@ -26,3 +26,14 @@ def collection(request):
 def test_initialize_collection(collection):
     c = collection.find({})
     assert c.count() == 1
+    collection.insert_one({"Hello2": "World2"})
+
+
+def test_initialize_collection2(collection):
+    c = collection.find({})
+    assert c.count() == 1
+
+
+def test_initialize_collection3(collection):
+    c = collection.find({})
+    assert c.count() == 2
