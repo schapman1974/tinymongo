@@ -64,7 +64,7 @@ def collection(request):
     request.addfinalizer(finalizer=fin)
 
     return {
-        'tiny': tiny_collection, 
+        'tiny': tiny_collection,
         'mongo': mongo_collection
     }
 
@@ -113,11 +113,13 @@ def test_initialize_collection(collection):
 
     assert count == 100
     assert c.count() == 100
+    assert collection['mongo'].find({}).count() == 100
 
 
 def test_find_with_filter_named_parameter(collection):
     c = collection['tiny'].find(filter={})
     assert c.count() == 100
+    assert collection['mongo'].find(filter={}).count() == 100
 
 
 def test_greater_than(collection):
@@ -130,6 +132,7 @@ def test_greater_than(collection):
     c = collection['tiny'].find({'count': {'$gte': 50}})
 
     assert c.count() == 50
+    assert collection['mongo'].find({'count': {'$gte': 50}}).count() == 50
 
 
 def test_sort_wrong_input_type(collection):
