@@ -345,6 +345,8 @@ class TinyMongoCollection(object):
                                 else grouped_conditions | parse_condition
                             )
                     yield grouped_conditions
+                else:
+                    yield q[prev_key].any([value])
             else:
                 yield conditions
 
