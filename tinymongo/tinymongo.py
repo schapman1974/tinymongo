@@ -297,7 +297,7 @@ class TinyMongoCollection(object):
                 regex = regex.replace('|||', '\\')
                 currCond = (where(prev_key).matches(regex))
                 conditions = currCond if not conditions else (conditions & currCond)
-            elif key in ['$and', '$or', '$in']:
+            elif key in ['$and', '$or', '$in', '$all']:
                 pass
             else:
                 # don't want to use the previous key if this is a secondary key
@@ -345,6 +345,8 @@ class TinyMongoCollection(object):
                                 else grouped_conditions | parse_condition
                             )
                     yield grouped_conditions
+                elif key == '$all':
+                    yield q[prev_key].all(value)
                 else:
                     yield q[prev_key].any([value])
             else:
