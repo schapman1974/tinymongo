@@ -304,8 +304,8 @@ class TinyMongoCollection(object):
                 # (fixes multiple item query that includes $ codes)
                 if not isinstance(value, dict) and not isinstance(value, list):
                     conditions = (
-                        q[key] == value
-                    ) if not conditions else (conditions & (q[key] == value))
+                        (q[key] == value) | (q[key].any([value]))
+                    ) if not conditions else (conditions & ((q[key] == value) | (q[key].any([value]))))
                     prev_key = key
 
             logger.debug(u'c: {}'.format(conditions))
