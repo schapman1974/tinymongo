@@ -459,6 +459,11 @@ class TinyMongoCollection(object):
             self.table.remove(where(u'_id') == item[u'_id'])
             for item in items
         ]
+
+        if query == {}:
+            # need to reset TinyDB's index for docs order consistency
+            self.table._last_id = 0
+
         return DeleteResult(raw_result=result)
 
 
