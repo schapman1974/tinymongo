@@ -398,12 +398,15 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        allcond = self.parse_query(filter)
+        if filter is None:
+            result = self.table.all()
+        else:
+            allcond = self.parse_query(filter)
 
-        try:
-            result = self.table.search(allcond)
-        except (AttributeError, TypeError):
-            result = []
+            try:
+                result = self.table.search(allcond)
+            except (AttributeError, TypeError):
+                result = []
 
         result = TinyMongoCursor(
             result,
