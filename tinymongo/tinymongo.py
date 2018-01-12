@@ -188,14 +188,33 @@ class TinyMongoCollection(object):
         if not isinstance(docs, list):
             raise ValueError(u'"insert_many" requires a list input')
 
-        results = []
+        bypass_document_validation = kwargs.get('bypass_document_validation')
+
+        if bypass_document_validation is not True:
+            # get all _id in once, to reduce I/O. (without projection)
+            existing = [doc['_id'] for doc in self.find({})]
+
+        _ids = list()
         for doc in docs:
-            result = self.insert_one(doc, *args, **kwargs)
-            results.append(result)
+
+            _id = doc[u'_id'] = doc.get('_id') or generate_id()
+
+            if bypass_document_validation is not True:
+                if _id in existing:
+                    raise DuplicateKeyError(
+                        u'_id:{0} already exists in collection:{1}'.format(
+                            _id, self.tablename
+                        )
+                    )
+                existing.append(_id)
+
+            _ids.append(_id)
+
+        results = self.table.insert_multiple(docs)
 
         return InsertManyResult(
-            eids=[res.eid for res in results],
-            inserted_ids=[res.inserted_id for res in results]
+            eids=[eid for eid in results],
+            inserted_ids=[inserted_id for inserted_id in _ids]
         )
 
     def parse_query(self, query):
