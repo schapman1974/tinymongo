@@ -1,5 +1,6 @@
 import os
 import copy
+import json
 import pytest
 import pymongo
 import tinymongo as tm
@@ -171,6 +172,41 @@ def test_sort_negative(collection):
     c.sort('count', -1)
     assert c[0]['count'] == 99
     assert c[1]['count'] == 98
+
+
+def test_sort_behavior():
+    """
+    Testing sort behavior by sorting any kind of data type together
+    and compare the result with MongoDB
+    """
+    dirname = os.path.dirname(__file__)
+    source = os.path.join(dirname, "dataset_sample", "mixed_type.json")
+    dataset = []
+    with open(source) as data_file:
+        for line in data_file:
+            dataset.append(json.loads(line))
+
+    for i, d in enumerate(dataset):
+        d["_id"] = i + 1
+
+    collection['mongo'].delete_many({})
+    collection['mongo'].insert_many(dataset)
+    collection['tiny'].delete_many({})
+    collection['tiny'].insert_many(dataset)
+
+    sort_by = [('item', 1), ('amount', -1)]
+
+    mongo_find  = mongo_find.sort(sort_by)
+    tiny_find  = tiny_find.sort(sort_by)
+
+    assert mongo_find.count() == tiny_find.count()
+
+    no_difference = True
+    for i, m_data in enumerate(mongo_find):
+        if not m_data == tiny_find[i]:
+            no_difference = False
+
+    assert no_difference
 
 
 def test_has_next(collection):
