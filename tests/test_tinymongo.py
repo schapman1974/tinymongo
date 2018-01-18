@@ -174,7 +174,7 @@ def test_sort_negative(collection):
     assert c[1]['count'] == 98
 
 
-def test_sort_behavior():
+def test_sort_behavior(collection):
     """
     Testing sort behavior by sorting any kind of data type together
     and compare the result with MongoDB
@@ -196,8 +196,8 @@ def test_sort_behavior():
 
     sort_by = [('item', 1), ('amount', -1)]
 
-    mongo_find  = mongo_find.sort(sort_by)
-    tiny_find  = tiny_find.sort(sort_by)
+    mongo_find = collection['mongo'].find().sort(sort_by)
+    tiny_find = collection['tiny'].find().sort(sort_by)
 
     assert mongo_find.count() == tiny_find.count()
 
