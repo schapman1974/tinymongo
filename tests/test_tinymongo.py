@@ -144,7 +144,7 @@ def test_sort_wrong_input_type(collection):
     """
     c = collection['tiny'].find()  # find all
     with pytest.raises(ValueError):
-        c.sort('count')
+        c.sort(['count'], 1)
 
 
 def test_sort_positive(collection):
@@ -155,7 +155,7 @@ def test_sort_positive(collection):
     :return:
     """
     c = collection['tiny'].find()  # find all
-    c.sort({'count': 1})
+    c.sort('count', 1)
     assert c[0]['count'] == 0
     assert c[1]['count'] == 1
 
@@ -168,7 +168,7 @@ def test_sort_negative(collection):
     :return:
     """
     c = collection['tiny'].find()  # find all
-    c.sort({'count': -1})
+    c.sort('count', -1)
     assert c[0]['count'] == 99
     assert c[1]['count'] == 98
 
@@ -180,7 +180,7 @@ def test_has_next(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection['tiny'].find().sort({'count': 1})
+    c = collection['tiny'].find().sort('count', 1)
 
     assert c.hasNext() is True
     assert c.next()['count'] == 0
@@ -193,7 +193,7 @@ def test_not_has_next(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection['tiny'].find({'count': {'$gte': 98}}).sort({'count': 1})
+    c = collection['tiny'].find({'count': {'$gte': 98}}).sort('count', 1)
 
     assert c.hasNext() is True
     assert c.next()['count'] == 98
@@ -269,19 +269,19 @@ def test_regex(collection):
     :param collection: pytest fixture that returns the collection
     :return:
     """
-    c = collection['tiny'].find({'countStr': {'$regex': r'[5]{1,2}'}}).sort({'count': 1})
+    c = collection['tiny'].find({'countStr': {'$regex': r'[5]{1,2}'}}).sort('count', 1)
     assert c.count() == 11
     
-    c.sort({'count': 1})
+    c.sort('count', 1)
     assert c[0]['count'] == 5
     assert c[1]['count'] == 50
     assert c[2]['count'] == 51
     assert c[10]['count'] == 59
     
-    c = collection['tiny'].find({'countStr': {'$regex': r'[^5][5]{1}'}}).sort({'count': 1})
+    c = collection['tiny'].find({'countStr': {'$regex': r'[^5][5]{1}'}}).sort('count', 1)
     assert c.count() == 8
     
-    c.sort({'count': 1})
+    c.sort('count', 1)
     assert c[0]['count'] == 15
     assert c[1]['count'] == 25
     assert c[4]['count'] == 65
@@ -294,7 +294,7 @@ def test_in(collection):
     :return:
     """
     # int value testing
-    c = collection['tiny'].find({'count': {'$in': [22,44,66,88]}}).sort({'count': 1})
+    c = collection['tiny'].find({'count': {'$in': [22,44,66,88]}}).sort('count', 1)
     assert c.count() == 4
     assert c[0]['count'] == 22
     assert c[1]['count'] == 44
@@ -302,7 +302,7 @@ def test_in(collection):
     assert c[3]['count'] == 88
     
     # str value testing
-    c = collection['tiny'].find({'countStr': {'$in': ['11','33','55','77','99']}}).sort({'count': 1})
+    c = collection['tiny'].find({'countStr': {'$in': ['11','33','55','77','99']}}).sort('count', 1)
     assert c.count() == 5
     assert c[0]['count'] == 11
     assert c[1]['count'] == 33
@@ -311,7 +311,7 @@ def test_in(collection):
     assert c[4]['count'] == 99
 
     # find in list testing
-    c = collection['tiny'].find({'countArray': {'$in': [22, 50]}}).sort({'count': 1})
+    c = collection['tiny'].find({'countArray': {'$in': [22, 50]}}).sort('count', 1)
     assert c.count() == 10
     for doc in c:
         if doc['count'] <= 22:
