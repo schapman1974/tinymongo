@@ -64,13 +64,13 @@ take a look at demo.py within the repository.
 
     # Sorting users by its username DESC
     # omitting `filter` returns all records
-    db.users.find(sort={'username': -1})
+    db.users.find(sort=[('username', -1)])
 
     # Pagination of the results
     # Getting the first 20 records
-    db.users.find(sort={'username': -1}, skip=0, limit=20)
+    db.users.find(sort=[('username', -1)], skip=0, limit=20)
     # Getting next 20 records
-    db.users.find(sort={'username': -1}, skip=20, limit=20)
+    db.users.find(sort=[('username', -1)], skip=20, limit=20)
 
     # Getting the total of records
     db.users.count()
