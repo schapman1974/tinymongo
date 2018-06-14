@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 class TinyMongoClient(object):
     """Represents the Tiny `db` client"""
-    def __init__(self, foldername=u"tinydb"):
+    def __init__(self, foldername=u"tinydb", **kwargs):
         """Initialize container folder"""
         self._foldername = foldername
         try:
@@ -756,7 +756,7 @@ class TinyMongoCursor(object):
         self.cursorpos += 1
         return self.cursordat[self.cursorpos]
 
-    def count(self):
+    def count(self, with_limit_and_skip=False):
         """
         Returns the number of records in the current cursor
 
