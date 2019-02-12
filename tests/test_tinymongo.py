@@ -114,7 +114,9 @@ def test_initialize_collection(collection):
 
     assert count == 100
     assert c.count() == 100
+    assert collection['tiny'].count() == 100
     assert collection['mongo'].find({}).count() == 100
+    assert collection['mongo'].count() == 100
 
 
 def test_find_with_filter_named_parameter(collection):
@@ -299,6 +301,7 @@ def test_ne(collection):
     for item in c:
         assert item['countStr'] != '50'
 
+
 def test_regex(collection):
     """
     Testing the regex query
@@ -322,7 +325,8 @@ def test_regex(collection):
     assert c[1]['count'] == 25
     assert c[4]['count'] == 65
     assert c[7]['count'] == 95
-    
+
+
 def test_in(collection):
     """
     Testing the $in query with list of values as parameter
@@ -484,6 +488,7 @@ def test_or(collection):
     """
     c = collection['tiny'].find({"$or": [{"count": {"$lt": 10}}, {"count": {"$gte": 90}}]})
     assert c.count() == 20
+
 
 def test_not(collection):
     """
