@@ -63,7 +63,6 @@ setup(
     long_description=parse_md_to_rst("README.md"),
     classifiers=[
         'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3.3',
         'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6'
