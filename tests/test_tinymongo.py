@@ -120,7 +120,7 @@ def test_initialize_collection(collection):
 
 
 def test_drop_collection(collection):
-    c = collection['tiny'].find({})
+    c = collection['tiny']
 
     # assert True for successful drop
     assert c.drop() is True
