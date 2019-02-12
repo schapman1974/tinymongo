@@ -53,7 +53,7 @@ class PyTest(TestCommand):
 setup(
     name='tinymongo',
     packages=find_packages(),
-    version='0.2.0',
+    version='0.2.1',
     description='A flat file drop in replacement for mongodb.  Requires Tinydb',
     author='Stephen Chapman, Jason Jones',
     author_email='schapman1974@gmail.com',
