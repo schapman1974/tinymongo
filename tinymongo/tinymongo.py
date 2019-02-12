@@ -149,6 +149,19 @@ class TinyMongoCollection(object):
         """
         return self.find().count()
 
+    def drop(self, **kwargs):
+        """
+        Removes a collection from the database.
+        **kwargs only because of the optional "writeConcern" field, but does nothing in the TinyDB database.
+        :return: Returns True when successfully drops a collection. Returns False when collection to drop does not
+        exist.
+        """
+        if self.table:
+            self.parent.purge_table(self.tablename)
+            return True
+        else:
+            return False
+
     def insert(self, docs, *args, **kwargs):
         """Backwards compatibility with insert"""
         if isinstance(docs, list):
