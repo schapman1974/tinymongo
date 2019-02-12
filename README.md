@@ -1,7 +1,7 @@
 
 ![logo](artwork/tinymongo.png)
 
-[![Build Status](https://travis-ci.org/jjonesAtMoog/tinymongo.svg?branch=master)](https://travis-ci.org/jjonesAtMoog/tinymongo)
+[![Build Status](https://travis-ci.org/schapman1974/tinymongo.svg?branch=master)](https://travis-ci.org/schapman1974/tinymongo)
 
 # Purpose
 
