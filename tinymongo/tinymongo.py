@@ -142,6 +142,13 @@ class TinyMongoCollection(object):
         """
         self.table = self.parent.tinydb.table(self.tablename)
 
+    def count(self):
+        """
+        Counts the documents in the collection.
+        :return: Integer representing the number of documents in the collection.
+        """
+        return self.find().count()
+
     def insert(self, docs, *args, **kwargs):
         """Backwards compatibility with insert"""
         if isinstance(docs, list):
