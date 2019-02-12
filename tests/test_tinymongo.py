@@ -123,11 +123,9 @@ def test_drop_collection(collection):
     c = collection['tiny'].find({})
 
     # assert True for successful drop
-    assert collection.drop() is True
     assert c.drop() is True
 
     # assert False because collection does not exist anymore
-    assert collection.drop() is False
     assert c.drop() is False
 
 
