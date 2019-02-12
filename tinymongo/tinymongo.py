@@ -157,7 +157,7 @@ class TinyMongoCollection(object):
         exist.
         """
         if self.table:
-            self.parent.purge_table(self.tablename)
+            self.parent.tinydb.purge_table(self.tablename)
             return True
         else:
             return False
