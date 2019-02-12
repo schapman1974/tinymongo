@@ -119,6 +119,18 @@ def test_initialize_collection(collection):
     assert collection['mongo'].count() == 100
 
 
+def test_drop_collection(collection):
+    c = collection['tiny'].find({})
+
+    # assert True for successful drop
+    assert collection.drop() is True
+    assert c.drop() is True
+
+    # assert False because collection does not exist anymore
+    assert collection.drop() is False
+    assert c.drop() is False
+
+
 def test_find_with_filter_named_parameter(collection):
     c = collection['tiny'].find(filter={})
     assert c.count() == 100
