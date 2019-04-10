@@ -148,6 +148,45 @@ def test_greater_than(collection):
     assert collection['mongo'].find({'count': {'$gte': 50}}).count() == 50
 
 
+def test_find_in_subdocument(collection):
+    """
+    Testing finding documents in a nested subdocument, with a direct value query
+    :param collection: pytest fixture that returns the collection
+    :return:
+
+    """
+    c = collection['tiny'].find({'mixedDict.count': 0})
+
+    assert c.count() == 1
+    assert collection['mongo'].find({'mixedDict.count': 0}).count() == 1
+
+
+def test_find_in_subdocument_with_operator(collection):
+    """
+    Testing finding documents in a nested subdocument
+    :param collection: pytest fixture that returns the collection
+    :return:
+
+    """
+    c = collection['tiny'].find({'mixedDict.count': {'$gte': 50}})
+
+    assert c.count() == 50
+    assert collection['mongo'].find({'mixedDict.count': {'$gte': 50}}).count() == 50
+
+
+def test_find_in_subdocument_3_levels(collection):
+    """
+    Testing finding documents in a nested subdocument with
+    :param collection: pytest fixture that returns the collection
+    :return:
+
+    """
+    c = collection['tiny'].find({'mixedDict.countDict.even': True})
+
+    assert c.count() == 50
+    assert collection['mongo'].find({'mixedDict.countDict.even': True}).count() == 50
+
+
 def test_sort_wrong_input_type(collection):
     """
     Testing the sort method in the positive direction
@@ -320,16 +359,16 @@ def test_regex(collection):
     """
     c = collection['tiny'].find({'countStr': {'$regex': r'[5]{1,2}'}}).sort('count', 1)
     assert c.count() == 11
-    
+
     c.sort('count', 1)
     assert c[0]['count'] == 5
     assert c[1]['count'] == 50
     assert c[2]['count'] == 51
     assert c[10]['count'] == 59
-    
+
     c = collection['tiny'].find({'countStr': {'$regex': r'[^5][5]{1}'}}).sort('count', 1)
     assert c.count() == 8
-    
+
     c.sort('count', 1)
     assert c[0]['count'] == 15
     assert c[1]['count'] == 25
@@ -350,7 +389,7 @@ def test_in(collection):
     assert c[1]['count'] == 44
     assert c[2]['count'] == 66
     assert c[3]['count'] == 88
-    
+
     # str value testing
     c = collection['tiny'].find({'countStr': {'$in': ['11','33','55','77','99']}}).sort('count', 1)
     assert c.count() == 5
@@ -368,7 +407,7 @@ def test_in(collection):
             assert 22 in doc['countArray']
         elif doc['count'] <= 50:
             assert 50 in doc['countArray']
-    
+
 
 def test_update_one_set(collection):
     """
