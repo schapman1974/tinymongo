@@ -4,6 +4,7 @@
 from __future__ import absolute_import
 
 import copy
+from functools import reduce
 import logging
 import os
 from math import ceil
@@ -26,6 +27,10 @@ except NameError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def Q(query, key):
+    return reduce(lambda partial_query, field: partial_query[field], key.split('.'), query)
 
 
 class TinyMongoClient(object):
@@ -296,40 +301,40 @@ class TinyMongoCollection(object):
 
             if key == u'$gte':
                 conditions = (
-                    q[prev_key] >= value
+                    Q(q, prev_key) >= value
                 ) if not conditions and prev_key != "$not" \
-                else (conditions & (q[prev_key] >= value)) if prev_key != "$not" \
+                else (conditions & (Q(q, prev_key) >= value)) if prev_key != "$not" \
                 else (q[last_prev_key] < value)
             elif key == u'$gt':
                 conditions = (
-                    q[prev_key] > value
+                    Q(q, prev_key) > value
                 ) if not conditions and prev_key != "$not" \
-                else (conditions & (q[prev_key] > value)) if prev_key != "$not" \
+                else (conditions & (Q(q, prev_key) > value)) if prev_key != "$not" \
                 else (q[last_prev_key] <= value)
             elif key == u'$lte':
                 conditions = (
-                    q[prev_key] <= value
+                    Q(q, prev_key) <= value
                 ) if not conditions and prev_key != "$not" \
-                else (conditions & (q[prev_key] <= value)) if prev_key != "$not" \
+                else (conditions & (Q(q, prev_key) <= value)) if prev_key != "$not" \
                 else (q[last_prev_key] > value)
             elif key == u'$lt':
                 conditions = (
-                    q[prev_key] < value
+                    Q(q, prev_key) < value
                 ) if not conditions and prev_key != "$not" \
-                else (conditions & (q[prev_key] < value)) if prev_key != "$not" \
+                else (conditions & (Q(q, prev_key) < value)) if prev_key != "$not" \
                 else (q[last_prev_key] >= value)
             elif key == u'$ne':
                 conditions = (
-                    q[prev_key] != value
+                    Q(q, prev_key) != value
                 ) if not conditions and prev_key != "$not" \
-                else (conditions & (q[prev_key] != value))if prev_key != "$not" \
+                else (conditions & (Q(q, prev_key) != value))if prev_key != "$not" \
                 else (q[last_prev_key] == value)
             elif key == u'$not':
                 if not isinstance(value, dict) and not isinstance(value, list):
                     conditions = (
-                        q[prev_key] != value
+                        Q(q, prev_key) != value
                     ) if not conditions and prev_key != "$not" \
-                    else (conditions & (q[prev_key] != value)) \
+                    else (conditions & (Q(q, prev_key) != value)) \
                     if prev_key != "$not" else (q[last_prev_key] >= value)
                 else:
                     # let the value's condition be parsed below
@@ -344,12 +349,14 @@ class TinyMongoCollection(object):
             elif key in ['$and', '$or', '$in', '$all']:
                 pass
             else:
+
+
                 # don't want to use the previous key if this is a secondary key
                 # (fixes multiple item query that includes $ codes)
                 if not isinstance(value, dict) and not isinstance(value, list):
                     conditions = (
-                        (q[key] == value) | (q[key].any([value]))
-                    ) if not conditions else (conditions & ((q[key] == value) | (q[key].any([value]))))
+                        (Q(q, key) == value) | (Q(q, key).any([value]))
+                    ) if not conditions else (conditions & ((Q(q, key) == value) | (Q(q, key).any([value]))))
                     prev_key = key
 
             logger.debug(u'c: {}'.format(conditions))
@@ -380,7 +387,7 @@ class TinyMongoCollection(object):
                     yield grouped_conditions
                 elif key == '$in':
                     # use `any` to find with list, before comparing to single string
-                    grouped_conditions = q[prev_key].any(value)
+                    grouped_conditions = Q(q, prev_key).any(value)
                     for val in value:
                         for parse_condition in self.parse_condition({prev_key : val}):
                             grouped_conditions = (
@@ -390,9 +397,9 @@ class TinyMongoCollection(object):
                             )
                     yield grouped_conditions
                 elif key == '$all':
-                    yield q[prev_key].all(value)
+                    yield Q(q, prev_key).all(value)
                 else:
-                    yield q[prev_key].any([value])
+                    yield Q(q, prev_key).any([value])
             else:
                 yield conditions
 
