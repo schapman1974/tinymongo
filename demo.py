@@ -1,4 +1,4 @@
-import tinymongo as tm
+from tinymongo import tinymongo as tm
 import os
 import logging
 
@@ -42,6 +42,8 @@ for i in range(5):
 # show me all users, passwords, and 'modules'
 print('finding all documents in the collection')
 cursor = tinyCollection.find({})
+count = tinyCollection.count()
+print("Count:", count)
 for c in cursor:
     print('\t{} {} {}'.format(c['username'], c['password'], c['module']))
 
