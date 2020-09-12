@@ -69,8 +69,8 @@ setup(
         'Programming Language :: Python :: 3.7'
     ],
     install_requires=[
-        'tinydb>=3.2.1',
-        'tinydb_serialization>=1.0.4',
+        'tinydb==3.2.1',
+        'tinydb_serialization==1.0.4',
         'pymongo>=3.4.0'
     ],
     tests_require=[
