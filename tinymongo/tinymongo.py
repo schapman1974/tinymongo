@@ -519,6 +519,27 @@ class TinyMongoCollection(object):
             self.table._last_id = 0
 
         return DeleteResult(raw_result=result)
+    
+    def distinct(self, field):
+        """
+        Retrieves unique values for a specified field.
+        :param field: The field to extract unique values from.
+        :return: A list of unique values.
+        """
+        if self.table is None:
+            self.build_table()
+
+        # Retrieve all documents
+        documents = self.table.all()
+
+        # Extract unique values for the specified field
+        unique_values = set()
+        for doc in documents:
+            value = doc.get(field)
+            if value is not None:
+                unique_values.add(value)
+
+        return list(unique_values)
 
 
 class TinyMongoCursor(object):
