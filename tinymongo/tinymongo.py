@@ -12,10 +12,11 @@ from operator import itemgetter
 from uuid import uuid1
 
 from tinydb import Query, TinyDB, where
+from .storage_backends import get_storage_class, storage_extension
 # from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
 # from .errors import DuplicateKeyError
-from tinymongodb.results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
-from tinymongodb.errors import DuplicateKeyError
+from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
+from .errors import DuplicateKeyError
 try:
     basestring
 except NameError:
@@ -34,48 +35,29 @@ def Q(query, key):
 class TinyMongoClient(object):
     """Represents the Tiny `db` client"""
 
-    def __init__(self, foldername=u"tinydb", **kwargs):
-        """Initialize container folder"""
+    def __init__(self, foldername=u"tinydb", backend="tinydb", **kwargs):
+        """Initialize container folder and choose a storage backend."""
         self._foldername = foldername
+        self._backend = backend or "tinydb"
         try:
-            os.mkdir(foldername)
+            os.makedirs(foldername, exist_ok=True)
         except OSError as x:
             logger.info("{}".format(x))
 
     @property
     def _storage(self):
-        """By default return Tiny.DEFAULT_STORAGE and can be overwritten to
-        return custom storages and middlewares.
-
-            class CustomClient(TinyMongoClient):
-                @property
-                def _storage(self):
-                    return CachingMiddleware(OtherMiddleware(JSONMiddleware))
-
-        This property is also useful to define Serializers using required
-        `tinydb-serialization` module.
-
-            from tinymongo.serializers import DateTimeSerializer
-            from tinydb_serialization import SerializationMiddleware
-            class CustomClient(TinyMongoClient):
-                @property
-                def _storage(self):
-                    serialization = SerializationMiddleware()
-                    serialization.register_serializer(
-                        DateTimeSerializer(), 'TinyDate')
-                    # register other custom serializers
-                    return serialization
-
-        """
-        # return storages.JSONStorage
-        return TinyDB.default_storage_class
+        """Return the TinyDB storage class for the configured backend."""
+        return get_storage_class(self._backend)
 
     def __getitem__(self, key):
         """Gets a new or existing database based in key"""
         return self._get_db(key)
 
+    def _get_db_path(self, key):
+        return os.path.join(self._foldername, key + storage_extension(self._backend))
+
     def _get_db(self, key):
-        return TinyMongoDatabase(key, self._foldername, self._storage)
+        return TinyMongoDatabase(key, self._get_db_path(key), self._storage)
 
     def close(self):
         """Do nothing"""
@@ -90,13 +72,10 @@ class TinyMongoClient(object):
 class TinyMongoDatabase(object):
     """Representation of a Pymongo database"""
 
-    def __init__(self, database, foldername, storage):
-        """Initialize a TinyDB file named as the db name in the given folder
-        """
-        self._foldername = foldername
-        self.tinydb = TinyDB(
-            os.path.join(foldername, database + u".json"), storage=storage
-        )
+    def __init__(self, database, path, storage):
+        """Initialize a TinyDB file named as the db name in the given folder."""
+        self._path = path
+        self.tinydb = TinyDB(path, storage=storage)
 
     def __getattr__(self, name):
         """Gets a new or existing collection"""
@@ -197,10 +176,30 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
+        # Acquire an in-process reentrant collection lock to serialize
+        # read-modify-write operations within the process. The storage
+        # layer (parquet_storage) will acquire the OS-level lock for
+        # inter-process safety on the first acquirer.
+        lock = None
+        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        try:
+            from .parquet_storage import _local_rlocks
+            import threading
+
+            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
+            lock.acquire()
+        except Exception:
+            lock = None
+
         if not isinstance(doc, dict):
             raise ValueError(u'"doc" must be a dict')
 
-        _id = doc[u"_id"] = doc.get("_id") or generate_id()
+        # Respect explicit falsy ids (0, False) — only generate when _id
+        # is missing or None.
+        if "_id" in doc and doc["_id"] is not None:
+            _id = doc[u"_id"] = doc["_id"]
+        else:
+            _id = doc[u"_id"] = generate_id()
 
         bypass_document_validation = kwargs.get("bypass_document_validation")
         if bypass_document_validation is True:
@@ -228,37 +227,60 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
+        # Acquire an in-process reentrant collection lock
+        lock = None
+        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        try:
+            from .parquet_storage import _local_rlocks
+            import threading
+
+            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
+            lock.acquire()
+        except Exception:
+            lock = None
+
         if not isinstance(docs, list):
             raise ValueError(u'"insert_many" requires a list input')
 
         bypass_document_validation = kwargs.get("bypass_document_validation")
-
         if bypass_document_validation is not True:
             # get all _id in once, to reduce I/O. (without projection)
             existing = [doc["_id"] for doc in self.find({})]
 
         _ids = list()
-        for doc in docs:
+        try:
+            for doc in docs:
 
-            _id = doc[u"_id"] = doc.get("_id") or generate_id()
+                # Respect explicit falsy ids (0, False) — only generate when
+                # _id is missing or None.
+                if "_id" in doc and doc["_id"] is not None:
+                    _id = doc[u"_id"] = doc["_id"]
+                else:
+                    _id = doc[u"_id"] = generate_id()
 
-            if bypass_document_validation is not True:
-                if _id in existing:
-                    raise DuplicateKeyError(
-                        u"_id:{0} already exists in collection:{1}".format(
-                            _id, self.tablename
+                if bypass_document_validation is not True:
+                    if _id in existing:
+                        raise DuplicateKeyError(
+                            u"_id:{0} already exists in collection:{1}".format(
+                                _id, self.tablename
+                            )
                         )
-                    )
-                existing.append(_id)
+                    existing.append(_id)
 
-            _ids.append(_id)
+                _ids.append(_id)
 
-        results = self.table.insert_multiple(docs)
+            results = self.table.insert_multiple(docs)
 
-        return InsertManyResult(
-            eids=[eid for eid in results],
-            inserted_ids=[inserted_id for inserted_id in _ids],
-        )
+            return InsertManyResult(
+                eids=[eid for eid in results],
+                inserted_ids=[inserted_id for inserted_id in _ids],
+            )
+        finally:
+            if lock is not None:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
 
     def parse_query(self, query):
         """
@@ -371,6 +393,14 @@ class TinyMongoCollection(object):
                 regex = regex.replace("|||", "\\")
                 currCond = where(prev_key).matches(regex)
                 conditions = currCond if not conditions else (conditions & currCond)
+            elif key == u"$nin":
+                # Build a conjunctive condition: field != each value
+                vals = value if isinstance(value, list) else [value]
+                nin_cond = None
+                for v in vals:
+                    term = Q(q, prev_key) != v
+                    nin_cond = term if nin_cond is None else (nin_cond & term)
+                conditions = nin_cond if not conditions else (conditions & nin_cond)
             elif key in ["$and", "$or", "$in", "$all"]:
                 pass
             else:
@@ -427,17 +457,21 @@ class TinyMongoCollection(object):
                     yield grouped_conditions
                 elif key == "$all":
                     yield Q(q, prev_key).all(value)
+                elif isinstance(key, str) and key.startswith("$"):
+                    if conditions is not None:
+                        yield conditions
+                    continue
                 else:
                     yield Q(q, prev_key).any([value])
             else:
                 yield conditions
 
     def update(self, query, doc, *args, **kwargs):
-        """BAckwards compatibility with update"""
+        """Backwards compatibility with update"""
         if isinstance(doc, list):
             return [self.update_one(query, item, *args, **kwargs) for item in doc]
         else:
-            return self.update_one(query, doc, *args, **kwargs)
+            return self.update_many(query, doc, *args, **kwargs)
 
     def update_one(self, query, doc, *args, **kwargs):
         """
@@ -450,19 +484,139 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
+        # collection-level in-process reentrant lock
+        lock = None
+        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        try:
+            from .parquet_storage import _local_rlocks
+            import threading
+
+            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
+            lock.acquire()
+        except Exception:
+            lock = None
+
         if u"$set" in doc:
             doc = doc[u"$set"]
 
         allcond = self.parse_query(query)
+        item = self.table.get(allcond)
+
+        if item is None:
+            return UpdateResult(raw_result=[])
+
+        if u"_id" not in doc:
+            doc[u"_id"] = item[u"_id"]
 
         try:
-            result = self.table.update(doc, allcond)
-        except:
-            # TODO: check table.update result
-            # check what pymongo does in that case
-            result = None
+            try:
+                result = self.table.update(doc, where(u"_id") == item[u"_id"])
+            except Exception:
+                result = []
 
-        return UpdateResult(raw_result=result)
+            return UpdateResult(raw_result=result)
+        finally:
+            if lock is not None:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+    def update_many(self, query, doc, *args, **kwargs):
+        """
+        Updates all elements matching the query
+
+        :param query: dictionary representing the mongo query
+        :param doc: dictionary or update document
+        :return: UpdateResult
+        """
+        if self.table is None:
+            self.build_table()
+
+        lock = None
+        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        try:
+            from .parquet_storage import _local_rlocks
+            import threading
+
+            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
+            lock.acquire()
+        except Exception:
+            lock = None
+
+        if u"$set" in doc:
+            doc = doc[u"$set"]
+
+        allcond = self.parse_query(query)
+        try:
+            try:
+                result = self.table.update(doc, allcond)
+            except Exception:
+                result = []
+
+            return UpdateResult(raw_result=result)
+        finally:
+            if lock is not None:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+    def replace_one(self, query, replacement, *args, **kwargs):
+        """
+        Replaces one document matching the query with the replacement document.
+        """
+        if self.table is None:
+            self.build_table()
+
+        lock = None
+        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        try:
+            from .parquet_storage import _local_rlocks
+            import threading
+
+            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
+            lock.acquire()
+        except Exception:
+            lock = None
+
+        allcond = self.parse_query(query)
+        item = self.table.get(allcond)
+        if item is None:
+            return UpdateResult(raw_result=[])
+
+        replacement[u"_id"] = item[u"_id"]
+
+        try:
+            try:
+                self.table.remove(where(u"_id") == item[u"_id"])
+                self.table.insert(replacement)
+                result = [item[u"_id"]]
+            except Exception:
+                result = []
+
+            return UpdateResult(raw_result=result)
+        finally:
+            if lock is not None:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+    def find_one_and_update(self, query, update, *args, **kwargs):
+        """
+        Mimics MongoDB's findOneAndUpdate by returning the document before update.
+        """
+        if self.table is None:
+            self.build_table()
+
+        allcond = self.parse_query(query)
+        item = self.table.get(allcond)
+        if item is None:
+            return None
+
+        self.update_one(query, update, *args, **kwargs)
+        return item
 
     def find(self, _filter=None, sort=None, skip=None, limit=None, *args, **kwargs):
         """

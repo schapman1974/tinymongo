@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinymongo"
+version = "1.0.0"
+description = "A flat file drop in replacement for mongodb. Requires TinyDB"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [ { name = "Stephen Chapman", email = "schapman1974@gmail.com" } ]
+license = {file = "LICENSE.txt"}
+dependencies = [
+  "tinydb==3.2.1",
+  "tinydb-serialization==1.0.4",
+  "pymongo>=3.4.0",
+  "pyarrow>=10.0.0",
+  "portalocker>=2.7.0"
+]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Database",
+]
+
+[project.urls]
+Homepage = "https://github.com/schapman1974/tinymongo"
+Source = "https://github.com/schapman1974/tinymongo"
+
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+
+[tool.mypy]
+python_version = 3.8
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tinymongo*"]
+
+[tool.setuptools]
+include-package-data = true
+
+[project.optional-dependencies]
+uv = ["uvicorn>=0.23.0"]
+
