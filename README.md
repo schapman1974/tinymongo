@@ -36,9 +36,35 @@ compilers or tools besides those contained within Python itself.
 # Project notes
 
 - **Default storage:** TinyMongo uses TinyDB's default JSON storage unless another backend is selected.
-- **Optional storage backends:** Parquet v2, SQLite, and DuckDB backends are available by passing `backend="parquet"`, `backend="sqlite"`, or `backend="duckdb"` to `TinyMongoClient`.
+- **Optional storage backends:** Parquet v2, SQLite, and DuckDB backends are available.
 - **Concurrency:** writes use atomic temp-file replace and optional advisory locks (`portalocker`) to reduce corruption risk under concurrent writers.
 - **Tests & CI:** a GitHub Actions workflow is included at `.github/workflows/ci.yml` to run unit tests and linters across Python versions. See `requirements-dev.txt` for dev dependencies.
+
+
+# Backend options
+
+TinyMongo defaults to TinyDB's JSON storage:
+
+```python
+    from tinymongo import TinyMongoClient
+
+    connection = TinyMongoClient("/path/to/folder")
+```
+
+You can select another backend with the `backend` argument:
+
+```python
+    parquet_connection = TinyMongoClient("/path/to/folder", backend="parquet")
+    sqlite_connection = TinyMongoClient("/path/to/folder", backend="sqlite")
+    duckdb_connection = TinyMongoClient("/path/to/folder", backend="duckdb")
+```
+
+Available backends:
+
+- `tinydb` or `json`: TinyDB's default JSON storage. This is the default and writes `.json` files.
+- `parquet` or `parquetv2`: Parquet v2 storage backed by `pyarrow`. This writes `.parquet` files.
+- `sqlite`: SQLite storage using Python's standard `sqlite3` module. This writes `.sqlite` files.
+- `duckdb`: DuckDB storage. Install `duckdb` before using this backend. This writes `.duckdb` files.
 
 
 # Examples
