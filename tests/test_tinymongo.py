@@ -89,8 +89,8 @@ def test_initialize_db():
 
     :return:
     """
-    tiny_client = tm.TinyMongoClient(db_name)
-    another_client = tm.TinyMongoClient(db_name)
+    tm.TinyMongoClient(db_name)
+    tm.TinyMongoClient(db_name)
     assert True
 
 
@@ -431,7 +431,7 @@ def test_update_one_set(collection):
     """
     cu = collection['tiny'].update_one({'count': 3}, {'$set': {'countStr': 'three'}})
     # cu.raw_result contains the updated ids
-    assert len(cu.raw_result) is 1  # only one is updated
+    assert len(cu.raw_result) == 1  # only one is updated
 
     c = collection['tiny'].find_one({'count': 3})
     assert c['countStr'] == 'three'

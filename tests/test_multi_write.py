@@ -1,8 +1,6 @@
 import os
 import multiprocessing as mp
-import time
 import shutil
-import random
 
 import tinymongo as tm
 
