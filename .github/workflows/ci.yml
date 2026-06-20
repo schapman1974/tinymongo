@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [3.9, 3.10, 3.11]
+        python-version: ['3.9', '3.10', '3.11']
 
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,7 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
+          check-latest: true
 
       - name: Install system deps (libexpat) # ensure xml parser available
         run: sudo apt-get update && sudo apt-get install -y libexpat1-dev

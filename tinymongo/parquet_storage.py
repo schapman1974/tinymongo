@@ -34,6 +34,21 @@ def _fsync_dir(path):
         pass
 
 
+def _acquire_rlock(rlock):
+    try:
+        if rlock._is_owned():
+            rlock.acquire()
+            return False
+    except Exception:
+        pass
+
+    first_acquire = rlock.acquire(blocking=False)
+    if not first_acquire:
+        rlock.acquire()
+        return False
+    return True
+
+
 class ParquetStorage(Storage):
     """TinyDB Storage that persists the entire DB as a single Parquet row
 
@@ -52,9 +67,7 @@ class ParquetStorage(Storage):
         lock_path = os.path.join(dname, ".tinymongo.lock")
 
         rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
-        first_acquire = rlock.acquire(blocking=False)
-        if not first_acquire:
-            rlock.acquire()
+        first_acquire = _acquire_rlock(rlock)
 
         portalocker_lock = None
         try:
@@ -105,11 +118,7 @@ class ParquetStorage(Storage):
         # portalocker lock. Only the first acquirer in the process will
         # perform the portalocker acquisition for inter-process safety.
         rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
-        # Try non-blocking to detect if we're the first owner
-        first_acquire = rlock.acquire(blocking=False)
-        if not first_acquire:
-            # Already held by this process/thread; increment recursion
-            rlock.acquire()
+        first_acquire = _acquire_rlock(rlock)
 
         portalocker_lock = None
         try:

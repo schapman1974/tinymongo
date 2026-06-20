@@ -64,8 +64,9 @@ class TinyMongoClient(object):
         pass
 
     def __getattr__(self, name):
-        """Gets a new or existing database based in attribute"""
-        # return TinyMongoDatabase(name, self._foldername, self._storage)
+        """Gets a new or existing database based in attribute."""
+        if name.startswith("_"):
+            raise AttributeError("{} object has no attribute {}".format(type(self).__name__, name))
         return self._get_db(name)
 
 
@@ -75,7 +76,17 @@ class TinyMongoDatabase(object):
     def __init__(self, database, path, storage):
         """Initialize a TinyDB file named as the db name in the given folder."""
         self._path = path
+        self._foldername = os.path.dirname(path) or "."
+        self._storage = storage
         self.tinydb = TinyDB(path, storage=storage)
+
+    def _refresh_table(self):
+        """Reload the TinyDB database from disk to pick up external writes."""
+        try:
+            self.tinydb.close()
+        except Exception:
+            pass
+        self.tinydb = TinyDB(self._path, storage=self._storage)
 
     def __getattr__(self, name):
         """Gets a new or existing collection"""
@@ -130,6 +141,39 @@ class TinyMongoCollection(object):
         """
         self.table = self.parent.tinydb.table(self.tablename)
 
+    def _refresh_table(self):
+        """Reload the TinyDB database from disk and reset the table object."""
+        self.parent._refresh_table()
+        self.table = self.parent.tinydb.table(self.tablename)
+
+    def _acquire_collection_lock(self):
+        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        try:
+            from .parquet_storage import _local_rlocks, _acquire_rlock, portalocker
+            import threading
+
+            rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
+            first_acquire = _acquire_rlock(rlock)
+            portalocker_lock = None
+            if first_acquire and portalocker is not None:
+                portalocker_lock = portalocker.Lock(lock_path, timeout=30)
+                portalocker_lock.acquire()
+            return rlock, portalocker_lock
+        except Exception:
+            return None, None
+
+    def _release_collection_lock(self, rlock, portalocker_lock):
+        if portalocker_lock is not None:
+            try:
+                portalocker_lock.release()
+            except Exception:
+                pass
+        if rlock is not None:
+            try:
+                rlock.release()
+            except Exception:
+                pass
+
     def count(self):
         """
         Counts the documents in the collection.
@@ -176,47 +220,37 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        # Acquire an in-process reentrant collection lock to serialize
-        # read-modify-write operations within the process. The storage
-        # layer (parquet_storage) will acquire the OS-level lock for
-        # inter-process safety on the first acquirer.
-        lock = None
-        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        rlock, portalocker_lock = self._acquire_collection_lock()
         try:
-            from .parquet_storage import _local_rlocks
-            import threading
+            self._refresh_table()
+            if not isinstance(doc, dict):
+                raise ValueError(u'"doc" must be a dict')
 
-            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
-            lock.acquire()
-        except Exception:
-            lock = None
+            # Respect explicit falsy ids (0, False) — only generate when _id
+            # is missing or None.
+            if "_id" in doc and doc["_id"] is not None:
+                _id = doc[u"_id"] = doc["_id"]
+            else:
+                _id = doc[u"_id"] = generate_id()
 
-        if not isinstance(doc, dict):
-            raise ValueError(u'"doc" must be a dict')
-
-        # Respect explicit falsy ids (0, False) — only generate when _id
-        # is missing or None.
-        if "_id" in doc and doc["_id"] is not None:
-            _id = doc[u"_id"] = doc["_id"]
-        else:
-            _id = doc[u"_id"] = generate_id()
-
-        bypass_document_validation = kwargs.get("bypass_document_validation")
-        if bypass_document_validation is True:
-            # insert doc without validation of duplicated `_id`
-            eid = self.table.insert(doc)
-        else:
-            existing = self.find_one({"_id": _id})
-            if existing is None:
+            bypass_document_validation = kwargs.get("bypass_document_validation")
+            if bypass_document_validation is True:
+                # insert doc without validation of duplicated `_id`
                 eid = self.table.insert(doc)
             else:
-                raise DuplicateKeyError(
-                    u"_id:{0} already exists in collection:{1}".format(
-                        _id, self.tablename
+                existing = self.find_one({"_id": _id})
+                if existing is None:
+                    eid = self.table.insert(doc)
+                else:
+                    raise DuplicateKeyError(
+                        u"_id:{0} already exists in collection:{1}".format(
+                            _id, self.tablename
+                        )
                     )
-                )
 
-        return InsertOneResult(eid=eid, inserted_id=_id)
+            return InsertOneResult(eid=eid, inserted_id=_id)
+        finally:
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def insert_many(self, docs, *args, **kwargs):
         """
@@ -227,28 +261,18 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        # Acquire an in-process reentrant collection lock
-        lock = None
-        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        rlock, portalocker_lock = self._acquire_collection_lock()
         try:
-            from .parquet_storage import _local_rlocks
-            import threading
+            self._refresh_table()
+            if not isinstance(docs, list):
+                raise ValueError(u'"insert_many" requires a list input')
 
-            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
-            lock.acquire()
-        except Exception:
-            lock = None
+            bypass_document_validation = kwargs.get("bypass_document_validation")
+            if bypass_document_validation is not True:
+                # get all _id in once, to reduce I/O. (without projection)
+                existing = [doc["_id"] for doc in self.find({})]
 
-        if not isinstance(docs, list):
-            raise ValueError(u'"insert_many" requires a list input')
-
-        bypass_document_validation = kwargs.get("bypass_document_validation")
-        if bypass_document_validation is not True:
-            # get all _id in once, to reduce I/O. (without projection)
-            existing = [doc["_id"] for doc in self.find({})]
-
-        _ids = list()
-        try:
+            _ids = list()
             for doc in docs:
 
                 # Respect explicit falsy ids (0, False) — only generate when
@@ -276,11 +300,7 @@ class TinyMongoCollection(object):
                 inserted_ids=[inserted_id for inserted_id in _ids],
             )
         finally:
-            if lock is not None:
-                try:
-                    lock.release()
-                except Exception:
-                    pass
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def parse_query(self, query):
         """
@@ -484,31 +504,21 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        # collection-level in-process reentrant lock
-        lock = None
-        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        rlock, portalocker_lock = self._acquire_collection_lock()
         try:
-            from .parquet_storage import _local_rlocks
-            import threading
+            self._refresh_table()
+            if u"$set" in doc:
+                doc = doc[u"$set"]
 
-            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
-            lock.acquire()
-        except Exception:
-            lock = None
+            allcond = self.parse_query(query)
+            item = self.table.get(allcond)
 
-        if u"$set" in doc:
-            doc = doc[u"$set"]
+            if item is None:
+                return UpdateResult(raw_result=[])
 
-        allcond = self.parse_query(query)
-        item = self.table.get(allcond)
+            if u"_id" not in doc:
+                doc[u"_id"] = item[u"_id"]
 
-        if item is None:
-            return UpdateResult(raw_result=[])
-
-        if u"_id" not in doc:
-            doc[u"_id"] = item[u"_id"]
-
-        try:
             try:
                 result = self.table.update(doc, where(u"_id") == item[u"_id"])
             except Exception:
@@ -516,11 +526,7 @@ class TinyMongoCollection(object):
 
             return UpdateResult(raw_result=result)
         finally:
-            if lock is not None:
-                try:
-                    lock.release()
-                except Exception:
-                    pass
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def update_many(self, query, doc, *args, **kwargs):
         """
@@ -533,22 +539,13 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        lock = None
-        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        rlock, portalocker_lock = self._acquire_collection_lock()
         try:
-            from .parquet_storage import _local_rlocks
-            import threading
+            self._refresh_table()
+            if u"$set" in doc:
+                doc = doc[u"$set"]
 
-            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
-            lock.acquire()
-        except Exception:
-            lock = None
-
-        if u"$set" in doc:
-            doc = doc[u"$set"]
-
-        allcond = self.parse_query(query)
-        try:
+            allcond = self.parse_query(query)
             try:
                 result = self.table.update(doc, allcond)
             except Exception:
@@ -556,11 +553,7 @@ class TinyMongoCollection(object):
 
             return UpdateResult(raw_result=result)
         finally:
-            if lock is not None:
-                try:
-                    lock.release()
-                except Exception:
-                    pass
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def replace_one(self, query, replacement, *args, **kwargs):
         """
@@ -569,25 +562,16 @@ class TinyMongoCollection(object):
         if self.table is None:
             self.build_table()
 
-        lock = None
-        lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
+        rlock, portalocker_lock = self._acquire_collection_lock()
         try:
-            from .parquet_storage import _local_rlocks
-            import threading
+            self._refresh_table()
+            allcond = self.parse_query(query)
+            item = self.table.get(allcond)
+            if item is None:
+                return UpdateResult(raw_result=[])
 
-            lock = _local_rlocks.setdefault(lock_path, threading.RLock())
-            lock.acquire()
-        except Exception:
-            lock = None
+            replacement[u"_id"] = item[u"_id"]
 
-        allcond = self.parse_query(query)
-        item = self.table.get(allcond)
-        if item is None:
-            return UpdateResult(raw_result=[])
-
-        replacement[u"_id"] = item[u"_id"]
-
-        try:
             try:
                 self.table.remove(where(u"_id") == item[u"_id"])
                 self.table.insert(replacement)
@@ -597,11 +581,7 @@ class TinyMongoCollection(object):
 
             return UpdateResult(raw_result=result)
         finally:
-            if lock is not None:
-                try:
-                    lock.release()
-                except Exception:
-                    pass
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def find_one_and_update(self, query, update, *args, **kwargs):
         """
