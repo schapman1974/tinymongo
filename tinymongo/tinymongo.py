@@ -64,8 +64,9 @@ class TinyMongoClient(object):
         pass
 
     def __getattr__(self, name):
-        """Gets a new or existing database based in attribute"""
-        # return TinyMongoDatabase(name, self._foldername, self._storage)
+        """Gets a new or existing database based in attribute."""
+        if name.startswith("_"):
+            raise AttributeError("{} object has no attribute {}".format(type(self).__name__, name))
         return self._get_db(name)
 
 
@@ -75,6 +76,7 @@ class TinyMongoDatabase(object):
     def __init__(self, database, path, storage):
         """Initialize a TinyDB file named as the db name in the given folder."""
         self._path = path
+        self._foldername = os.path.dirname(path) or "."
         self.tinydb = TinyDB(path, storage=storage)
 
     def __getattr__(self, name):

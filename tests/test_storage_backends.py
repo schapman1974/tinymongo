@@ -43,3 +43,14 @@ def test_duckdb_backend(tmp_path):
 
     assert coll.count() == 1
     assert (tmp_path / "db" / "testdb.duckdb").exists()
+
+
+def test_internal_client_attrs_are_preserved(tmp_path):
+    client = tm.TinyMongoClient(str(tmp_path / "db"), backend="tinydb")
+
+    assert client._backend == "tinydb"
+    assert client._storage is not None
+
+    db = client.testdb
+    assert db._foldername == str(tmp_path / "db")
+    assert not (tmp_path / "db" / "_storage.json").exists()
