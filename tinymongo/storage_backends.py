@@ -139,7 +139,8 @@ def get_storage_class(name):
     if backend in ("tinydb", "json"):
         from tinydb import TinyDB
 
-        return TinyDB.default_storage_class
+        # TinyDB 3.x exposes DEFAULT_STORAGE instead of default_storage_class.
+        return getattr(TinyDB, "default_storage_class", TinyDB.DEFAULT_STORAGE)
     if backend in ("parquet", "parquetv2"):
         from .parquet_storage import ParquetStorage
 
