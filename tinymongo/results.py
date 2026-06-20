@@ -72,20 +72,23 @@ class UpdateResult(_WriteResult):
     @property
     def matched_count(self):
         """The number of documents matched for this update."""
-        # TODO: Implement this
+        if isinstance(self.raw_result, list):
+            return len(self.raw_result)
+        return 0
 
     @property
     def modified_count(self):
-        """The number of documents modified.
-        """
-        # TODO: Implement this
+        """The number of documents modified."""
+        if isinstance(self.raw_result, list):
+            return len(self.raw_result)
+        return 0
 
     @property
     def upserted_id(self):
         """The _id of the inserted document if an upsert took place. Otherwise
         ``None``.
         """
-        # TODO: Implement this
+        return None
 
 
 class DeleteResult(_WriteResult):

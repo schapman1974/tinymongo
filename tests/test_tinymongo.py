@@ -24,13 +24,26 @@ tiny_client = tm.TinyMongoClient(db_name)
 tiny_database = tiny_client.tinyDatabase
 tiny_collection = tiny_database.tinyCollection
 
-mongo_client = pymongo.MongoClient("localhost:27017")
-mongo_database = mongo_client["test-mongodb"]
-mongo_collection = mongo_database["test-collection"]
+mongo_client = None
+mongo_database = None
+mongo_collection = None
+try:
+    mongo_client = pymongo.MongoClient("localhost:27017", serverSelectionTimeoutMS=2000)
+    # Trigger server selection to verify availability
+    mongo_client.server_info()
+    mongo_database = mongo_client["test-mongodb"]
+    mongo_collection = mongo_database["test-collection"]
+except Exception:
+    mongo_client = None
+    mongo_database = None
+    mongo_collection = None
 
 
 @pytest.fixture()
 def collection(request):
+    if mongo_client is None:
+        pytest.skip("MongoDB server not available on localhost:27017")
+
     # setup the db, clear if necessary
     # todo: the 'drop()' function from pymongo should work in future revisions
     tiny_collection.delete_many({})  # should delete all records in the collection

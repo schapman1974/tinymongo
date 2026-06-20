@@ -1,0 +1,7 @@
+pytest
+pyarrow
+portalocker
+pymongo
+black
+ruff
+mypy
