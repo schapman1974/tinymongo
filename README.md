@@ -33,9 +33,10 @@ This
 is a pure python distribution and - thus - should require no external
 compilers or tools besides those contained within Python itself.
 
-# Notes for this fork
+# Project notes
 
-- **Default storage:** this fork uses Parquet v2 files by default (via `pyarrow`) for improved I/O performance and reliability. If `pyarrow` is not available, it falls back to TinyDB's default JSON storage.
+- **Default storage:** TinyMongo uses TinyDB's default JSON storage unless another backend is selected.
+- **Optional storage backends:** Parquet v2, SQLite, and DuckDB backends are available by passing `backend="parquet"`, `backend="sqlite"`, or `backend="duckdb"` to `TinyMongoClient`.
 - **Concurrency:** writes use atomic temp-file replace and optional advisory locks (`portalocker`) to reduce corruption risk under concurrent writers.
 - **Tests & CI:** a GitHub Actions workflow is included at `.github/workflows/ci.yml` to run unit tests and linters across Python versions. See `requirements-dev.txt` for dev dependencies.
 
