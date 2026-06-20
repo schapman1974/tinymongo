@@ -8,7 +8,6 @@ from functools import reduce
 import logging
 import os
 from math import ceil
-from operator import itemgetter
 from uuid import uuid1
 
 from tinydb import Query, TinyDB, where
