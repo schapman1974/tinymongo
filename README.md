@@ -34,8 +34,8 @@ compilers or tools besides those contained within Python itself.
 
 # Project notes
 
-- **Default storage:** TinyMongo uses TinyDB's default JSON storage unless another backend is selected.
-- **Optional storage backends:** Parquet v2, SQLite, and DuckDB backends are available.
+- **Default storage:** TinyMongo uses TinyDB-compatible JSON storage unless another backend is selected.
+- **Table-native backends:** SQLite, DuckDB, and Parquet backends store one real table/file per collection instead of one serialized database blob.
 - **Concurrency:** writes use atomic temp-file replace and optional advisory locks (`portalocker`) to reduce corruption risk under concurrent writers.
 - **Tests & CI:** a GitHub Actions workflow is included at `.github/workflows/ci.yml` to run unit tests and linters across Python versions. See `requirements-dev.txt` for dev dependencies.
 
@@ -88,17 +88,23 @@ You can select another backend with the `backend` argument:
 
 Available backends:
 
-- `tinydb` or `json`: TinyDB's default JSON storage. This is the default and writes `.json` files.
-- `parquet` or `parquetv2`: Parquet v2 storage backed by `pyarrow`. This writes `.parquet` files.
-- `sqlite`: SQLite storage using Python's standard `sqlite3` module. This writes `.sqlite` files.
-- `duckdb`: DuckDB storage. Install `duckdb` before using this backend. This writes `.duckdb` files.
+- `tinydb` or `json`: TinyDB-compatible JSON storage. This is the default and writes `.json` files.
+- `sqlite`: Table-native SQLite storage using one SQL table per collection. This writes `.sqlite` files.
+- `duckdb`: Table-native DuckDB storage using one DuckDB table per collection. This writes `.duckdb` files.
+- `parquet` or `parquetv2`: DuckDB-managed Parquet dataset storage using one Parquet file per collection inside a `.parquet` directory.
 
 | Backend | Dependency | Best fit | Notes |
 | --- | --- | --- | --- |
 | `tinydb` / `json` | TinyDB | Default local JSON files | Human-readable and simplest to inspect. |
-| `parquet` / `parquetv2` | `pyarrow` | Columnar file workflows | Useful when downstream tools already consume Parquet. |
-| `sqlite` | Python standard library | Single-file durability | Good default alternative for users who want a database container file. |
-| `duckdb` | `duckdb` | Analytics-oriented local data | Useful when DuckDB is already part of the project stack. |
+| `sqlite` | Python standard library | Embedded transactional storage | Uses `_id` primary keys and JSON document payloads in collection tables. |
+| `duckdb` | `duckdb` | SQL-backed local analytics workflows | Uses real DuckDB collection tables and SQL JSON predicates where supported. |
+| `parquet` / `parquetv2` | `duckdb`, `pyarrow` | Columnar file workflows | Stores collection Parquet files that DuckDB reads and writes. |
+
+SQLite, DuckDB, and Parquet compile supported Mongo-style filters into SQL over
+the `_id` column and JSON document payload. Unsupported filter shapes fall back
+to Python document matching so existing TinyMongo behavior remains available.
+Older blob-format SQLite and DuckDB files are migrated to collection tables when
+opened.
 
 Local load-test results for these backends are documented in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

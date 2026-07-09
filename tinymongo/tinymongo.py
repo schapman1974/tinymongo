@@ -11,7 +11,12 @@ from math import ceil
 from uuid import uuid4
 
 from tinydb import Query, TinyDB, where
-from .storage_backends import get_storage_class, storage_extension
+from .storage_backends import (
+    get_storage_class,
+    get_table_backend,
+    is_table_backend,
+    storage_extension,
+)
 # from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
 # from .errors import DuplicateKeyError
 from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
@@ -172,6 +177,7 @@ class TinyMongoClient(object):
         """Initialize container folder and choose a storage backend."""
         self._foldername = foldername
         self._backend = backend or "tinydb"
+        self._threads = kwargs.get("threads")
         try:
             os.makedirs(foldername, exist_ok=True)
         except OSError as x:
@@ -190,7 +196,13 @@ class TinyMongoClient(object):
         return os.path.join(self._foldername, key + storage_extension(self._backend))
 
     def _get_db(self, key):
-        return TinyMongoDatabase(key, self._get_db_path(key), self._storage)
+        path = self._get_db_path(key)
+        if is_table_backend(self._backend):
+            engine_class = get_table_backend(self._backend)
+            return TinyMongoDatabase(
+                key, path, self._storage, engine=engine_class(path, self._threads)
+            )
+        return TinyMongoDatabase(key, path, self._storage)
 
     def close(self):
         """Do nothing"""
@@ -253,15 +265,19 @@ class MongoClient(TinyMongoClient):
 class TinyMongoDatabase(object):
     """Representation of a Pymongo database"""
 
-    def __init__(self, database, path, storage):
+    def __init__(self, database, path, storage, engine=None):
         """Initialize a TinyDB file named as the db name in the given folder."""
+        self.database = database
         self._path = path
         self._foldername = os.path.dirname(path) or "."
         self._storage = storage
-        self.tinydb = TinyDB(path, storage=storage)
+        self.engine = engine
+        self.tinydb = None if engine is not None else TinyDB(path, storage=storage)
 
     def _refresh_table(self):
         """Reload the TinyDB database from disk to pick up external writes."""
+        if self.engine is not None:
+            return
         try:
             self.tinydb.close()
         except Exception:
@@ -278,6 +294,8 @@ class TinyMongoDatabase(object):
 
     def collection_names(self):
         """Get a list of all the collection names in this database"""
+        if self.engine is not None:
+            return self.engine.list_collections()
         return list(self.tinydb.tables())
 
     def list_collection_names(self):
@@ -325,6 +343,9 @@ class TinyMongoCollection(object):
         Builds a new tinydb table at the parent database
         :return:
         """
+        if self.parent.engine is not None:
+            self.parent.engine.create_collection(self.tablename)
+            return
         self.table = self.parent.tinydb.table(self.tablename)
 
     def _refresh_table(self):
@@ -335,17 +356,23 @@ class TinyMongoCollection(object):
 
     def create_index(self, key):
         """Create an in-memory equality index for this collection instance."""
+        if self.parent.engine is not None:
+            return self.parent.engine.create_index(self.tablename, key)
         self._indexes.add(key)
         self._index_cache.pop(key, None)
         return key
 
     def drop_index(self, key):
         """Drop an in-memory equality index for this collection instance."""
+        if self.parent.engine is not None:
+            return self.parent.engine.drop_index(self.tablename, key)
         self._indexes.discard(key)
         self._index_cache.pop(key, None)
 
     def list_indexes(self):
         """Return index metadata for this collection instance."""
+        if self.parent.engine is not None:
+            return self.parent.engine.list_indexes(self.tablename)
         indexes = [{"name": "_id_", "key": [("_id", 1)]}]
         for key in sorted(self._indexes):
             indexes.append({"name": "{0}_1".format(key), "key": [(key, 1)]})
@@ -429,6 +456,8 @@ class TinyMongoCollection(object):
         :return: Returns True when successfully drops a collection. Returns False when collection to drop does not
         exist.
         """
+        if self.parent.engine is not None:
+            return self.parent.engine.drop_collection(self.tablename)
         if self.table:
             self._set_storage_merge_writes(False)
             try:
@@ -460,6 +489,21 @@ class TinyMongoCollection(object):
         :param doc: the document
         :return: InsertOneResult
         """
+        if self.parent.engine is not None:
+            if not isinstance(doc, dict):
+                raise ValueError(u'"doc" must be a dict')
+            if "_id" in doc and doc["_id"] is not None:
+                _id = doc[u"_id"] = doc["_id"]
+            else:
+                _id = doc[u"_id"] = generate_id()
+            result = self.parent.engine.insert_many(
+                self.tablename,
+                [doc],
+                bypass_document_validation=kwargs.get("bypass_document_validation")
+                is True,
+            )
+            return InsertOneResult(eid=result[0] if result else None, inserted_id=_id)
+
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
             if self.table is None:
@@ -501,6 +545,24 @@ class TinyMongoCollection(object):
         :param docs: a list of documents
         :return: InsertManyResult
         """
+        if self.parent.engine is not None:
+            if not isinstance(docs, list):
+                raise ValueError(u'"insert_many" requires a list input')
+            _ids = []
+            for doc in docs:
+                if "_id" in doc and doc["_id"] is not None:
+                    _id = doc[u"_id"] = doc["_id"]
+                else:
+                    _id = doc[u"_id"] = generate_id()
+                _ids.append(_id)
+            results = self.parent.engine.insert_many(
+                self.tablename,
+                docs,
+                bypass_document_validation=kwargs.get("bypass_document_validation")
+                is True,
+            )
+            return InsertManyResult(eids=results, inserted_ids=_ids)
+
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
             if self.table is None:
@@ -750,6 +812,12 @@ class TinyMongoCollection(object):
         :param doc: dictionary representing the item to be updated
         :return: UpdateResult
         """
+        if self.parent.engine is not None:
+            result = self.parent.engine.update_many(
+                self.tablename, query, doc, multi=False
+            )
+            return UpdateResult(raw_result=result)
+
         if self.table is None:
             self.build_table()
 
@@ -786,6 +854,12 @@ class TinyMongoCollection(object):
         :param doc: dictionary or update document
         :return: UpdateResult
         """
+        if self.parent.engine is not None:
+            result = self.parent.engine.update_many(
+                self.tablename, query, doc, multi=True
+            )
+            return UpdateResult(raw_result=result)
+
         if self.table is None:
             self.build_table()
 
@@ -818,6 +892,14 @@ class TinyMongoCollection(object):
         """
         Replaces one document matching the query with the replacement document.
         """
+        if self.parent.engine is not None:
+            item = self.parent.engine.find_one(self.tablename, query)
+            if item is None:
+                return UpdateResult(raw_result=[])
+            replacement[u"_id"] = item[u"_id"]
+            self.parent.engine.replace_one(self.tablename, item[u"_id"], replacement)
+            return UpdateResult(raw_result=[item[u"_id"]])
+
         if self.table is None:
             self.build_table()
 
@@ -846,6 +928,13 @@ class TinyMongoCollection(object):
         """
         Mimics MongoDB's findOneAndUpdate by returning the document before update.
         """
+        if self.parent.engine is not None:
+            item = self.parent.engine.find_one(self.tablename, query)
+            if item is None:
+                return None
+            self.update_one(query, update, *args, **kwargs)
+            return item
+
         if self.table is None:
             self.build_table()
 
@@ -865,6 +954,10 @@ class TinyMongoCollection(object):
         :type _filter: Optional[dict]
         :return: cursor containing the search results
         """
+        if self.parent.engine is not None:
+            result = self.parent.engine.find(self.tablename, _filter)
+            return TinyMongoCursor(result, sort=sort, skip=skip, limit=limit)
+
         if self.table is None:
             self.build_table()
 
@@ -897,6 +990,8 @@ class TinyMongoCollection(object):
         :param query: dictionary representing the mongo query
         :return: the resulting document (if found)
         """
+        if self.parent.engine is not None:
+            return self.parent.engine.find_one(self.tablename, _filter)
 
         if self.table is None:
             self.build_table()
@@ -918,6 +1013,12 @@ class TinyMongoCollection(object):
         :param query: dictionary representing the mongo query
         :return: DeleteResult
         """
+        if self.parent.engine is not None:
+            result = self.parent.engine.delete_many(
+                self.tablename, query, multi=False
+            )
+            return DeleteResult(raw_result=result)
+
         item = self.find_one(query)
         self._set_storage_merge_writes(False)
         try:
@@ -935,6 +1036,10 @@ class TinyMongoCollection(object):
         :param query: dictionary representing the mongo query
         :return: DeleteResult
         """
+        if self.parent.engine is not None:
+            result = self.parent.engine.delete_many(self.tablename, query, multi=True)
+            return DeleteResult(raw_result=result)
+
         items = self.find(query)
         self._set_storage_merge_writes(False)
         try:

@@ -4,7 +4,7 @@
 
 ### Added
 - TinyDB JSON remains the default storage backend.
-- Optional Parquet v2, SQLite, and DuckDB storage backends.
+- Table-native SQLite, DuckDB, and DuckDB-managed Parquet storage backends.
 - `tinymongo` CLI with inspect, list, export, import, and migrate commands.
 - Opt-in integration stress tests for concurrent multi-process writes.
 - Atomic multi-writer file operations with temp-file replace and optional advisory locking via `portalocker`.
@@ -14,6 +14,8 @@
 - GitHub Actions CI workflow for Python 3.9, 3.10, and 3.11.
 - Optional `uv` extra support via `uvicorn`.
 - A new benchmark harness comparing Parquet storage to TinyDB JSON storage.
+- SQL-backed collection tables with `_id` primary keys and JSON document payloads for SQLite and DuckDB.
+- DuckDB-managed Parquet datasets with one Parquet file per collection.
 - `pyproject.toml` packaging and modern Python packaging support.
 
 ### Changed
