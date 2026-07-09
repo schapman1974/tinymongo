@@ -2,23 +2,122 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 from tinydb.storages import Storage
+from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 
 try:
     import duckdb
-except Exception:
+except Exception:  # pragma: no cover - optional dependency fallback
     duckdb = None
 
 
-def _fsync_dir(path):
-    try:
-        fd = os.open(path, os.O_RDONLY)
+class AtomicJSONStorage(Storage):
+    """TinyDB JSON storage with inter-process locks and atomic replace writes."""
+
+    def __init__(self, path):
+        self.path = path
+        self._directory = os.path.dirname(path) or "."
+        self.merge_writes = True
+        os.makedirs(self._directory, exist_ok=True)
+
+    def _lock_path(self):
+        return os.path.join(self._directory, ".tinymongo.lock")
+
+    def _acquire_lock(self):
+        lock_path = self._lock_path()
+        rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
+        first_acquire = _acquire_rlock(rlock)
+        portalocker_lock = None
+        if first_acquire and portalocker is not None:
+            portalocker_lock = portalocker.Lock(lock_path, timeout=30)
+            portalocker_lock.acquire()
+        return rlock, portalocker_lock
+
+    def _release_lock(self, rlock, portalocker_lock):
+        if portalocker_lock is not None:
+            try:
+                portalocker_lock.release()
+            except Exception:  # pragma: no cover - defensive lock fallback
+                pass
         try:
-            os.fsync(fd)
+            rlock.release()
+        except Exception:  # pragma: no cover - defensive lock fallback
+            pass
+
+    def read(self):
+        rlock, portalocker_lock = self._acquire_lock()
+        try:
+            if not os.path.exists(self.path) or os.path.getsize(self.path) == 0:
+                return {}
+            with open(self.path, "r", encoding="utf8") as handle:
+                return json.load(handle)
+        except Exception:  # pragma: no cover - corrupt JSON fallback
+            return {}
         finally:
-            os.close(fd)
-    except Exception:
-        pass
+            self._release_lock(rlock, portalocker_lock)
+
+    def _merge_data(self, existing, incoming):
+        merged = {}
+        for table_name, table_data in (existing or {}).items():
+            merged[str(table_name)] = {
+                str(key): value for key, value in (table_data or {}).items()
+            }
+
+        for table_name, table_data in (incoming or {}).items():
+            table = str(table_name)
+            incoming_table = {
+                str(key): value for key, value in (table_data or {}).items()
+            }
+            existing_table = merged.get(table, {})
+            id_to_eid = {
+                value.get("_id"): key
+                for key, value in existing_table.items()
+                if isinstance(value, dict) and "_id" in value
+            }
+            try:
+                next_eid = max(int(key) for key in existing_table.keys()) + 1
+            except Exception:
+                next_eid = 1
+
+            for value in incoming_table.values():
+                doc_id = value.get("_id") if isinstance(value, dict) else None
+                if doc_id is not None and doc_id in id_to_eid:
+                    existing_table[id_to_eid[doc_id]] = value
+                else:
+                    existing_table[str(next_eid)] = value
+                    next_eid += 1
+
+            merged[table] = existing_table
+
+        return merged
+
+    def write(self, data):
+        rlock, portalocker_lock = self._acquire_lock()
+        fd, tmp = tempfile.mkstemp(prefix="tmp", dir=self._directory)
+        try:
+            payload_data = data or {}
+            if self.merge_writes and os.path.exists(self.path):
+                try:
+                    with open(self.path, "r", encoding="utf8") as handle:
+                        payload_data = self._merge_data(json.load(handle) or {}, payload_data)
+                except Exception:  # pragma: no cover - corrupt JSON fallback
+                    payload_data = self._merge_data({}, payload_data)
+
+            payload = json.dumps(payload_data, ensure_ascii=False)
+            with os.fdopen(fd, "w", encoding="utf8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            _fsync_dir(self._directory)
+        finally:
+            if os.path.exists(tmp):  # pragma: no cover - os.replace removes tmp
+                try:
+                    os.remove(tmp)
+                except Exception:  # pragma: no cover - best-effort cleanup
+                    pass
+            self._release_lock(rlock, portalocker_lock)
 
 
 class SQLiteStorage(Storage):
@@ -56,15 +155,12 @@ class SQLiteStorage(Storage):
         try:
             conn = sqlite3.connect(tmp)
             cursor = conn.cursor()
-            cursor.execute(
-                "PRAGMA journal_mode = OFF"
-            )
+            cursor.execute("PRAGMA journal_mode = OFF")
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS tinydb(id INTEGER PRIMARY KEY, data TEXT)"
             )
             cursor.execute(
-                "INSERT OR REPLACE INTO tinydb(id, data) VALUES(1, ?)"
-                , (json_str,)
+                "INSERT OR REPLACE INTO tinydb(id, data) VALUES(1, ?)", (json_str,)
             )
             conn.commit()
             conn.close()
@@ -74,7 +170,7 @@ class SQLiteStorage(Storage):
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
-                except Exception:
+                except Exception:  # pragma: no cover - best-effort cleanup
                     pass
 
 
@@ -110,6 +206,7 @@ class DuckDBStorage(Storage):
         fd, tmp = tempfile.mkstemp(prefix="tmp", dir=dname)
         os.close(fd)
         try:
+            os.remove(tmp)
             conn = duckdb.connect(tmp)
             conn.execute("CREATE TABLE IF NOT EXISTS tinydb(id INTEGER PRIMARY KEY, data TEXT)")
             conn.execute(
@@ -123,7 +220,7 @@ class DuckDBStorage(Storage):
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
-                except Exception:
+                except Exception:  # pragma: no cover - best-effort cleanup
                     pass
 
 
@@ -137,10 +234,7 @@ def get_storage_class(name):
     backend = str(name).lower()
 
     if backend in ("tinydb", "json"):
-        from tinydb import TinyDB
-
-        # TinyDB 3.x exposes DEFAULT_STORAGE instead of default_storage_class.
-        return getattr(TinyDB, "default_storage_class", TinyDB.DEFAULT_STORAGE)
+        return AtomicJSONStorage
     if backend in ("parquet", "parquetv2"):
         from .parquet_storage import ParquetStorage
 

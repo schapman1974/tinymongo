@@ -13,9 +13,8 @@ attempt to add an interface familiar to those currently using pymongo.
 
 # Status
 
-Unit testing is currently being worked on and functionality is being
-added to the library.  Current coverage is 93%.  Current builds tested
-on Python versions 2.7 and 3.3+.
+TinyMongo targets modern Python 3 and is tested in GitHub Actions on
+Python 3.9, 3.10, and 3.11.
 
 # Installation
 
@@ -33,11 +32,177 @@ This
 is a pure python distribution and - thus - should require no external
 compilers or tools besides those contained within Python itself.
 
-# Notes for this fork
+# Project notes
 
-- **Default storage:** this fork uses Parquet v2 files by default (via `pyarrow`) for improved I/O performance and reliability. If `pyarrow` is not available, it falls back to TinyDB's default JSON storage.
+- **Default storage:** TinyMongo uses TinyDB's default JSON storage unless another backend is selected.
+- **Optional storage backends:** Parquet v2, SQLite, and DuckDB backends are available.
 - **Concurrency:** writes use atomic temp-file replace and optional advisory locks (`portalocker`) to reduce corruption risk under concurrent writers.
 - **Tests & CI:** a GitHub Actions workflow is included at `.github/workflows/ci.yml` to run unit tests and linters across Python versions. See `requirements-dev.txt` for dev dependencies.
+
+
+# PyMongo-style import
+
+TinyMongo exposes `MongoClient`, `ASCENDING`, and `DESCENDING` aliases so small
+PyMongo-style scripts can be tried against local file-backed storage by changing
+the import:
+
+```python
+import tinymongo as pymongo
+
+client = pymongo.MongoClient(
+    "mongodb://localhost:27017",
+    serverSelectionTimeoutMS=2000,
+    tinymongo_folder="/path/to/folder",
+)
+users = client.app.users
+users.insert_one({"email": "ada@example.com", "score": 7})
+users.update_one({"email": "ada@example.com"}, {"$inc": {"score": 1}})
+rows = list(users.find({}).sort("score", pymongo.DESCENDING))
+```
+
+This is intended for the supported TinyMongo subset of PyMongo operations, not
+for server features such as authentication, replica sets, aggregation pipelines,
+sessions, or network connections. MongoDB URIs, host names, ports, and common
+connection kwargs are accepted and ignored so existing code can be tried locally.
+Set `TINYMONGO_HOME` or pass `tinymongo_folder=` to choose where TinyMongo stores
+files. See `examples/pymongo_dropin.py` for a runnable example.
+
+
+# Backend options
+
+TinyMongo defaults to TinyDB's JSON storage:
+
+```python
+    from tinymongo import TinyMongoClient
+
+    connection = TinyMongoClient("/path/to/folder")
+```
+
+You can select another backend with the `backend` argument:
+
+```python
+    parquet_connection = TinyMongoClient("/path/to/folder", backend="parquet")
+    sqlite_connection = TinyMongoClient("/path/to/folder", backend="sqlite")
+    duckdb_connection = TinyMongoClient("/path/to/folder", backend="duckdb")
+```
+
+Available backends:
+
+- `tinydb` or `json`: TinyDB's default JSON storage. This is the default and writes `.json` files.
+- `parquet` or `parquetv2`: Parquet v2 storage backed by `pyarrow`. This writes `.parquet` files.
+- `sqlite`: SQLite storage using Python's standard `sqlite3` module. This writes `.sqlite` files.
+- `duckdb`: DuckDB storage. Install `duckdb` before using this backend. This writes `.duckdb` files.
+
+| Backend | Dependency | Best fit | Notes |
+| --- | --- | --- | --- |
+| `tinydb` / `json` | TinyDB | Default local JSON files | Human-readable and simplest to inspect. |
+| `parquet` / `parquetv2` | `pyarrow` | Columnar file workflows | Useful when downstream tools already consume Parquet. |
+| `sqlite` | Python standard library | Single-file durability | Good default alternative for users who want a database container file. |
+| `duckdb` | `duckdb` | Analytics-oriented local data | Useful when DuckDB is already part of the project stack. |
+
+Local load-test results for these backends are documented in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+
+# Command line tools
+
+The package installs a `tinymongo` command for inspecting and moving data:
+
+```bash
+tinymongo inspect ./tinydb
+tinymongo list-dbs ./tinydb
+tinymongo list-collections ./tinydb my_tiny_database
+tinymongo export ./tinydb my_tiny_database users -o users.json
+tinymongo import ./tinydb my_tiny_database users users.json --mode replace
+tinymongo migrate ./tinydb ./sqlite-db --to-backend sqlite
+```
+
+Use `--backend` with `inspect`, `list-dbs`, `list-collections`, `export`, and
+`import` when reading or writing a non-default backend:
+
+```bash
+tinymongo inspect ./sqlite-db --backend sqlite
+tinymongo export ./parquet-db app users --backend parquet -o users.json
+```
+
+
+# Integration and stress testing
+
+Unit tests exclude integration stress tests by default. Run the normal suite with:
+
+```bash
+pytest
+```
+
+Run local integration stress tests explicitly with:
+
+```bash
+pytest -m integration
+```
+
+The concurrent write stress tests are configurable with environment variables:
+
+```bash
+TINYMONGO_INTEGRATION_PROCS=32 \
+TINYMONGO_INTEGRATION_WRITES_PER_PROC=100 \
+pytest -m integration tests/integration/test_concurrent_writes.py
+```
+
+That default bulk-write run produces 3,200 concurrent writes. For a larger local
+run:
+
+```bash
+TINYMONGO_INTEGRATION_PROCS=64 \
+TINYMONGO_INTEGRATION_WRITES_PER_PROC=250 \
+pytest -m integration tests/integration/test_concurrent_writes.py
+```
+
+The single-insert smoke test can be tuned separately:
+
+```bash
+TINYMONGO_INTEGRATION_SINGLE_PROCS=16 \
+TINYMONGO_INTEGRATION_SINGLE_WRITES_PER_PROC=100 \
+pytest -m integration tests/integration/test_concurrent_writes.py
+```
+
+Use `TINYMONGO_INTEGRATION_BACKEND=sqlite` or another supported backend to run
+the same integration tests against a non-default backend.
+
+
+# Mongo compatibility
+
+TinyMongo intentionally implements a practical subset of PyMongo's collection
+API. It supports common inserts, finds, updates, deletes, sorting, pagination,
+and collection counting. Query support includes equality, nested document paths,
+`$gt`, `$gte`, `$lt`, `$lte`, `$ne`, `$nin`, `$in`, `$all`, `$and`, `$or`,
+`$not`, `$regex`, and `$exists`.
+
+Update support includes replacement-style updates plus `$set`, `$unset`, `$inc`,
+`$push`, `$pull`, and `$addToSet`.
+
+Collections also expose lightweight in-memory equality indexes:
+
+```python
+    collection.create_index("email")
+    collection.find({"email": "person@example.com"})
+    collection.list_indexes()
+    collection.drop_index("email")
+```
+
+Indexes are scoped to the active collection object and are rebuilt from stored
+documents as needed. They are a convenience for repeated equality lookups, not a
+durable query-planner feature.
+
+TinyMongo includes PyMongo-shaped contract tests that run application code with
+`import pymongo` redirected to TinyMongo:
+
+```bash
+pytest tests/test_pymongo_contract.py tests/test_pymongo_dropin.py
+```
+
+PyMongo's full upstream driver test suite targets a real MongoDB server and
+driver internals, so it is not expected to pass against TinyMongo. The contract
+tests are the supported compatibility boundary for local file-backed usage.
 
 
 # Examples

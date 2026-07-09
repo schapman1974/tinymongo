@@ -44,6 +44,17 @@ def test_duckdb_backend(tmp_path):
     assert (tmp_path / "db" / "testdb.duckdb").exists()
 
 
+def test_duckdb_backend_multiple_writes(tmp_path):
+    pytest.importorskip("duckdb")
+    client = tm.TinyMongoClient(str(tmp_path / "db"), backend="duckdb")
+    coll = client.testdb.testcollection
+
+    coll.insert_one({"_id": 1, "value": "first"})
+    coll.insert_one({"_id": 2, "value": "second"})
+
+    assert coll.count() == 2
+
+
 def test_internal_client_attrs_are_preserved(tmp_path):
     client = tm.TinyMongoClient(str(tmp_path / "db"), backend="tinydb")
 

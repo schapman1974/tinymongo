@@ -1,2 +1,4 @@
 include requirements.txt
 include README.md
+recursive-include examples *.py
+recursive-include tests *.py *.json

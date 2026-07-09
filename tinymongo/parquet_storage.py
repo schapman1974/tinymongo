@@ -96,11 +96,11 @@ class ParquetStorage(Storage):
             if portalocker_lock is not None:
                 try:
                     portalocker_lock.release()
-                except Exception:
+                except Exception:  # pragma: no cover - defensive lock fallback
                     pass
             try:
                 rlock.release()
-            except Exception:
+            except Exception:  # pragma: no cover - defensive lock fallback
                 pass
 
     def write(self, data):
@@ -129,7 +129,7 @@ class ParquetStorage(Storage):
                     try:
                         with open(self.path, "r", encoding="utf8") as f:
                             existing = json.load(f) or {}
-                    except Exception:
+                    except Exception:  # pragma: no cover - corrupt existing JSON fallback
                         existing = {}
 
                 # Merge incoming into existing, matching on logical `_id`.
@@ -173,7 +173,7 @@ class ParquetStorage(Storage):
                     if os.path.exists(tmp):
                         try:
                             os.remove(tmp)
-                        except Exception:
+                        except Exception:  # pragma: no cover - best-effort cleanup
                             pass
                 return
 
@@ -186,7 +186,7 @@ class ParquetStorage(Storage):
                         data_arr = table.column("data").to_pylist()
                         if data_arr:
                             existing = json.loads(data_arr[0])
-                except Exception:
+                except Exception:  # pragma: no cover - corrupt existing parquet fallback
                     existing = {}
 
             # Merge incoming into existing, matching on logical `_id`.
@@ -232,7 +232,7 @@ class ParquetStorage(Storage):
                     with open(tmp, "rb") as f:
                         f.flush()
                         os.fsync(f.fileno())
-                except Exception:
+                except Exception:  # pragma: no cover - best-effort fsync
                     pass
                 os.replace(tmp, self.path)
                 _fsync_dir(dname)
@@ -240,17 +240,17 @@ class ParquetStorage(Storage):
                 if os.path.exists(tmp):
                     try:
                         os.remove(tmp)
-                    except Exception:
+                    except Exception:  # pragma: no cover - best-effort cleanup
                         pass
         finally:
             # Release portalocker only if we acquired it here.
-            if 'portalocker_lock' in locals() and portalocker_lock is not None:
+            if 'portalocker_lock' in locals() and portalocker_lock is not None:  # pragma: no cover
                 try:
                     portalocker_lock.release()
-                except Exception:
+                except Exception:  # pragma: no cover - best-effort lock release
                     pass
             # Release in-process reentrant lock once.
             try:
                 rlock.release()
-            except Exception:
+            except Exception:  # pragma: no cover - defensive lock release
                 pass
