@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0] - 2026-07-09
+
+### Added
+- Table-native SQLite, DuckDB, and DuckDB-managed Parquet backends with one table or file per collection.
+- SQL compilation for supported Mongo-style filters over `_id` and JSON document fields, with Python fallback for unsupported query shapes.
+- Legacy SQLite and DuckDB blob-file migration when older storage files are opened.
+- Expanded backend tests, PyMongo compatibility tests, and 100% package coverage.
+- Refreshed backend benchmark documentation.
+
+### Changed
+- SQLite, DuckDB, and Parquet backends now use table-oriented storage instead of a single TinyDB-style JSON blob.
+
 ## [1.0.0] - 2026-06-19
 
 ### Added
