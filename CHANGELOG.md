@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Parquet `storage_uri` support for object-storage paths such as S3-compatible,
+  GCS, and Azure Blob Storage URIs.
+- Environment-variable mapping for DuckDB object-storage credentials.
+- CLI `--storage-uri`, `--source-uri`, and `--target-uri` options.
+- Object-storage setup documentation.
+
 ## [1.1.1] - 2026-07-09
 
 ### Fixed

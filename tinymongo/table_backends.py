@@ -2,11 +2,94 @@ import json
 import os
 import re
 import sqlite3
+from urllib.parse import urlparse
 
 from .errors import DuplicateKeyError
 
 
 _MISSING = object()
+_OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
+
+
+def _is_object_store_uri(path):
+    return urlparse(str(path)).scheme.lower() in _OBJECT_STORE_SCHEMES
+
+
+def _join_uri(base, *parts):
+    if _is_object_store_uri(base):
+        return "/".join([str(base).rstrip("/")] + [str(part).strip("/") for part in parts])
+    return os.path.join(base, *parts)
+
+
+def _sql_literal(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _env_first(*names):
+    for name in names:
+        value = os.environ.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _env_bool(name):
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return None
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _duckdb_object_store_settings():
+    settings = {
+        "s3_region": _env_first("TINYMONGO_S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"),
+        "s3_access_key_id": _env_first("TINYMONGO_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
+        "s3_secret_access_key": _env_first("TINYMONGO_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
+        "s3_session_token": _env_first("TINYMONGO_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+        "s3_endpoint": _env_first("TINYMONGO_S3_ENDPOINT", "AWS_ENDPOINT_URL"),
+        "s3_url_style": _env_first("TINYMONGO_S3_URL_STYLE"),
+        "azure_storage_connection_string": _env_first(
+            "TINYMONGO_AZURE_CONNECTION_STRING",
+            "AZURE_STORAGE_CONNECTION_STRING",
+        ),
+    }
+    use_ssl = _env_bool("TINYMONGO_S3_USE_SSL")
+    if use_ssl is not None:
+        settings["s3_use_ssl"] = use_ssl
+    return {key: value for key, value in settings.items() if value not in (None, "")}
+
+
+def _duckdb_secret_sql_from_env():
+    statements = []
+    gcs_key = _env_first("TINYMONGO_GCS_KEY_ID", "GOOGLE_HMAC_KEY_ID")
+    gcs_secret = _env_first("TINYMONGO_GCS_SECRET", "GOOGLE_HMAC_SECRET")
+    if gcs_key and gcs_secret:
+        statements.append(
+            "CREATE OR REPLACE SECRET tinymongo_gcs "
+            "(TYPE gcs, KEY_ID {0}, SECRET {1})".format(
+                _sql_literal(gcs_key), _sql_literal(gcs_secret)
+            )
+        )
+
+    azure_connection = _env_first(
+        "TINYMONGO_AZURE_CONNECTION_STRING",
+        "AZURE_STORAGE_CONNECTION_STRING",
+    )
+    if azure_connection:
+        statements.append(
+            "CREATE OR REPLACE SECRET tinymongo_azure "
+            "(TYPE azure, CONNECTION_STRING {0})".format(
+                _sql_literal(azure_connection)
+            )
+        )
+    return statements
+
+
+def _duckdb_setup_sql_from_env():
+    sql = os.environ.get("TINYMONGO_DUCKDB_SETUP_SQL", "")
+    return [stmt.strip() for stmt in sql.split(";") if stmt.strip()]
 
 
 def _json_dumps(doc):
@@ -219,11 +302,13 @@ class TableBackend(object):
     dialect = None
     extension = None
 
-    def __init__(self, path, threads=None):
+    def __init__(self, path, threads=None, duckdb_config=None):
         self.path = path
         self.threads = threads
+        self.duckdb_config = duckdb_config or {}
         self.compiler = SQLCompiler(self.dialect)
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        if not _is_object_store_uri(path):
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     def close(self):
         pass
@@ -465,19 +550,35 @@ class DuckDBTableBackend(TableBackend):
     dialect = "duckdb"
     extension = ".duckdb"
 
-    def __init__(self, path, threads=None):
+    def __init__(self, path, threads=None, duckdb_config=None):
         try:
             import duckdb
         except Exception as exc:  # pragma: no cover - optional dependency fallback
             raise ImportError("duckdb backend requires the duckdb package") from exc
         self.duckdb = duckdb
-        super(DuckDBTableBackend, self).__init__(path, threads=threads)
+        super(DuckDBTableBackend, self).__init__(
+            path, threads=threads, duckdb_config=duckdb_config
+        )
 
     def _connect(self):
         conn = self.duckdb.connect(self.path)
         if self.threads:
             conn.execute("PRAGMA threads={0}".format(int(self.threads)))
+        self._configure_duckdb_connection(conn)
         return conn
+
+    def _configure_duckdb_connection(self, conn):
+        for key, value in (self.duckdb_config or {}).items():
+            try:
+                conn.execute("SET {0}={1}".format(key, _sql_literal(value)))
+            except Exception:
+                pass
+
+        for stmt in _duckdb_secret_sql_from_env() + _duckdb_setup_sql_from_env():
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass
 
     def _migrate_legacy_blob(self):
         conn = self._connect()
@@ -627,15 +728,52 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
     dialect = "duckdb"
     extension = ".parquet"
 
-    def __init__(self, path, threads=None):
+    def __init__(self, path, threads=None, duckdb_config=None):
         self.directory = path
-        os.makedirs(self.directory, exist_ok=True)
-        super(ParquetDuckDBBackend, self).__init__(":memory:", threads=threads)
+        if not _is_object_store_uri(self.directory):
+            os.makedirs(self.directory, exist_ok=True)
+        self._is_object_store = _is_object_store_uri(self.directory)
+        super(ParquetDuckDBBackend, self).__init__(
+            ":memory:",
+            threads=threads,
+            duckdb_config=duckdb_config or _duckdb_object_store_settings(),
+        )
 
     def _collection_path(self, collection):
-        return os.path.join(self.directory, collection + ".parquet")
+        return _join_uri(self.directory, collection + ".parquet")
+
+    def _connect(self):
+        conn = super(ParquetDuckDBBackend, self)._connect()
+        if self._is_object_store:
+            self._load_object_store_extensions(conn)
+        return conn
+
+    def _load_object_store_extensions(self, conn):
+        scheme = urlparse(self.directory).scheme.lower()
+        extensions = ["azure"] if scheme in {"az", "azure", "abfs", "abfss"} else ["httpfs"]
+        for extension in extensions:
+            for command in ("INSTALL", "LOAD"):
+                try:
+                    conn.execute("{0} {1}".format(command, extension))
+                except Exception:
+                    pass
 
     def list_collections(self):
+        if self._is_object_store:
+            pattern = _join_uri(self.directory, "*.parquet")
+            conn = self._connect()
+            try:
+                rows = conn.execute("SELECT file FROM glob(?)", (pattern,)).fetchall()
+            except Exception:
+                return []
+            finally:
+                conn.close()
+            return sorted(
+                os.path.basename(row[0])[:-len(".parquet")]
+                for row in rows
+                if str(row[0]).endswith(".parquet")
+            )
+
         if not os.path.isdir(self.directory):
             return []
         return sorted(
@@ -645,24 +783,34 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
         )
 
     def create_collection(self, collection):
-        os.makedirs(self.directory, exist_ok=True)
+        if not self._is_object_store:
+            os.makedirs(self.directory, exist_ok=True)
 
     def drop_collection(self, collection):
         path = self._collection_path(collection)
-        existed = os.path.exists(path)
+        existed = (
+            collection in self.list_collections()
+            if self._is_object_store
+            else os.path.exists(path)
+        )
         if existed:
-            os.remove(path)
+            if self._is_object_store:
+                self._write_rows(collection, [])
+            else:
+                os.remove(path)
         return existed
 
     def _read_all_rows(self, collection):
         path = self._collection_path(collection)
-        if not os.path.exists(path):
+        if not self._is_object_store and not os.path.exists(path):
             return []
         conn = self._connect()
         try:
             return conn.execute(
                 "SELECT _id, data FROM read_parquet(?)", (path,)
             ).fetchall()
+        except Exception:
+            return []
         finally:
             conn.close()
 
@@ -694,7 +842,7 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
 
     def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):
         path = self._collection_path(collection)
-        if not os.path.exists(path):
+        if not self._is_object_store and not os.path.exists(path):
             return []
         try:
             where, params = self.compiler.compile(filter_doc)

@@ -4,12 +4,26 @@ import sqlite3
 import tempfile
 import threading
 from tinydb.storages import Storage
+from urllib.parse import urlparse
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 
 try:
     import duckdb
 except Exception:  # pragma: no cover - optional dependency fallback
     duckdb = None
+
+
+OBJECT_STORAGE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
+
+
+def is_object_storage_uri(value):
+    return urlparse(str(value or "")).scheme.lower() in OBJECT_STORAGE_SCHEMES
+
+
+def join_storage_uri(base, *parts):
+    if is_object_storage_uri(base):
+        return "/".join([str(base).rstrip("/")] + [str(part).strip("/") for part in parts])
+    return os.path.join(base, *parts)
 
 
 class AtomicJSONStorage(Storage):

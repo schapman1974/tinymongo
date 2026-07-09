@@ -8,6 +8,11 @@ from tinymongo.table_backends import (
     SQLCompiler,
     SQLiteTableBackend,
     TableBackend,
+    _duckdb_object_store_settings,
+    _duckdb_secret_sql_from_env,
+    _duckdb_setup_sql_from_env,
+    _is_object_store_uri,
+    _join_uri,
     matches_filter,
 )
 
@@ -87,6 +92,35 @@ def test_table_backend_abstract_methods(tmp_path):
         backend.delete_ids("items", [1])
 
 
+def test_object_store_uri_helpers_and_env_config(monkeypatch):
+    assert _is_object_store_uri("s3://bucket/path")
+    assert _is_object_store_uri("gs://bucket/path")
+    assert _is_object_store_uri("az://container/path")
+    assert not _is_object_store_uri("/tmp/path")
+    assert _join_uri("s3://bucket/prefix/", "/db.parquet") == "s3://bucket/prefix/db.parquet"
+
+    monkeypatch.setenv("TINYMONGO_S3_REGION", "us-west-004")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("TINYMONGO_S3_ENDPOINT", "s3.us-west-004.backblazeb2.com")
+    monkeypatch.setenv("TINYMONGO_S3_USE_SSL", "false")
+    monkeypatch.setenv("TINYMONGO_DUCKDB_SETUP_SQL", "SET custom_setting='x'; LOAD httpfs;")
+    monkeypatch.setenv("GOOGLE_HMAC_KEY_ID", "gcs-key")
+    monkeypatch.setenv("GOOGLE_HMAC_SECRET", "gcs-secret")
+    monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", "UseDevelopmentStorage=true")
+
+    settings = _duckdb_object_store_settings()
+
+    assert settings["s3_region"] == "us-west-004"
+    assert settings["s3_access_key_id"] == "key"
+    assert settings["s3_secret_access_key"] == "secret"
+    assert settings["s3_endpoint"] == "s3.us-west-004.backblazeb2.com"
+    assert settings["s3_use_ssl"] is False
+    assert "gcs-key" in _duckdb_secret_sql_from_env()[0]
+    assert "UseDevelopmentStorage=true" in _duckdb_secret_sql_from_env()[1]
+    assert _duckdb_setup_sql_from_env() == ["SET custom_setting='x'", "LOAD httpfs"]
+
+
 def test_sqlite_backend_duplicate_bypass_drop_and_indexes(tmp_path):
     backend = SQLiteTableBackend(str(tmp_path / "db.sqlite"))
     backend.insert_many("users", [{"_id": 1, "name": "Ada"}])
@@ -135,6 +169,154 @@ def test_parquet_backend_empty_and_duplicate_paths(tmp_path):
     assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
     assert backend.drop_collection("users") is True
     assert backend.drop_collection("users") is False
+
+
+def test_parquet_object_store_paths_and_fake_listing(monkeypatch):
+    pytest.importorskip("duckdb")
+    backend = ParquetDuckDBBackend(
+        "s3://bucket/prefix/app.parquet",
+        duckdb_config={"s3_region": "auto"},
+    )
+
+    assert backend._is_object_store is True
+    assert backend._collection_path("users") == "s3://bucket/prefix/app.parquet/users.parquet"
+
+    class FakeConn:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql, params=None):
+            self.statements.append((sql, params))
+            if "glob" in sql:
+                return self
+            raise RuntimeError("not expected")
+
+        def fetchall(self):
+            return [
+                ("s3://bucket/prefix/app.parquet/users.parquet",),
+                ("s3://bucket/prefix/app.parquet/events.parquet",),
+            ]
+
+        def close(self):
+            pass
+
+    fake = FakeConn()
+    monkeypatch.setattr(backend, "_connect", lambda: fake)
+
+    assert backend.list_collections() == ["events", "users"]
+
+    monkeypatch.setattr(backend, "_connect", lambda: RaisingGlobConn())
+    assert backend.list_collections() == []
+
+
+class RaisingGlobConn:
+    def execute(self, *args, **kwargs):
+        raise RuntimeError("glob failed")
+
+    def close(self):
+        pass
+
+
+def test_parquet_object_store_missing_and_drop_paths(monkeypatch):
+    pytest.importorskip("duckdb")
+    backend = ParquetDuckDBBackend("s3://bucket/prefix/app.parquet")
+
+    class RaisingConn:
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("missing")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backend, "_connect", lambda: RaisingConn())
+    assert backend._read_all_rows("missing") == []
+    assert backend.find("missing", {}) == []
+    assert backend.drop_collection("missing") is False
+
+    written = []
+    monkeypatch.setattr(backend, "list_collections", lambda: ["users"])
+    monkeypatch.setattr(backend, "_write_rows", lambda collection, rows: written.append((collection, rows)))
+
+    assert backend.drop_collection("users") is True
+    assert written == [("users", [])]
+
+
+def test_duckdb_object_store_connection_configuration(tmp_path, monkeypatch):
+    pytest.importorskip("duckdb")
+    backend = DuckDBTableBackend(
+        str(tmp_path / "db.duckdb"),
+        duckdb_config={"s3_region": "us-east-1", "s3_use_ssl": True},
+    )
+    monkeypatch.setenv("TINYMONGO_DUCKDB_SETUP_SQL", "LOAD httpfs; SET custom='ok'")
+
+    class FakeConn:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql):
+            self.statements.append(sql)
+
+    fake = FakeConn()
+
+    backend._configure_duckdb_connection(fake)
+
+    assert "SET s3_region='us-east-1'" in fake.statements
+    assert "SET s3_use_ssl=true" in fake.statements
+    assert "LOAD httpfs" in fake.statements
+    assert "SET custom='ok'" in fake.statements
+
+
+def test_duckdb_object_store_configuration_ignores_setup_errors(tmp_path, monkeypatch):
+    pytest.importorskip("duckdb")
+    backend = DuckDBTableBackend(
+        str(tmp_path / "db.duckdb"),
+        duckdb_config={"s3_region": "us-east-1"},
+    )
+    monkeypatch.setenv("GOOGLE_HMAC_KEY_ID", "gcs-key")
+    monkeypatch.setenv("GOOGLE_HMAC_SECRET", "gcs-secret")
+
+    class BadConn:
+        def execute(self, sql):
+            raise RuntimeError(sql)
+
+    backend._configure_duckdb_connection(BadConn())
+
+
+def test_parquet_object_store_extension_loading():
+    pytest.importorskip("duckdb")
+
+    class FakeConn:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql):
+            self.statements.append(sql)
+            if sql.startswith("INSTALL"):
+                raise RuntimeError("offline")
+
+    s3_backend = ParquetDuckDBBackend("s3://bucket/app.parquet")
+    s3_fake = FakeConn()
+    s3_backend._load_object_store_extensions(s3_fake)
+    assert "LOAD httpfs" in s3_fake.statements
+
+    azure_backend = ParquetDuckDBBackend("az://container/app.parquet")
+    azure_fake = FakeConn()
+    azure_backend._load_object_store_extensions(azure_fake)
+    assert "LOAD azure" in azure_fake.statements
+
+
+def test_parquet_object_store_connect_loads_extensions(monkeypatch):
+    pytest.importorskip("duckdb")
+    backend = ParquetDuckDBBackend("s3://bucket/app.parquet")
+    loaded = []
+    monkeypatch.setattr(
+        backend, "_load_object_store_extensions", lambda conn: loaded.append(True)
+    )
+
+    conn = backend._connect()
+    conn.close()
+
+    assert loaded == [True]
 
 
 def test_tinymongo_table_backend_api_branches(tmp_path):

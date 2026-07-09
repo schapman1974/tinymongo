@@ -86,6 +86,17 @@ You can select another backend with the `backend` argument:
     duckdb_connection = TinyMongoClient("/path/to/folder", backend="duckdb")
 ```
 
+Parquet can also store collection files in object storage by passing
+`storage_uri` or setting `TINYMONGO_STORAGE_URI`:
+
+```python
+    s3_connection = TinyMongoClient(
+        "/local/fallback-folder",
+        backend="parquet",
+        storage_uri="s3://my-bucket/tinymongo",
+    )
+```
+
 Available backends:
 
 - `tinydb` or `json`: TinyDB-compatible JSON storage. This is the default and writes `.json` files.
@@ -98,7 +109,7 @@ Available backends:
 | `tinydb` / `json` | TinyDB | Default local JSON files | Human-readable and simplest to inspect. |
 | `sqlite` | Python standard library | Embedded transactional storage | Uses `_id` primary keys and JSON document payloads in collection tables. |
 | `duckdb` | `duckdb` | SQL-backed local analytics workflows | Uses real DuckDB collection tables and SQL JSON predicates where supported. |
-| `parquet` / `parquetv2` | `duckdb`, `pyarrow` | Columnar file workflows | Stores collection Parquet files that DuckDB reads and writes. |
+| `parquet` / `parquetv2` | `duckdb`, `pyarrow` | Columnar local or object-storage workflows | Stores collection Parquet files that DuckDB reads and writes. |
 
 SQLite, DuckDB, and Parquet compile supported Mongo-style filters into SQL over
 the `_id` column and JSON document payload. Unsupported filter shapes fall back
@@ -108,6 +119,11 @@ opened.
 
 Local load-test results for these backends are documented in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+Object-storage setup examples for S3, S3-compatible providers, Backblaze B2,
+Cloudflare R2, Google Cloud Storage, Azure Blob Storage, MinIO, Wasabi, and
+DigitalOcean Spaces are documented in
+[docs/OBJECT_STORAGE.md](docs/OBJECT_STORAGE.md).
 
 
 # Command line tools
@@ -129,6 +145,8 @@ Use `--backend` with `inspect`, `list-dbs`, `list-collections`, `export`, and
 ```bash
 tinymongo inspect ./sqlite-db --backend sqlite
 tinymongo export ./parquet-db app users --backend parquet -o users.json
+tinymongo inspect ./local-cache --backend parquet --storage-uri s3://my-bucket/tinymongo
+tinymongo migrate ./tinydb ./local-cache --to-backend parquet --target-uri s3://my-bucket/tinymongo
 ```
 
 

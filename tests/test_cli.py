@@ -132,3 +132,110 @@ def test_cli_migrate_all_databases(tmp_path, capsys):
     assert migrated[("app", "users")] == 1
     assert migrated[("audit", "events")] == 1
     assert tm.TinyMongoClient(str(target), backend="sqlite").audit.events.count() == 1
+
+
+def test_cli_storage_uri_options_are_passed_through(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    class FakeCollection:
+        def __init__(self):
+            self.docs = [{"_id": 1}]
+
+        def find(self, _filter=None):
+            return self.docs
+
+        def delete_many(self, _filter):
+            return None
+
+        def insert_many(self, docs):
+            self.docs = docs
+
+    class FakeDatabase:
+        def __init__(self):
+            self.users = FakeCollection()
+
+        def __getitem__(self, name):
+            return self.users
+
+        def collection_names(self):
+            return ["users"]
+
+    class FakeClient:
+        def __init__(self, path, backend, storage_uri=None):
+            calls.append((path, backend, storage_uri))
+            self.app = FakeDatabase()
+
+        def __getitem__(self, name):
+            return self.app
+
+    monkeypatch.setattr(cli, "TinyMongoClient", FakeClient)
+    monkeypatch.setattr(cli, "_db_names", lambda path, backend, storage_uri=None: ["app"])
+
+    assert cli.main([
+        "export",
+        str(tmp_path),
+        "app",
+        "users",
+        "--backend",
+        "parquet",
+        "--storage-uri",
+        "s3://bucket/root",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == [{"_id": 1}]
+
+    assert cli.main([
+        "migrate",
+        str(tmp_path / "source"),
+        str(tmp_path / "target"),
+        "--from-backend",
+        "parquet",
+        "--to-backend",
+        "parquet",
+        "--source-uri",
+        "s3://source/root",
+        "--target-uri",
+        "s3://target/root",
+    ]) == 0
+
+    assert calls[0] == (str(tmp_path), "parquet", "s3://bucket/root")
+    assert calls[1] == (str(tmp_path / "source"), "parquet", "s3://source/root")
+    assert calls[2] == (str(tmp_path / "target"), "parquet", "s3://target/root")
+
+
+def test_cli_storage_uri_inspect_and_db_names(monkeypatch, tmp_path, capsys):
+    class FakeCollection:
+        def count(self):
+            return 3
+
+    class FakeDatabase:
+        def __getitem__(self, name):
+            return FakeCollection()
+
+        def collection_names(self):
+            return ["users"]
+
+    class FakeClient:
+        def __init__(self, path, backend, storage_uri=None):
+            self.storage_uri = storage_uri
+
+        def list_database_names(self):
+            return ["app"]
+
+        def __getitem__(self, name):
+            return FakeDatabase()
+
+    monkeypatch.setattr(cli, "TinyMongoClient", FakeClient)
+
+    assert cli._db_names(str(tmp_path), "parquet", storage_uri="s3://bucket/root") == ["app"]
+    assert cli.main([
+        "inspect",
+        str(tmp_path),
+        "--backend",
+        "parquet",
+        "--storage-uri",
+        "s3://bucket/root",
+    ]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["storage_uri"] == "s3://bucket/root"
+    assert payload["databases"][0]["collections"][0]["count"] == 3

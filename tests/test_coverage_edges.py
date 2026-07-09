@@ -97,6 +97,10 @@ def test_storage_backend_helpers_and_sqlite_edge_paths(tmp_path, monkeypatch):
     assert sb.storage_extension("json") == ".json"
     assert sb.storage_extension("parquetv2") == ".parquet"
     assert sb.storage_extension("duckdb") == ".duckdb"
+    assert sb.is_object_storage_uri("s3://bucket/path") is True
+    assert sb.is_object_storage_uri("/tmp/path") is False
+    assert sb.join_storage_uri("s3://bucket/prefix/", "/db.parquet") == "s3://bucket/prefix/db.parquet"
+    assert sb.join_storage_uri(str(tmp_path), "db.parquet") == os.path.join(str(tmp_path), "db.parquet")
     assert sb.is_table_backend("sqlite") is True
     assert sb.is_table_backend("tinydb") is False
     assert sb.get_table_backend("sqlite") is not None
@@ -504,6 +508,53 @@ def test_database_refresh_ignores_close_errors(tmp_path):
     db.tinydb = BadTinyDB()
     db._refresh_table()
     assert "_default" in db.collection_names()
+
+
+def test_parquet_storage_uri_client_paths_and_listing(tmp_path, monkeypatch):
+    class FakeEngine:
+        instances = []
+
+        def __init__(self, path, threads=None, duckdb_config=None):
+            self.path = path
+            self.threads = threads
+            self.duckdb_config = duckdb_config
+            FakeEngine.instances.append(self)
+
+        def list_collections(self):
+            return ["app", "audit"]
+
+    monkeypatch.setattr(core, "get_table_backend", lambda backend: FakeEngine)
+
+    client = tm.TinyMongoClient(
+        str(tmp_path / "db"),
+        backend="parquet",
+        storage_uri="s3://bucket/root",
+        threads=4,
+        duckdb_config={"s3_region": "auto"},
+    )
+    db = client.app
+
+    assert db._path == "s3://bucket/root/app.parquet"
+    assert client.server_info()["storageUri"] == "s3://bucket/root"
+    assert client.list_database_names() == ["app", "audit"]
+    assert FakeEngine.instances[-1].threads == 4
+    assert FakeEngine.instances[-1].duckdb_config == {"s3_region": "auto"}
+
+
+def test_parquet_storage_uri_env_var(tmp_path, monkeypatch):
+    class FakeEngine:
+        def __init__(self, path, threads=None, duckdb_config=None):
+            self.path = path
+
+        def list_collections(self):
+            return []
+
+    monkeypatch.setenv("TINYMONGO_STORAGE_URI", "gs://bucket/root")
+    monkeypatch.setattr(core, "get_table_backend", lambda backend: FakeEngine)
+
+    client = tm.TinyMongoClient(str(tmp_path / "db"), backend="parquet")
+
+    assert client.app._path == "gs://bucket/root/app.parquet"
 
 
 def test_cursor_sort_order_branches():

@@ -14,11 +14,13 @@ from .tinymongo import TinyMongoClient
 SUPPORTED_BACKENDS = ("tinydb", "json", "parquet", "parquetv2", "sqlite", "duckdb")
 
 
-def _client(path, backend):
-    return TinyMongoClient(path, backend=backend)
+def _client(path, backend, storage_uri=None):
+    return TinyMongoClient(path, backend=backend, storage_uri=storage_uri)
 
 
-def _db_names(path, backend):
+def _db_names(path, backend, storage_uri=None):
+    if storage_uri:
+        return _client(path, backend, storage_uri=storage_uri).list_database_names()
     ext = storage_extension(backend)
     if not os.path.isdir(path):
         return []
@@ -48,9 +50,11 @@ def _dump_json(data, path):
 
 
 def cmd_inspect(args):
-    client = _client(args.path, args.backend)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
     payload = {"path": args.path, "backend": args.backend, "databases": []}
-    for db_name in _db_names(args.path, args.backend):
+    if args.storage_uri:
+        payload["storage_uri"] = args.storage_uri
+    for db_name in _db_names(args.path, args.backend, storage_uri=args.storage_uri):
         db = client[db_name]
         collections = []
         for collection_name in sorted(db.collection_names()):
@@ -62,20 +66,20 @@ def cmd_inspect(args):
 
 
 def cmd_list_dbs(args):
-    for name in _db_names(args.path, args.backend):
+    for name in _db_names(args.path, args.backend, storage_uri=args.storage_uri):
         print(name)
     return 0
 
 
 def cmd_list_collections(args):
-    client = _client(args.path, args.backend)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
     for name in sorted(client[args.database].collection_names()):
         print(name)
     return 0
 
 
 def cmd_export(args):
-    client = _client(args.path, args.backend)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
     docs = list(client[args.database][args.collection].find({}))
     _dump_json(docs, args.output)
     return 0
@@ -89,7 +93,7 @@ def cmd_import(args):
         if not isinstance(doc, dict):
             raise SystemExit("import input must contain only JSON objects")
 
-    client = _client(args.path, args.backend)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
     collection = client[args.database][args.collection]
     if args.mode == "replace":
         collection.delete_many({})
@@ -100,10 +104,12 @@ def cmd_import(args):
 
 
 def cmd_migrate(args):
-    source_client = _client(args.source, args.from_backend)
-    target_client = _client(args.target, args.to_backend)
+    source_client = _client(args.source, args.from_backend, storage_uri=args.source_uri)
+    target_client = _client(args.target, args.to_backend, storage_uri=args.target_uri)
 
-    database_names = [args.database] if args.database else _db_names(args.source, args.from_backend)
+    database_names = [args.database] if args.database else _db_names(
+        args.source, args.from_backend, storage_uri=args.source_uri
+    )
     migrated = []
     for db_name in database_names:
         source_db = source_client[db_name]
@@ -124,6 +130,8 @@ def cmd_migrate(args):
             "target": args.target,
             "from_backend": args.from_backend,
             "to_backend": args.to_backend,
+            "source_uri": args.source_uri,
+            "target_uri": args.target_uri,
             "migrated": migrated,
         },
         args.output,
@@ -136,6 +144,10 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command", required=True)
     backend_parser = argparse.ArgumentParser(add_help=False)
     backend_parser.add_argument("--backend", default="tinydb", choices=SUPPORTED_BACKENDS)
+    backend_parser.add_argument(
+        "--storage-uri",
+        help="object storage URI for parquet/parquetv2, for example s3://bucket/prefix",
+    )
 
     inspect = subparsers.add_parser(
         "inspect",
@@ -185,6 +197,8 @@ def build_parser():
     migrate.add_argument("target")
     migrate.add_argument("--from-backend", default="tinydb", choices=SUPPORTED_BACKENDS)
     migrate.add_argument("--to-backend", required=True, choices=SUPPORTED_BACKENDS)
+    migrate.add_argument("--source-uri")
+    migrate.add_argument("--target-uri")
     migrate.add_argument("--database")
     migrate.add_argument("-o", "--output", default="-")
     migrate.set_defaults(func=cmd_migrate)

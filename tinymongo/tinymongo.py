@@ -15,6 +15,7 @@ from .storage_backends import (
     get_storage_class,
     get_table_backend,
     is_table_backend,
+    join_storage_uri,
     storage_extension,
 )
 # from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
@@ -178,6 +179,10 @@ class TinyMongoClient(object):
         self._foldername = foldername
         self._backend = backend or "tinydb"
         self._threads = kwargs.get("threads")
+        self._storage_uri = kwargs.get("storage_uri") or os.environ.get(
+            "TINYMONGO_STORAGE_URI"
+        )
+        self._duckdb_config = kwargs.get("duckdb_config")
         try:
             os.makedirs(foldername, exist_ok=True)
         except OSError as x:
@@ -193,6 +198,10 @@ class TinyMongoClient(object):
         return self._get_db(key)
 
     def _get_db_path(self, key):
+        if self._storage_uri and str(self._backend).lower() in ("parquet", "parquetv2"):
+            return join_storage_uri(
+                self._storage_uri, key + storage_extension(self._backend)
+            )
         return os.path.join(self._foldername, key + storage_extension(self._backend))
 
     def _get_db(self, key):
@@ -200,7 +209,14 @@ class TinyMongoClient(object):
         if is_table_backend(self._backend):
             engine_class = get_table_backend(self._backend)
             return TinyMongoDatabase(
-                key, path, self._storage, engine=engine_class(path, self._threads)
+                key,
+                path,
+                self._storage,
+                engine=engine_class(
+                    path,
+                    threads=self._threads,
+                    duckdb_config=self._duckdb_config,
+                ),
             )
         return TinyMongoDatabase(key, path, self._storage)
 
@@ -214,12 +230,21 @@ class TinyMongoClient(object):
             "version": "tinymongo",
             "storage": self._backend,
             "localPath": self._foldername,
+            "storageUri": self._storage_uri,
             "tinymongo": True,
         }
 
     def list_database_names(self):
         """Return database names found in the configured local storage folder."""
         extension = storage_extension(self._backend)
+        if self._storage_uri and str(self._backend).lower() in ("parquet", "parquetv2"):
+            engine_class = get_table_backend(self._backend)
+            engine = engine_class(
+                self._storage_uri,
+                threads=self._threads,
+                duckdb_config=self._duckdb_config,
+            )
+            return engine.list_collections()
         if not os.path.isdir(self._foldername):
             return []
         names = []
@@ -258,8 +283,17 @@ class MongoClient(TinyMongoClient):
         **kwargs
     ):
         backend = kwargs.pop("backend", "tinydb")
+        storage_uri = kwargs.pop("storage_uri", None)
+        threads = kwargs.pop("threads", None)
+        duckdb_config = kwargs.pop("duckdb_config", None)
         foldername = _folder_from_mongo_client_args(host, port, kwargs)
-        super(MongoClient, self).__init__(foldername=foldername, backend=backend)
+        super(MongoClient, self).__init__(
+            foldername=foldername,
+            backend=backend,
+            storage_uri=storage_uri,
+            threads=threads,
+            duckdb_config=duckdb_config,
+        )
 
 
 class TinyMongoDatabase(object):
