@@ -181,7 +181,7 @@ TinyMongo intentionally implements a practical subset of PyMongo's collection
 API. It supports common inserts, finds, updates, deletes, sorting, pagination,
 and collection counting. Query support includes equality, nested document paths,
 `$gt`, `$gte`, `$lt`, `$lte`, `$ne`, `$nin`, `$in`, `$all`, `$and`, `$or`,
-`$not`, `$regex`, and `$exists`.
+`$nor`, `$not`, `$regex`, and `$exists`.
 
 Update support includes replacement-style updates plus `$set`, `$unset`, `$inc`,
 `$push`, `$pull`, and `$addToSet`.
