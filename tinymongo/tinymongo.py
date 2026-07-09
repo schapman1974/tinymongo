@@ -8,7 +8,7 @@ from functools import reduce
 import logging
 import os
 from math import ceil
-from uuid import uuid1
+from uuid import uuid4
 
 from tinydb import Query, TinyDB, where
 from .storage_backends import get_storage_class, storage_extension
@@ -1276,7 +1276,7 @@ class TinyGridFS(object):
 def generate_id():
     """Generate new UUID"""
     # TODO: Use six.string_type to Py3 compat
-    return str(uuid1()).replace(u"-", u"")
+    return str(uuid4()).replace(u"-", u"")
 
 # def generate_id():
 #     """Generate new UUID"""
