@@ -19,6 +19,9 @@ pip install "tinymongo[mariadb]"
 pip install "tinymongo[remote-sql]"
 ```
 
+If a required driver is missing, TinyMongo raises an `ImportError` that includes
+the exact `pip install ...` command to run.
+
 ## PostgreSQL
 
 ```python

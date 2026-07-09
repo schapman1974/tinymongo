@@ -120,7 +120,7 @@ def test_storage_backend_helpers_and_sqlite_edge_paths(tmp_path, monkeypatch):
         sb.get_table_backend("tinydb")
 
     monkeypatch.setattr(sb, "duckdb", None)
-    with pytest.raises(ImportError):
+    with pytest.raises(ImportError, match="pip install duckdb"):
         sb.DuckDBStorage(str(tmp_path / "db.duckdb"))
 
     with monkeypatch.context() as ctx:

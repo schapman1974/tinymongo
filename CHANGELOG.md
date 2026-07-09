@@ -12,6 +12,7 @@
   configuration.
 - CLI `--dsn`, `--source-dsn`, and `--target-dsn` options.
 - Remote SQL setup documentation and opt-in integration tests.
+- Install-command guidance when optional backend drivers are missing.
 
 ## [1.1.1] - 2026-07-09
 

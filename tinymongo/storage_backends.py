@@ -194,7 +194,8 @@ class DuckDBStorage(Storage):
     def __init__(self, path):
         if duckdb is None:
             raise ImportError(
-                "duckdb backend requires the duckdb package to be installed"
+                "duckdb backend requires the optional Python driver 'duckdb'. "
+                "Install it with: pip install duckdb or pip install tinymongo"
             )
         self.path = path
 

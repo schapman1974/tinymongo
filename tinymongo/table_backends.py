@@ -1,4 +1,5 @@
 import json
+import importlib
 import os
 import re
 import sqlite3
@@ -9,6 +10,18 @@ from .errors import DuplicateKeyError
 
 _MISSING = object()
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
+
+
+def _import_optional_driver(module_name, backend_name, install_hint):
+    try:
+        return importlib.import_module(module_name)
+    except Exception as exc:  # pragma: no cover - covered through callers
+        raise ImportError(
+            "{0} backend requires the optional Python driver '{1}'. "
+            "Install it with: {2}".format(
+                backend_name, module_name, install_hint
+            )
+        ) from exc
 
 
 def _is_object_store_uri(path):
@@ -567,10 +580,11 @@ class DuckDBTableBackend(TableBackend):
         database=None,
         dsn=None,
     ):
-        try:
-            import duckdb
-        except Exception as exc:  # pragma: no cover - optional dependency fallback
-            raise ImportError("duckdb backend requires the duckdb package") from exc
+        duckdb = _import_optional_driver(
+            "duckdb",
+            "duckdb/parquet",
+            "pip install duckdb or pip install tinymongo",
+        )
         self.duckdb = duckdb
         super(DuckDBTableBackend, self).__init__(
             path,
@@ -1176,10 +1190,11 @@ class PostgresTableBackend(RemoteSQLTableBackend):
     json_type = "JSONB"
 
     def __init__(self, path, threads=None, duckdb_config=None, database=None, dsn=None):
-        try:
-            import psycopg
-        except Exception as exc:  # pragma: no cover - optional dependency fallback
-            raise ImportError("postgres backend requires psycopg") from exc
+        psycopg = _import_optional_driver(
+            "psycopg",
+            "postgres",
+            'pip install "tinymongo[postgres]" or pip install "psycopg[binary]>=3.1"',
+        )
         self.psycopg = psycopg
         super(PostgresTableBackend, self).__init__(
             path,
@@ -1229,10 +1244,11 @@ class MySQLTableBackend(RemoteSQLTableBackend):
     json_type = "JSON"
 
     def __init__(self, path, threads=None, duckdb_config=None, database=None, dsn=None):
-        try:
-            import pymysql
-        except Exception as exc:  # pragma: no cover - optional dependency fallback
-            raise ImportError("mariadb/mysql backend requires PyMySQL") from exc
+        pymysql = _import_optional_driver(
+            "pymysql",
+            "mariadb/mysql",
+            'pip install "tinymongo[mysql]" or pip install "PyMySQL>=1.1"',
+        )
         self.pymysql = pymysql
         super(MySQLTableBackend, self).__init__(
             path,

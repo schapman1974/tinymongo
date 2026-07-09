@@ -134,6 +134,8 @@ DigitalOcean Spaces are documented in
 [docs/OBJECT_STORAGE.md](docs/OBJECT_STORAGE.md).
 PostgreSQL and MariaDB/MySQL setup is documented in
 [docs/REMOTE_SQL.md](docs/REMOTE_SQL.md).
+Remote SQL drivers are optional; if one is missing, TinyMongo raises an
+`ImportError` with the exact `pip install ...` command to run.
 
 
 # Command line tools

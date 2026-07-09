@@ -16,6 +16,7 @@ from tinymongo.table_backends import (
     _duckdb_object_store_settings,
     _duckdb_secret_sql_from_env,
     _duckdb_setup_sql_from_env,
+    _import_optional_driver,
     _is_object_store_uri,
     _join_uri,
     matches_filter,
@@ -456,6 +457,28 @@ def test_tinymongo_table_backend_api_branches(tmp_path):
 def test_remote_sql_backend_requires_dsn():
     with pytest.raises(ValueError):
         RemoteSQLTableBackend("", database="app")
+
+
+def test_optional_driver_error_messages(monkeypatch):
+    def missing_import(name):
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr("tinymongo.table_backends.importlib.import_module", missing_import)
+
+    with pytest.raises(ImportError, match='pip install "tinymongo\\[postgres\\]"') as postgres:
+        PostgresTableBackend("", database="app", dsn="postgresql://db")
+    assert "optional Python driver 'psycopg'" in str(postgres.value)
+
+    with pytest.raises(ImportError, match='pip install "tinymongo\\[mysql\\]"') as mysql:
+        MySQLTableBackend("", database="app", dsn="mysql://db")
+    assert "optional Python driver 'pymysql'" in str(mysql.value)
+
+    with pytest.raises(ImportError, match="pip install duckdb") as duckdb:
+        DuckDBTableBackend("db.duckdb")
+    assert "optional Python driver 'duckdb'" in str(duckdb.value)
+
+    with pytest.raises(ImportError, match="pip install example"):
+        _import_optional_driver("missing_driver", "example", "pip install example")
 
 
 def test_remote_sql_backend_defensive_edges(monkeypatch):
