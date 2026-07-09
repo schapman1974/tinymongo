@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.1] - 2026-07-09
+
+### Fixed
+- Added `$nor` query support for TinyDB JSON, SQLite, DuckDB, and Parquet backends.
+
 ## [1.1.0] - 2026-07-09
 
 ### Added
