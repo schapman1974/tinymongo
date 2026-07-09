@@ -91,7 +91,9 @@ You can select another backend with the `backend` argument:
 ```
 
 Parquet can also store collection files in object storage by passing
-`storage_uri` or setting `TINYMONGO_STORAGE_URI`:
+`storage_uri` or setting `TINYMONGO_STORAGE_URI`. Object-storage Parquet is
+experimental in `1.1.2` and currently uses one Parquet file per collection, so
+updates/deletes rewrite that file:
 
 ```python
     s3_connection = TinyMongoClient(

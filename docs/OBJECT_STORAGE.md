@@ -1,8 +1,24 @@
 # Parquet Object Storage
 
+This feature is experimental in `1.1.2`.
+
 TinyMongo's `parquet` and `parquetv2` backends can place collection Parquet
 files under an object-storage URI. DuckDB performs the remote file reads and
 writes, so the same collection API can target local files or object storage.
+
+In this release, object-storage Parquet still uses one Parquet file per
+collection:
+
+```text
+s3://my-bucket/tinymongo/app.parquet/users.parquet
+```
+
+That means inserts, updates, and deletes rewrite the collection file. Use this
+for experiments, portable datasets, and single-writer workflows. For remote
+transactional workloads, use the PostgreSQL or MariaDB/MySQL backends. A future
+object-storage design should use append-only part files plus a metadata/table
+format such as a manifest layer, Iceberg, Delta, or DuckLake before claiming
+multi-writer update/delete semantics.
 
 ```python
 from tinymongo import TinyMongoClient
@@ -177,18 +193,17 @@ Important tradeoffs:
 - `drop_collection()` writes an empty Parquet file for object stores when a
   direct delete API is not available through DuckDB.
 
-For strict remote transactions, prefer a future SQL backend such as PostgreSQL
-or MariaDB/MySQL rather than object-storage Parquet.
+For strict remote transactions, prefer PostgreSQL or MariaDB/MySQL rather than
+object-storage Parquet.
 
-## Future SQL Backends
+## Remote SQL Backends
 
-The planned remote transactional backend family is separate from Parquet object
-storage:
+The remote transactional backend family is separate from Parquet object storage:
 
 ```python
 TinyMongoClient(backend="postgres", dsn="postgresql://user:pass@host/db")
 TinyMongoClient(backend="mariadb", dsn="mysql://user:pass@host/db")
 ```
 
-Those backends should use server-side tables, durable indexes, and database
-transactions instead of object-file rewrites.
+Those backends use server-side tables and database transactions instead of
+object-file rewrites.
