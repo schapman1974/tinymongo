@@ -47,6 +47,8 @@ def matches_filter(doc, filter_doc):
             return all(matches_filter(doc, spec) for spec in expected)
         if key == "$or":
             return any(matches_filter(doc, spec) for spec in expected)
+        if key == "$nor":
+            return not any(matches_filter(doc, spec) for spec in expected)
 
         actual = _get_nested(doc, key)
         if isinstance(expected, dict):
@@ -135,6 +137,12 @@ class SQLCompiler(object):
             if key == "$or":
                 grouped = [self._compile_spec(item) for item in value]
                 clauses.append("(" + " OR ".join(item[0] for item in grouped) + ")")
+                for item in grouped:
+                    params.extend(item[1])
+                continue
+            if key == "$nor":
+                grouped = [self._compile_spec(item) for item in value]
+                clauses.append("NOT (" + " OR ".join(item[0] for item in grouped) + ")")
                 for item in grouped:
                     params.extend(item[1])
                 continue

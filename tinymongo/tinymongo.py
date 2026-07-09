@@ -732,7 +732,7 @@ class TinyMongoCollection(object):
                     conditions = exists_cond if not conditions else conditions & exists_cond
                 else:
                     conditions = ~exists_cond if not conditions else conditions & ~exists_cond
-            elif key in ["$and", "$or", "$in", "$all"]:
+            elif key in ["$and", "$or", "$nor", "$in", "$all"]:
                 pass
             else:
 
@@ -775,6 +775,16 @@ class TinyMongoCollection(object):
                                 else grouped_conditions | parse_condition
                             )
                     yield grouped_conditions
+                elif key == "$nor":
+                    grouped_conditions = None
+                    for spec in value:
+                        for parse_condition in self.parse_condition(spec):
+                            grouped_conditions = (
+                                parse_condition
+                                if not grouped_conditions
+                                else grouped_conditions | parse_condition
+                            )
+                    yield ~grouped_conditions
                 elif key == "$in":
                     # use `any` to find with list, before comparing to single string
                     grouped_conditions = Q(q, prev_key).any(value)

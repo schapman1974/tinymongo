@@ -95,6 +95,22 @@ def test_all_operator_matches_arrays():
     assert matches.count() == 3
 
 
+def test_nor_operator_excludes_matching_documents():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_many([
+        {"_id": 1, "status": "draft", "score": 2},
+        {"_id": 2, "status": "published", "score": 5},
+        {"_id": 3, "status": "archived", "score": 9},
+    ])
+
+    matches = c.find({"$nor": [{"status": "draft"}, {"score": {"$gt": 8}}]})
+
+    assert matches.count() == 1
+    assert matches[0]["_id"] == 2
+
+
 def test_count_documents_uses_filter():
     setup_db()
     client = tm.TinyMongoClient(DB_DIR)

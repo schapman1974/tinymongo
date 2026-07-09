@@ -19,6 +19,8 @@ def test_matches_filter_operator_edges():
     assert not matches_filter(doc, "bad")
     assert matches_filter(doc, {"$and": [{"age": {"$gt": 30}}, {"name": "Ada"}]})
     assert matches_filter(doc, {"$or": [{"name": "Grace"}, {"age": {"$lte": 36}}]})
+    assert matches_filter(doc, {"$nor": [{"name": "Grace"}, {"age": {"$gt": 40}}]})
+    assert not matches_filter(doc, {"$nor": [{"name": "Ada"}]})
     assert not matches_filter(doc, {"age": {"$gt": 40}})
     assert not matches_filter(doc, {"age": {"$gte": 40}})
     assert not matches_filter(doc, {"age": {"$lt": 30}})
@@ -49,6 +51,7 @@ def test_sql_compiler_branches():
     assert "_id IN" in duckdb.compile({"_id": {"$in": [1, 2]}})[0]
     assert "_id !=" in duckdb.compile({"_id": {"$ne": 1}})[0]
     assert " OR " in duckdb.compile({"$or": [{"name": "Ada"}, {"name": "Grace"}]})[0]
+    assert "NOT" in duckdb.compile({"$nor": [{"name": "Ada"}, {"name": "Grace"}]})[0]
     assert " AND " in duckdb.compile({"$and": [{"age": {"$gt": 1}}, {"age": {"$lt": 9}}]})[0]
     assert "NOT" in duckdb.compile({"missing": {"$exists": False}})[0]
     assert "IN" in duckdb.compile({"name": {"$in": ["Ada", "Grace"]}})[0]
@@ -163,3 +166,20 @@ def test_tinymongo_table_backend_api_branches(tmp_path):
     assert collection.find_one_and_update({"email": "two@example.com"}, {"$set": {"active": False}})["active"] is True
     assert collection.find_one_and_update({"email": "missing"}, {"$set": {"active": False}}) is None
     assert collection.delete_one({"email": "one@example.com"}).deleted_count == 1
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "duckdb", "parquet"])
+def test_table_backends_support_nor_operator(tmp_path, backend):
+    pytest.importorskip("duckdb") if backend in {"duckdb", "parquet"} else None
+    client = tm.TinyMongoClient(str(tmp_path / backend), backend=backend)
+    collection = client.app.items
+    collection.insert_many([
+        {"_id": 1, "status": "draft", "score": 2},
+        {"_id": 2, "status": "published", "score": 5},
+        {"_id": 3, "status": "archived", "score": 9},
+    ])
+
+    matches = collection.find({"$nor": [{"status": "draft"}, {"score": {"$gt": 8}}]})
+
+    assert matches.count() == 1
+    assert matches[0]["_id"] == 2
