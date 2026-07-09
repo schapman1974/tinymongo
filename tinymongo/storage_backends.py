@@ -247,7 +247,7 @@ def get_storage_class(name):
 
     backend = str(name).lower()
 
-    if backend in ("tinydb", "json"):
+    if backend in ("tinydb", "json", "postgres", "postgresql", "mysql", "mariadb"):
         return AtomicJSONStorage
     if backend in ("parquet", "parquetv2"):
         from .parquet_storage import ParquetStorage
@@ -259,7 +259,7 @@ def get_storage_class(name):
         return DuckDBStorage
 
     raise ValueError(
-        "Unsupported backend '{0}'. Supported backends: tinydb, parquet, parquetv2, sqlite, duckdb.".format(
+        "Unsupported backend '{0}'. Supported backends: tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
             name
         )
     )
@@ -275,15 +275,35 @@ def storage_extension(name):
         return ".sqlite"
     if backend == "duckdb":
         return ".duckdb"
+    if backend in ("postgres", "postgresql", "mysql", "mariadb"):
+        return ""
     raise ValueError(
-        "Unsupported backend '{0}'. Supported backends: tinydb, parquet, parquetv2, sqlite, duckdb.".format(
+        "Unsupported backend '{0}'. Supported backends: tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
             name
         )
     )
 
 
 def is_table_backend(name):
-    return str(name or "tinydb").lower() in ("sqlite", "duckdb", "parquet", "parquetv2")
+    return str(name or "tinydb").lower() in (
+        "sqlite",
+        "duckdb",
+        "parquet",
+        "parquetv2",
+        "postgres",
+        "postgresql",
+        "mysql",
+        "mariadb",
+    )
+
+
+def is_remote_sql_backend(name):
+    return str(name or "tinydb").lower() in (
+        "postgres",
+        "postgresql",
+        "mysql",
+        "mariadb",
+    )
 
 
 def get_table_backend(name):
@@ -300,4 +320,12 @@ def get_table_backend(name):
         from .table_backends import ParquetDuckDBBackend
 
         return ParquetDuckDBBackend
+    if backend in ("postgres", "postgresql"):
+        from .table_backends import PostgresTableBackend
+
+        return PostgresTableBackend
+    if backend in ("mysql", "mariadb"):
+        from .table_backends import MySQLTableBackend
+
+        return MySQLTableBackend
     raise ValueError("Backend '{0}' is not table-native".format(name))

@@ -97,13 +97,21 @@ def test_storage_backend_helpers_and_sqlite_edge_paths(tmp_path, monkeypatch):
     assert sb.storage_extension("json") == ".json"
     assert sb.storage_extension("parquetv2") == ".parquet"
     assert sb.storage_extension("duckdb") == ".duckdb"
+    assert sb.storage_extension("postgres") == ""
+    assert sb.storage_extension("mariadb") == ""
     assert sb.is_object_storage_uri("s3://bucket/path") is True
     assert sb.is_object_storage_uri("/tmp/path") is False
     assert sb.join_storage_uri("s3://bucket/prefix/", "/db.parquet") == "s3://bucket/prefix/db.parquet"
     assert sb.join_storage_uri(str(tmp_path), "db.parquet") == os.path.join(str(tmp_path), "db.parquet")
     assert sb.is_table_backend("sqlite") is True
+    assert sb.is_table_backend("postgres") is True
+    assert sb.is_remote_sql_backend("postgresql") is True
+    assert sb.is_remote_sql_backend("mysql") is True
+    assert sb.get_storage_class("postgres") is sb.AtomicJSONStorage
     assert sb.is_table_backend("tinydb") is False
     assert sb.get_table_backend("sqlite") is not None
+    assert sb.get_table_backend("postgres") is not None
+    assert sb.get_table_backend("mariadb") is not None
     with pytest.raises(ValueError):
         sb.get_storage_class("missing")
     with pytest.raises(ValueError):
@@ -514,7 +522,14 @@ def test_parquet_storage_uri_client_paths_and_listing(tmp_path, monkeypatch):
     class FakeEngine:
         instances = []
 
-        def __init__(self, path, threads=None, duckdb_config=None):
+        def __init__(
+            self,
+            path,
+            threads=None,
+            duckdb_config=None,
+            database=None,
+            dsn=None,
+        ):
             self.path = path
             self.threads = threads
             self.duckdb_config = duckdb_config
@@ -543,7 +558,14 @@ def test_parquet_storage_uri_client_paths_and_listing(tmp_path, monkeypatch):
 
 def test_parquet_storage_uri_env_var(tmp_path, monkeypatch):
     class FakeEngine:
-        def __init__(self, path, threads=None, duckdb_config=None):
+        def __init__(
+            self,
+            path,
+            threads=None,
+            duckdb_config=None,
+            database=None,
+            dsn=None,
+        ):
             self.path = path
 
         def list_collections(self):
@@ -555,6 +577,14 @@ def test_parquet_storage_uri_env_var(tmp_path, monkeypatch):
     client = tm.TinyMongoClient(str(tmp_path / "db"), backend="parquet")
 
     assert client.app._path == "gs://bucket/root/app.parquet"
+
+
+def test_mysql_dsn_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv("TINYMONGO_MYSQL_DSN", "mysql://user:pass@localhost/db")
+
+    client = tm.TinyMongoClient(str(tmp_path / "db"), backend="mariadb")
+
+    assert client._dsn == "mysql://user:pass@localhost/db"
 
 
 def test_cursor_sort_order_branches():

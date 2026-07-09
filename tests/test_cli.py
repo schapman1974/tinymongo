@@ -161,15 +161,19 @@ def test_cli_storage_uri_options_are_passed_through(monkeypatch, tmp_path, capsy
             return ["users"]
 
     class FakeClient:
-        def __init__(self, path, backend, storage_uri=None):
-            calls.append((path, backend, storage_uri))
+        def __init__(self, path, backend, storage_uri=None, dsn=None):
+            calls.append((path, backend, storage_uri, dsn))
             self.app = FakeDatabase()
 
         def __getitem__(self, name):
             return self.app
 
     monkeypatch.setattr(cli, "TinyMongoClient", FakeClient)
-    monkeypatch.setattr(cli, "_db_names", lambda path, backend, storage_uri=None: ["app"])
+    monkeypatch.setattr(
+        cli,
+        "_db_names",
+        lambda path, backend, storage_uri=None, dsn=None: ["app"],
+    )
 
     assert cli.main([
         "export",
@@ -197,9 +201,32 @@ def test_cli_storage_uri_options_are_passed_through(monkeypatch, tmp_path, capsy
         "s3://target/root",
     ]) == 0
 
-    assert calls[0] == (str(tmp_path), "parquet", "s3://bucket/root")
-    assert calls[1] == (str(tmp_path / "source"), "parquet", "s3://source/root")
-    assert calls[2] == (str(tmp_path / "target"), "parquet", "s3://target/root")
+    assert calls[0] == (str(tmp_path), "parquet", "s3://bucket/root", None)
+    assert calls[1] == (
+        str(tmp_path / "source"),
+        "parquet",
+        "s3://source/root",
+        None,
+    )
+    assert calls[2] == (
+        str(tmp_path / "target"),
+        "parquet",
+        "s3://target/root",
+        None,
+    )
+
+    assert cli.main([
+        "export",
+        str(tmp_path),
+        "app",
+        "users",
+        "--backend",
+        "postgres",
+        "--dsn",
+        "postgresql://db",
+    ]) == 0
+    capsys.readouterr()
+    assert calls[3] == (str(tmp_path), "postgres", None, "postgresql://db")
 
 
 def test_cli_storage_uri_inspect_and_db_names(monkeypatch, tmp_path, capsys):
@@ -215,8 +242,9 @@ def test_cli_storage_uri_inspect_and_db_names(monkeypatch, tmp_path, capsys):
             return ["users"]
 
     class FakeClient:
-        def __init__(self, path, backend, storage_uri=None):
+        def __init__(self, path, backend, storage_uri=None, dsn=None):
             self.storage_uri = storage_uri
+            self.dsn = dsn
 
         def list_database_names(self):
             return ["app"]

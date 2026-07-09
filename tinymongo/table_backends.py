@@ -2,7 +2,7 @@ import json
 import os
 import re
 import sqlite3
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .errors import DuplicateKeyError
 
@@ -302,10 +302,19 @@ class TableBackend(object):
     dialect = None
     extension = None
 
-    def __init__(self, path, threads=None, duckdb_config=None):
+    def __init__(
+        self,
+        path,
+        threads=None,
+        duckdb_config=None,
+        database=None,
+        dsn=None,
+    ):
         self.path = path
         self.threads = threads
         self.duckdb_config = duckdb_config or {}
+        self.database = database
+        self.dsn = dsn
         self.compiler = SQLCompiler(self.dialect)
         if not _is_object_store_uri(path):
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -550,14 +559,25 @@ class DuckDBTableBackend(TableBackend):
     dialect = "duckdb"
     extension = ".duckdb"
 
-    def __init__(self, path, threads=None, duckdb_config=None):
+    def __init__(
+        self,
+        path,
+        threads=None,
+        duckdb_config=None,
+        database=None,
+        dsn=None,
+    ):
         try:
             import duckdb
         except Exception as exc:  # pragma: no cover - optional dependency fallback
             raise ImportError("duckdb backend requires the duckdb package") from exc
         self.duckdb = duckdb
         super(DuckDBTableBackend, self).__init__(
-            path, threads=threads, duckdb_config=duckdb_config
+            path,
+            threads=threads,
+            duckdb_config=duckdb_config,
+            database=database,
+            dsn=dsn,
         )
 
     def _connect(self):
@@ -728,7 +748,14 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
     dialect = "duckdb"
     extension = ".parquet"
 
-    def __init__(self, path, threads=None, duckdb_config=None):
+    def __init__(
+        self,
+        path,
+        threads=None,
+        duckdb_config=None,
+        database=None,
+        dsn=None,
+    ):
         self.directory = path
         if not _is_object_store_uri(self.directory):
             os.makedirs(self.directory, exist_ok=True)
@@ -737,6 +764,8 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             ":memory:",
             threads=threads,
             duckdb_config=duckdb_config or _duckdb_object_store_settings(),
+            database=database,
+            dsn=dsn,
         )
 
     def _collection_path(self, collection):
@@ -873,3 +902,381 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
         id_set = {str(doc_id) for doc_id in ids}
         rows = [row for row in self._read_all_rows(collection) if row[0] not in id_set]
         self._write_rows(collection, rows)
+
+
+class RemoteSQLTableBackend(TableBackend):
+    """Shared table backend for remote transactional SQL databases."""
+
+    placeholder = "%s"
+    json_type = "TEXT"
+    metadata_table = "__tinymongo_collections"
+
+    def __init__(
+        self,
+        path,
+        threads=None,
+        duckdb_config=None,
+        database=None,
+        dsn=None,
+    ):
+        if not dsn:
+            raise ValueError("{0} backend requires a DSN".format(self.dialect))
+        super(RemoteSQLTableBackend, self).__init__(
+            path,
+            threads=threads,
+            duckdb_config=duckdb_config,
+            database=database,
+            dsn=dsn,
+        )
+
+    def _connect(self):  # pragma: no cover - implemented by concrete drivers
+        raise NotImplementedError
+
+    def _quote(self, name):
+        return _quote_identifier(name)
+
+    def _table_name(self, collection):
+        return "{0}__{1}".format(self.database or "default", collection)
+
+    def _execute(self, conn, sql, params=None):
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql, params or ())
+            return cursor
+        except Exception:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+            raise
+
+    def _executemany(self, conn, sql, params):
+        cursor = conn.cursor()
+        try:
+            cursor.executemany(sql, params)
+            return cursor
+        except Exception:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+            raise
+
+    def _commit(self, conn):
+        try:
+            conn.commit()
+        except Exception:
+            pass
+
+    def _close_cursor(self, cursor):
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+    def _ensure_metadata(self, conn):
+        self._execute(
+            conn,
+            "CREATE TABLE IF NOT EXISTS {0} "
+            "(database_name VARCHAR(255) NOT NULL, "
+            "collection_name VARCHAR(255) NOT NULL, "
+            "PRIMARY KEY (database_name, collection_name))".format(
+                self._quote(self.metadata_table)
+            ),
+        )
+        self._commit(conn)
+
+    def _record_collection(self, conn, collection):
+        self._ensure_metadata(conn)
+        self._insert_metadata(conn, collection)
+        self._commit(conn)
+
+    def _insert_metadata(self, conn, collection):
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
+
+    def list_databases(self):
+        conn = self._connect()
+        try:
+            self._ensure_metadata(conn)
+            cursor = self._execute(
+                conn,
+                "SELECT DISTINCT database_name FROM {0} ORDER BY database_name".format(
+                    self._quote(self.metadata_table)
+                ),
+            )
+            try:
+                return [row[0] for row in cursor.fetchall()]
+            finally:
+                self._close_cursor(cursor)
+        finally:
+            conn.close()
+
+    def list_collections(self):
+        conn = self._connect()
+        try:
+            self._ensure_metadata(conn)
+            cursor = self._execute(
+                conn,
+                "SELECT collection_name FROM {0} WHERE database_name = {1} "
+                "ORDER BY collection_name".format(
+                    self._quote(self.metadata_table), self.placeholder
+                ),
+                (self.database,),
+            )
+            try:
+                return [row[0] for row in cursor.fetchall()]
+            finally:
+                self._close_cursor(cursor)
+        finally:
+            conn.close()
+
+    def create_collection(self, collection):
+        conn = self._connect()
+        try:
+            self._execute(
+                conn,
+                "CREATE TABLE IF NOT EXISTS {0} "
+                "(_id VARCHAR(255) PRIMARY KEY, data {1} NOT NULL)".format(
+                    self._quote(self._table_name(collection)), self.json_type
+                ),
+            )
+            self._record_collection(conn, collection)
+            self._commit(conn)
+        finally:
+            conn.close()
+
+    def drop_collection(self, collection):
+        existed = collection in self.list_collections()
+        conn = self._connect()
+        try:
+            self._execute(
+                conn,
+                "DROP TABLE IF EXISTS {0}".format(
+                    self._quote(self._table_name(collection))
+                ),
+            )
+            self._execute(
+                conn,
+                "DELETE FROM {0} WHERE database_name = {1} AND collection_name = {1}".format(
+                    self._quote(self.metadata_table), self.placeholder
+                ),
+                (self.database, collection),
+            )
+            self._commit(conn)
+            return existed
+        finally:
+            conn.close()
+
+    def insert_many(self, collection, docs, bypass_document_validation=False):
+        self.create_collection(collection)
+        rows = [(str(doc["_id"]), _json_dumps(doc)) for doc in docs]
+        conn = self._connect()
+        try:
+            self._insert_rows(conn, collection, rows, bypass_document_validation)
+            self._commit(conn)
+            return list(range(len(rows)))
+        except Exception as exc:
+            raise DuplicateKeyError(str(exc))
+        finally:
+            conn.close()
+
+    def _insert_rows(self, conn, collection, rows, bypass_document_validation):
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
+
+    def _data_placeholder(self):
+        return self.placeholder
+
+    def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):
+        self.create_collection(collection)
+        if not filter_doc:
+            return self._all_docs_unfiltered(collection)
+        if isinstance(filter_doc, dict) and set(filter_doc.keys()) == {"_id"}:
+            doc = self._find_by_id(collection, filter_doc["_id"])
+            return [doc] if doc else []
+        return [
+            doc for doc in self._all_docs_unfiltered(collection)
+            if matches_filter(doc, filter_doc)
+        ]
+
+    def _find_by_id(self, collection, doc_id):
+        conn = self._connect()
+        try:
+            cursor = self._execute(
+                conn,
+                "SELECT data FROM {0} WHERE _id = {1}".format(
+                    self._quote(self._table_name(collection)), self.placeholder
+                ),
+                (str(doc_id),),
+            )
+            try:
+                row = cursor.fetchone()
+                return _json_loads(row[0]) if row else None
+            finally:
+                self._close_cursor(cursor)
+        finally:
+            conn.close()
+
+    def _all_docs_unfiltered(self, collection):
+        conn = self._connect()
+        try:
+            cursor = self._execute(
+                conn,
+                "SELECT data FROM {0}".format(
+                    self._quote(self._table_name(collection))
+                ),
+            )
+            try:
+                return [_json_loads(row[0]) for row in cursor.fetchall()]
+            finally:
+                self._close_cursor(cursor)
+        finally:
+            conn.close()
+
+    def replace_one(self, collection, doc_id, replacement):
+        self.create_collection(collection)
+        conn = self._connect()
+        try:
+            self._execute(
+                conn,
+                "UPDATE {0} SET data = {1} WHERE _id = {2}".format(
+                    self._quote(self._table_name(collection)),
+                    self._data_placeholder(),
+                    self.placeholder,
+                ),
+                (_json_dumps(replacement), str(doc_id)),
+            )
+            self._commit(conn)
+        finally:
+            conn.close()
+
+    def delete_ids(self, collection, ids):
+        if not ids:
+            return
+        self.create_collection(collection)
+        conn = self._connect()
+        try:
+            self._executemany(
+                conn,
+                "DELETE FROM {0} WHERE _id = {1}".format(
+                    self._quote(self._table_name(collection)), self.placeholder
+                ),
+                [(str(doc_id),) for doc_id in ids],
+            )
+            self._commit(conn)
+        finally:
+            conn.close()
+
+    def create_index(self, collection, field):
+        self.create_collection(collection)
+        return field
+
+
+class PostgresTableBackend(RemoteSQLTableBackend):
+    dialect = "postgres"
+    json_type = "JSONB"
+
+    def __init__(self, path, threads=None, duckdb_config=None, database=None, dsn=None):
+        try:
+            import psycopg
+        except Exception as exc:  # pragma: no cover - optional dependency fallback
+            raise ImportError("postgres backend requires psycopg") from exc
+        self.psycopg = psycopg
+        super(PostgresTableBackend, self).__init__(
+            path,
+            threads=threads,
+            duckdb_config=duckdb_config,
+            database=database,
+            dsn=dsn,
+        )
+
+    def _connect(self):
+        return self.psycopg.connect(self.dsn)
+
+    def _data_placeholder(self):
+        return self.placeholder + "::jsonb"
+
+    def _insert_metadata(self, conn, collection):
+        self._execute(
+            conn,
+            "INSERT INTO {0} (database_name, collection_name) VALUES ({1}, {1}) "
+            "ON CONFLICT (database_name, collection_name) DO NOTHING".format(
+                self._quote(self.metadata_table), self.placeholder
+            ),
+            (self.database, collection),
+        )
+
+    def _insert_rows(self, conn, collection, rows, bypass_document_validation):
+        if bypass_document_validation:
+            sql = (
+                "INSERT INTO {0} (_id, data) VALUES ({1}, {2}) "
+                "ON CONFLICT (_id) DO UPDATE SET data = EXCLUDED.data"
+            ).format(
+                self._quote(self._table_name(collection)),
+                self.placeholder,
+                self._data_placeholder(),
+            )
+        else:
+            sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {2})".format(
+                self._quote(self._table_name(collection)),
+                self.placeholder,
+                self._data_placeholder(),
+            )
+        self._executemany(conn, sql, rows)
+
+
+class MySQLTableBackend(RemoteSQLTableBackend):
+    dialect = "mysql"
+    json_type = "JSON"
+
+    def __init__(self, path, threads=None, duckdb_config=None, database=None, dsn=None):
+        try:
+            import pymysql
+        except Exception as exc:  # pragma: no cover - optional dependency fallback
+            raise ImportError("mariadb/mysql backend requires PyMySQL") from exc
+        self.pymysql = pymysql
+        super(MySQLTableBackend, self).__init__(
+            path,
+            threads=threads,
+            duckdb_config=duckdb_config,
+            database=database,
+            dsn=dsn,
+        )
+
+    def _quote(self, name):
+        return "`" + str(name).replace("`", "``") + "`"
+
+    def _connect(self):
+        parsed = urlparse(self.dsn)
+        if parsed.scheme:
+            query = parse_qs(parsed.query)
+            kwargs = {
+                "host": parsed.hostname or "localhost",
+                "port": parsed.port or 3306,
+                "user": unquote(parsed.username or ""),
+                "password": unquote(parsed.password or ""),
+                "database": parsed.path.lstrip("/") or None,
+                "charset": query.get("charset", ["utf8mb4"])[0],
+            }
+            return self.pymysql.connect(**kwargs)
+        return self.pymysql.connect(host=self.dsn)
+
+    def _insert_metadata(self, conn, collection):
+        self._execute(
+            conn,
+            "INSERT IGNORE INTO {0} (database_name, collection_name) "
+            "VALUES ({1}, {1})".format(
+                self._quote(self.metadata_table), self.placeholder
+            ),
+            (self.database, collection),
+        )
+
+    def _insert_rows(self, conn, collection, rows, bypass_document_validation):
+        if bypass_document_validation:
+            sql = "REPLACE INTO {0} (_id, data) VALUES ({1}, {1})".format(
+                self._quote(self._table_name(collection)), self.placeholder
+            )
+        else:
+            sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {1})".format(
+                self._quote(self._table_name(collection)), self.placeholder
+            )
+        self._executemany(conn, sql, rows)

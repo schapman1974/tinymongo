@@ -8,6 +8,10 @@
 - Environment-variable mapping for DuckDB object-storage credentials.
 - CLI `--storage-uri`, `--source-uri`, and `--target-uri` options.
 - Object-storage setup documentation.
+- Remote PostgreSQL and MariaDB/MySQL table backends with DSN/env-var
+  configuration.
+- CLI `--dsn`, `--source-dsn`, and `--target-dsn` options.
+- Remote SQL setup documentation and opt-in integration tests.
 
 ## [1.1.1] - 2026-07-09
 

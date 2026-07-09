@@ -58,3 +58,7 @@ include-package-data = true
 
 [project.optional-dependencies]
 uv = ["uvicorn>=0.23.0"]
+postgres = ["psycopg[binary]>=3.1"]
+mysql = ["PyMySQL>=1.1"]
+mariadb = ["PyMySQL>=1.1"]
+remote-sql = ["psycopg[binary]>=3.1", "PyMySQL>=1.1"]

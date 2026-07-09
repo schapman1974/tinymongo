@@ -84,6 +84,10 @@ You can select another backend with the `backend` argument:
     parquet_connection = TinyMongoClient("/path/to/folder", backend="parquet")
     sqlite_connection = TinyMongoClient("/path/to/folder", backend="sqlite")
     duckdb_connection = TinyMongoClient("/path/to/folder", backend="duckdb")
+    postgres_connection = TinyMongoClient(
+        backend="postgres",
+        dsn="postgresql://user:password@localhost:5432/tinymongo",
+    )
 ```
 
 Parquet can also store collection files in object storage by passing
@@ -103,6 +107,8 @@ Available backends:
 - `sqlite`: Table-native SQLite storage using one SQL table per collection. This writes `.sqlite` files.
 - `duckdb`: Table-native DuckDB storage using one DuckDB table per collection. This writes `.duckdb` files.
 - `parquet` or `parquetv2`: DuckDB-managed Parquet dataset storage using one Parquet file per collection inside a `.parquet` directory.
+- `postgres` or `postgresql`: Remote PostgreSQL storage using one SQL table per database collection.
+- `mysql` or `mariadb`: Remote MariaDB/MySQL storage using one SQL table per database collection.
 
 | Backend | Dependency | Best fit | Notes |
 | --- | --- | --- | --- |
@@ -110,6 +116,8 @@ Available backends:
 | `sqlite` | Python standard library | Embedded transactional storage | Uses `_id` primary keys and JSON document payloads in collection tables. |
 | `duckdb` | `duckdb` | SQL-backed local analytics workflows | Uses real DuckDB collection tables and SQL JSON predicates where supported. |
 | `parquet` / `parquetv2` | `duckdb`, `pyarrow` | Columnar local or object-storage workflows | Stores collection Parquet files that DuckDB reads and writes. |
+| `postgres` / `postgresql` | `tinymongo[postgres]` | Remote transactional storage | Stores documents in PostgreSQL tables with JSONB payloads. |
+| `mysql` / `mariadb` | `tinymongo[mysql]` or `tinymongo[mariadb]` | Remote transactional storage | Stores documents in MariaDB/MySQL tables with JSON payloads. |
 
 SQLite, DuckDB, and Parquet compile supported Mongo-style filters into SQL over
 the `_id` column and JSON document payload. Unsupported filter shapes fall back
@@ -124,6 +132,8 @@ Object-storage setup examples for S3, S3-compatible providers, Backblaze B2,
 Cloudflare R2, Google Cloud Storage, Azure Blob Storage, MinIO, Wasabi, and
 DigitalOcean Spaces are documented in
 [docs/OBJECT_STORAGE.md](docs/OBJECT_STORAGE.md).
+PostgreSQL and MariaDB/MySQL setup is documented in
+[docs/REMOTE_SQL.md](docs/REMOTE_SQL.md).
 
 
 # Command line tools
@@ -147,6 +157,7 @@ tinymongo inspect ./sqlite-db --backend sqlite
 tinymongo export ./parquet-db app users --backend parquet -o users.json
 tinymongo inspect ./local-cache --backend parquet --storage-uri s3://my-bucket/tinymongo
 tinymongo migrate ./tinydb ./local-cache --to-backend parquet --target-uri s3://my-bucket/tinymongo
+tinymongo migrate ./tinydb ./unused --to-backend postgres --target-dsn "$TINYMONGO_POSTGRES_DSN"
 ```
 
 

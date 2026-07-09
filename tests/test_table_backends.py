@@ -1,10 +1,15 @@
 import pytest
+import sys
+from types import SimpleNamespace
 
 import tinymongo as tm
 from tinymongo.errors import DuplicateKeyError
 from tinymongo.table_backends import (
     DuckDBTableBackend,
+    MySQLTableBackend,
     ParquetDuckDBBackend,
+    PostgresTableBackend,
+    RemoteSQLTableBackend,
     SQLCompiler,
     SQLiteTableBackend,
     TableBackend,
@@ -15,6 +20,104 @@ from tinymongo.table_backends import (
     _join_uri,
     matches_filter,
 )
+
+
+class FakeRemoteStore:
+    def __init__(self):
+        self.tables = {}
+        self.metadata = set()
+
+
+class FakeRemoteCursor:
+    def __init__(self, store):
+        self.store = store
+        self.rows = []
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(sql.split())
+        upper = normalized.upper()
+        if upper.startswith("CREATE TABLE"):
+            table = self._table_from_create(normalized)
+            if "TINYMONGO_COLLECTIONS" not in table:
+                self.store.tables.setdefault(table, {})
+        elif upper.startswith("INSERT") and "TINYMONGO_COLLECTIONS" in upper:
+            self.store.metadata.add(tuple(params))
+        elif upper.startswith("SELECT DISTINCT"):
+            self.rows = sorted({(database,) for database, _ in self.store.metadata})
+        elif upper.startswith("SELECT COLLECTION_NAME"):
+            database = params[0]
+            self.rows = sorted(
+                (collection,)
+                for metadata_database, collection in self.store.metadata
+                if metadata_database == database
+            )
+        elif upper.startswith("DROP TABLE"):
+            self.store.tables.pop(self._table_after(normalized, "TABLE IF EXISTS"), None)
+        elif upper.startswith("DELETE FROM") and "TINYMONGO_COLLECTIONS" in upper:
+            self.store.metadata.discard(tuple(params))
+        elif upper.startswith("DELETE FROM"):
+            self.store.tables.setdefault(self._table_after(normalized, "FROM"), {}).pop(
+                params[0], None
+            )
+        elif upper.startswith("SELECT DATA") and "WHERE _ID" in upper:
+            table = self._table_after(normalized, "FROM")
+            data = self.store.tables.get(table, {}).get(params[0])
+            self.rows = [(data,)] if data is not None else []
+        elif upper.startswith("SELECT DATA"):
+            table = self._table_after(normalized, "FROM")
+            self.rows = [(data,) for data in self.store.tables.get(table, {}).values()]
+        elif upper.startswith("UPDATE"):
+            table = self._table_after(normalized, "UPDATE")
+            self.store.tables.setdefault(table, {})[params[1]] = params[0]
+        return self
+
+    def executemany(self, sql, rows):
+        if sql.upper().startswith("DELETE FROM"):
+            table = self._table_after(" ".join(sql.split()), "FROM")
+            target = self.store.tables.setdefault(table, {})
+            for (doc_id,) in rows:
+                target.pop(doc_id, None)
+            return
+
+        table = self._table_after(" ".join(sql.split()), "INTO")
+        target = self.store.tables.setdefault(table, {})
+        for doc_id, data in rows:
+            if doc_id in target and "CONFLICT" not in sql.upper() and "REPLACE" not in sql.upper():
+                raise RuntimeError("duplicate key")
+            target[doc_id] = data
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+    def close(self):
+        pass
+
+    def _table_from_create(self, sql):
+        return self._clean(sql.split("IF NOT EXISTS", 1)[1].strip().split()[0])
+
+    def _table_after(self, sql, marker):
+        return self._clean(sql.split(marker, 1)[1].strip().split()[0])
+
+    def _clean(self, value):
+        return value.strip().strip('"').strip("`")
+
+
+class FakeRemoteConnection:
+    def __init__(self, store):
+        self.store = store
+        self.commits = 0
+
+    def cursor(self):
+        return FakeRemoteCursor(self.store)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
 
 
 def test_matches_filter_operator_edges():
@@ -348,6 +451,123 @@ def test_tinymongo_table_backend_api_branches(tmp_path):
     assert collection.find_one_and_update({"email": "two@example.com"}, {"$set": {"active": False}})["active"] is True
     assert collection.find_one_and_update({"email": "missing"}, {"$set": {"active": False}}) is None
     assert collection.delete_one({"email": "one@example.com"}).deleted_count == 1
+
+
+def test_remote_sql_backend_requires_dsn():
+    with pytest.raises(ValueError):
+        RemoteSQLTableBackend("", database="app")
+
+
+def test_remote_sql_backend_defensive_edges(monkeypatch):
+    backend = RemoteSQLTableBackend("", database="app", dsn="remote")
+
+    class BadCursor:
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("execute")
+
+        def executemany(self, *args, **kwargs):
+            raise RuntimeError("executemany")
+
+        def close(self):
+            raise RuntimeError("close")
+
+    class BadConn:
+        def cursor(self):
+            return BadCursor()
+
+        def commit(self):
+            raise RuntimeError("commit")
+
+    with pytest.raises(RuntimeError, match="execute"):
+        backend._execute(BadConn(), "SELECT 1")
+    with pytest.raises(RuntimeError, match="executemany"):
+        backend._executemany(BadConn(), "SELECT 1", [])
+    assert backend._commit(BadConn()) is None
+    assert backend._close_cursor(BadCursor()) is None
+    assert backend._data_placeholder() == "%s"
+
+    monkeypatch.setattr(backend, "create_collection", lambda collection: None)
+    assert backend.delete_ids("users", []) is None
+    assert backend.create_index("users", "email") == "email"
+
+
+def test_postgres_table_backend_with_fake_driver(monkeypatch):
+    store = FakeRemoteStore()
+    fake_psycopg = SimpleNamespace(connect=lambda dsn: FakeRemoteConnection(store))
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+
+    backend = PostgresTableBackend("", database="app", dsn="postgresql://db")
+
+    backend.insert_many("users", [{"_id": 1, "name": "Ada", "age": 36}])
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
+    backend.insert_many(
+        "users",
+        [{"_id": 1, "name": "Grace", "age": 40}],
+        bypass_document_validation=True,
+    )
+
+    assert backend.list_databases() == ["app"]
+    assert backend.list_collections() == ["users"]
+    assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
+    assert backend.find("users", {"age": {"$gte": 40}})[0]["name"] == "Grace"
+
+    backend.update_many("users", {"_id": 1}, {"$inc": {"age": 1}})
+    assert backend.find_one("users", {"_id": 1})["age"] == 41
+
+    assert backend.delete_many("users", {"name": "Grace"}) == [1]
+    assert backend.find("users", {}) == []
+    assert backend.drop_collection("users") is True
+    assert backend.drop_collection("users") is False
+    assert backend._data_placeholder() == "%s::jsonb"
+
+
+def test_mysql_table_backend_with_fake_driver(monkeypatch):
+    store = FakeRemoteStore()
+    seen_kwargs = []
+
+    def connect(**kwargs):
+        seen_kwargs.append(kwargs)
+        return FakeRemoteConnection(store)
+
+    monkeypatch.setitem(sys.modules, "pymysql", SimpleNamespace(connect=connect))
+
+    backend = MySQLTableBackend(
+        "",
+        database="app",
+        dsn="mysql://user:pass@localhost:3307/tinymongo?charset=utf8mb4",
+    )
+    backend.insert_many("users", [{"_id": "a", "name": "Ada"}])
+    backend.insert_many(
+        "users",
+        [{"_id": "a", "name": "Grace"}],
+        bypass_document_validation=True,
+    )
+
+    assert seen_kwargs[0]["host"] == "localhost"
+    assert seen_kwargs[0]["port"] == 3307
+    assert seen_kwargs[0]["database"] == "tinymongo"
+    assert backend.find_one("users", {"_id": "a"})["name"] == "Grace"
+    assert backend._quote("a`b") == "`a``b`"
+
+    host_backend = MySQLTableBackend("", database="app", dsn="localhost")
+    host_backend._connect().close()
+    assert seen_kwargs[-1] == {"host": "localhost"}
+
+
+def test_remote_sql_client_paths_and_env_dsn(monkeypatch, tmp_path):
+    store = FakeRemoteStore()
+    fake_psycopg = SimpleNamespace(connect=lambda dsn: FakeRemoteConnection(store))
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    monkeypatch.setenv("TINYMONGO_POSTGRES_DSN", "postgresql://db")
+
+    client = tm.TinyMongoClient(str(tmp_path / "unused"), backend="postgres")
+    client.app.users.insert_one({"_id": "one", "name": "Ada"})
+
+    assert client.app._path == "app"
+    assert client.server_info()["dsnConfigured"] is True
+    assert client.list_database_names() == ["app"]
+    assert client.app.collection_names() == ["users"]
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "duckdb", "parquet"])

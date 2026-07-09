@@ -11,16 +11,29 @@ from .storage_backends import storage_extension
 from .tinymongo import TinyMongoClient
 
 
-SUPPORTED_BACKENDS = ("tinydb", "json", "parquet", "parquetv2", "sqlite", "duckdb")
+SUPPORTED_BACKENDS = (
+    "tinydb",
+    "json",
+    "parquet",
+    "parquetv2",
+    "sqlite",
+    "duckdb",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mariadb",
+)
 
 
-def _client(path, backend, storage_uri=None):
-    return TinyMongoClient(path, backend=backend, storage_uri=storage_uri)
+def _client(path, backend, storage_uri=None, dsn=None):
+    return TinyMongoClient(path, backend=backend, storage_uri=storage_uri, dsn=dsn)
 
 
-def _db_names(path, backend, storage_uri=None):
-    if storage_uri:
-        return _client(path, backend, storage_uri=storage_uri).list_database_names()
+def _db_names(path, backend, storage_uri=None, dsn=None):
+    if storage_uri or dsn:
+        return _client(
+            path, backend, storage_uri=storage_uri, dsn=dsn
+        ).list_database_names()
     ext = storage_extension(backend)
     if not os.path.isdir(path):
         return []
@@ -50,11 +63,13 @@ def _dump_json(data, path):
 
 
 def cmd_inspect(args):
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
     payload = {"path": args.path, "backend": args.backend, "databases": []}
     if args.storage_uri:
         payload["storage_uri"] = args.storage_uri
-    for db_name in _db_names(args.path, args.backend, storage_uri=args.storage_uri):
+    for db_name in _db_names(
+        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+    ):
         db = client[db_name]
         collections = []
         for collection_name in sorted(db.collection_names()):
@@ -66,20 +81,22 @@ def cmd_inspect(args):
 
 
 def cmd_list_dbs(args):
-    for name in _db_names(args.path, args.backend, storage_uri=args.storage_uri):
+    for name in _db_names(
+        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+    ):
         print(name)
     return 0
 
 
 def cmd_list_collections(args):
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
     for name in sorted(client[args.database].collection_names()):
         print(name)
     return 0
 
 
 def cmd_export(args):
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
     docs = list(client[args.database][args.collection].find({}))
     _dump_json(docs, args.output)
     return 0
@@ -93,7 +110,7 @@ def cmd_import(args):
         if not isinstance(doc, dict):
             raise SystemExit("import input must contain only JSON objects")
 
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri)
+    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
     collection = client[args.database][args.collection]
     if args.mode == "replace":
         collection.delete_many({})
@@ -104,11 +121,18 @@ def cmd_import(args):
 
 
 def cmd_migrate(args):
-    source_client = _client(args.source, args.from_backend, storage_uri=args.source_uri)
-    target_client = _client(args.target, args.to_backend, storage_uri=args.target_uri)
+    source_client = _client(
+        args.source, args.from_backend, storage_uri=args.source_uri, dsn=args.source_dsn
+    )
+    target_client = _client(
+        args.target, args.to_backend, storage_uri=args.target_uri, dsn=args.target_dsn
+    )
 
     database_names = [args.database] if args.database else _db_names(
-        args.source, args.from_backend, storage_uri=args.source_uri
+        args.source,
+        args.from_backend,
+        storage_uri=args.source_uri,
+        dsn=args.source_dsn,
     )
     migrated = []
     for db_name in database_names:
@@ -132,6 +156,8 @@ def cmd_migrate(args):
             "to_backend": args.to_backend,
             "source_uri": args.source_uri,
             "target_uri": args.target_uri,
+            "source_dsn_configured": bool(args.source_dsn),
+            "target_dsn_configured": bool(args.target_dsn),
             "migrated": migrated,
         },
         args.output,
@@ -147,6 +173,10 @@ def build_parser():
     backend_parser.add_argument(
         "--storage-uri",
         help="object storage URI for parquet/parquetv2, for example s3://bucket/prefix",
+    )
+    backend_parser.add_argument(
+        "--dsn",
+        help="remote SQL DSN for postgres, postgresql, mysql, or mariadb backends",
     )
 
     inspect = subparsers.add_parser(
@@ -199,6 +229,8 @@ def build_parser():
     migrate.add_argument("--to-backend", required=True, choices=SUPPORTED_BACKENDS)
     migrate.add_argument("--source-uri")
     migrate.add_argument("--target-uri")
+    migrate.add_argument("--source-dsn")
+    migrate.add_argument("--target-dsn")
     migrate.add_argument("--database")
     migrate.add_argument("-o", "--output", default="-")
     migrate.set_defaults(func=cmd_migrate)
