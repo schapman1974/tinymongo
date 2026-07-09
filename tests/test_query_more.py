@@ -106,3 +106,154 @@ def test_count_documents_uses_filter():
     ])
 
     assert c.count_documents({"even": True}) == 2
+
+
+def test_exists_query_operator():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_many([
+        {"_id": 1, "name": "alpha", "meta": {"active": True}},
+        {"_id": 2, "name": "beta"},
+    ])
+
+    assert c.find({"meta": {"$exists": True}}).count() == 1
+    assert c.find({"meta": {"$exists": False}}).count() == 1
+
+
+def test_update_operator_support():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_one({"_id": 1, "count": 1, "tags": ["a"], "meta": {"old": True}})
+
+    c.update_one(
+        {"_id": 1},
+        {
+            "$inc": {"count": 2},
+            "$set": {"meta.active": True},
+            "$unset": {"meta.old": ""},
+            "$push": {"tags": "b"},
+            "$addToSet": {"tags": "b"},
+        },
+    )
+    c.update_one({"_id": 1}, {"$pull": {"tags": "a"}})
+
+    doc = c.find_one({"_id": 1})
+    assert doc["count"] == 3
+    assert doc["meta"] == {"active": True}
+    assert doc["tags"] == ["b"]
+
+
+def test_update_many_applies_operators_to_each_match():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_many([
+        {"_id": 1, "group": "a", "count": 1, "tags": []},
+        {"_id": 2, "group": "a", "count": 2, "tags": []},
+        {"_id": 3, "group": "b", "count": 3, "tags": []},
+    ])
+
+    result = c.update_many(
+        {"group": "a"},
+        {"$inc": {"count": 10}, "$push": {"tags": "updated"}},
+    )
+
+    assert result.modified_count == 2
+    assert c.find_one({"_id": 1})["count"] == 11
+    assert c.find_one({"_id": 2})["count"] == 12
+    assert c.find_one({"_id": 3})["count"] == 3
+    assert c.find({"tags": {"$all": ["updated"]}}).count() == 2
+
+
+def test_nested_update_creates_missing_subdocuments():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_one({"_id": 1})
+
+    c.update_one({"_id": 1}, {"$set": {"profile.name": "Ada"}, "$inc": {"stats.views": 1}})
+
+    assert c.find_one({"_id": 1}) == {
+        "_id": 1,
+        "profile": {"name": "Ada"},
+        "stats": {"views": 1},
+    }
+
+
+def test_update_rejects_list_operator_target():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_one({"_id": 1, "tags": "not-a-list"})
+
+    result = c.update_one({"_id": 1}, {"$push": {"tags": "new"}})
+
+    assert result.modified_count == 0
+    assert c.find_one({"_id": 1})["tags"] == "not-a-list"
+
+
+def test_replacement_update_many_does_not_reuse_document_between_matches():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_many([
+        {"_id": 1, "group": "a", "old": True},
+        {"_id": 2, "group": "a", "old": True},
+    ])
+
+    c.update_many({"group": "a"}, {"group": "a", "new": True})
+
+    assert c.find_one({"_id": 1}) == {"_id": 1, "group": "a", "new": True}
+    assert c.find_one({"_id": 2}) == {"_id": 2, "group": "a", "new": True}
+
+
+def test_collection_indexes_accelerate_equality_queries():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_many([
+        {"_id": 1, "email": "a@example.com"},
+        {"_id": 2, "email": "b@example.com"},
+    ])
+
+    assert c.create_index("email") == "email"
+    assert {"name": "email_1", "key": [("email", 1)]} in c.list_indexes()
+    assert c.find({"email": "b@example.com"})[0]["_id"] == 2
+
+    c.update_one({"_id": 2}, {"$set": {"email": "c@example.com"}})
+    assert c.find({"email": "c@example.com"})[0]["_id"] == 2
+
+    c.drop_index("email")
+    assert c.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
+
+
+def test_index_cache_is_invalidated_after_insert_and_delete():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_one({"_id": 1, "email": "a@example.com"})
+    c.create_index("email")
+    assert c.find({"email": "a@example.com"}).count() == 1
+
+    c.insert_one({"_id": 2, "email": "b@example.com"})
+    assert c.find({"email": "b@example.com"}).count() == 1
+
+    c.delete_one({"_id": 2})
+    assert c.find({"email": "b@example.com"}).count() == 0
+
+
+def test_index_matches_array_membership_semantics():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_many([
+        {"_id": 1, "tags": ["a", "b"]},
+        {"_id": 2, "tags": "a"},
+    ])
+
+    c.create_index("tags")
+    assert c.find({"tags": "a"}).count() == 2
+    c.drop_index("tags")
+    assert c.find({"tags": "a"}).count() == 2

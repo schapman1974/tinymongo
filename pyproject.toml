@@ -29,6 +29,9 @@ classifiers = [
 Homepage = "https://github.com/schapman1974/tinymongo"
 Source = "https://github.com/schapman1974/tinymongo"
 
+[project.scripts]
+tinymongo = "tinymongo.cli:main"
+
 [tool.black]
 line-length = 88
 
@@ -40,7 +43,10 @@ python_version = 3.8
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-q"
+addopts = "-q -m 'not integration'"
+markers = [
+  "integration: opt-in integration and stress tests that may be slower or resource intensive",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -51,4 +57,3 @@ include-package-data = true
 
 [project.optional-dependencies]
 uv = ["uvicorn>=0.23.0"]
-
