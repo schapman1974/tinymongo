@@ -15,7 +15,8 @@ dependencies = [
   "tinydb-serialization==1.0.4",
   "pymongo>=3.4.0",
   "pyarrow>=10.0.0",
-  "portalocker>=2.7.0"
+  "portalocker>=2.7.0",
+  "duckdb>=1.0.0"
 ]
 
 classifiers = [

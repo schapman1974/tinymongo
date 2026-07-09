@@ -97,10 +97,15 @@ def test_storage_backend_helpers_and_sqlite_edge_paths(tmp_path, monkeypatch):
     assert sb.storage_extension("json") == ".json"
     assert sb.storage_extension("parquetv2") == ".parquet"
     assert sb.storage_extension("duckdb") == ".duckdb"
+    assert sb.is_table_backend("sqlite") is True
+    assert sb.is_table_backend("tinydb") is False
+    assert sb.get_table_backend("sqlite") is not None
     with pytest.raises(ValueError):
         sb.get_storage_class("missing")
     with pytest.raises(ValueError):
         sb.storage_extension("missing")
+    with pytest.raises(ValueError):
+        sb.get_table_backend("tinydb")
 
     monkeypatch.setattr(sb, "duckdb", None)
     with pytest.raises(ImportError):

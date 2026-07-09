@@ -266,3 +266,24 @@ def storage_extension(name):
             name
         )
     )
+
+
+def is_table_backend(name):
+    return str(name or "tinydb").lower() in ("sqlite", "duckdb", "parquet", "parquetv2")
+
+
+def get_table_backend(name):
+    backend = str(name or "tinydb").lower()
+    if backend == "sqlite":
+        from .table_backends import SQLiteTableBackend
+
+        return SQLiteTableBackend
+    if backend == "duckdb":
+        from .table_backends import DuckDBTableBackend
+
+        return DuckDBTableBackend
+    if backend in ("parquet", "parquetv2"):
+        from .table_backends import ParquetDuckDBBackend
+
+        return ParquetDuckDBBackend
+    raise ValueError("Backend '{0}' is not table-native".format(name))

@@ -2,6 +2,7 @@ pytest
 pyarrow
 portalocker
 pymongo
+duckdb
 black
 ruff
 mypy
