@@ -5,6 +5,6 @@ portalocker
 pymongo
 mongoengine>=0.29,<1
 duckdb
-black
+black>=25,<26
 ruff
 mypy

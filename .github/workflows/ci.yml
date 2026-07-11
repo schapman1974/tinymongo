@@ -38,7 +38,6 @@ jobs:
 
       - name: Lint
         run: |
-          pip install black ruff mypy
           ruff check .
           black --check .
           mypy --ignore-missing-imports tinymongo
