@@ -11,13 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        python-version: ['3.9', '3.11', '3.13']
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           check-latest: true
@@ -29,14 +29,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          pip install .
+          pip install ".[all]"
 
       - name: Run tests
-        run: pytest -q
+        run: |
+          coverage run --branch -m pytest
+          coverage report --include='tinymongo/*' --fail-under=100
 
       - name: Lint
         run: |
           pip install black ruff mypy
           ruff check .
-          black --check . || true
-          mypy --ignore-missing-imports tinymongo || true
+          black --check .
+          mypy --ignore-missing-imports tinymongo

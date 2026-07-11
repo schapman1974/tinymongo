@@ -1,5 +1,6 @@
 import sys
 
+import pytest
 import tinymongo
 
 
@@ -65,3 +66,57 @@ def test_list_database_names_returns_empty_for_missing_folder(tmp_path):
     client._foldername = str(tmp_path / "does-not-exist")
 
     assert client.list_database_names() == []
+
+
+def test_delete_one_missing_document_returns_zero(tmp_path):
+    collection = tinymongo.TinyMongoClient(str(tmp_path / "db")).app.users
+
+    assert collection.delete_one({"_id": "missing"}).deleted_count == 0
+
+
+def test_noop_update_distinguishes_matched_and_modified_counts(tmp_path):
+    collection = tinymongo.TinyMongoClient(str(tmp_path / "db")).app.users
+    collection.insert_one({"_id": 1, "active": True})
+
+    result = collection.update_one({"_id": 1}, {"$set": {"active": True}})
+
+    assert result.matched_count == 1
+    assert result.modified_count == 0
+
+
+@pytest.mark.parametrize("backend", ["tinydb", "sqlite"])
+def test_update_and_replace_upserts(tmp_path, backend):
+    collection = tinymongo.TinyMongoClient(
+        str(tmp_path / backend), backend=backend
+    ).app.users
+
+    updated = collection.update_one(
+        {"email": "ada@example.com"},
+        {"$set": {"active": True}},
+        upsert=True,
+    )
+    assert updated.matched_count == 0
+    assert updated.modified_count == 0
+    assert updated.upserted_id is not None
+    assert collection.find_one({"email": "ada@example.com"})["active"] is True
+
+    replaced = collection.replace_one(
+        {"email": "grace@example.com"},
+        {"email": "grace@example.com", "active": True},
+        upsert=True,
+    )
+    assert replaced.upserted_id is not None
+
+
+def test_update_many_upsert_creates_one_document(tmp_path):
+    collection = tinymongo.TinyMongoClient(str(tmp_path / "db")).app.users
+
+    result = collection.update_many(
+        {"profile.email": {"$eq": "ada@example.com"}, "ignored": {"$gt": 1}},
+        {"$set": {"active": True}},
+        upsert=True,
+    )
+
+    assert result.upserted_id is not None
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({})["profile"]["email"] == "ada@example.com"

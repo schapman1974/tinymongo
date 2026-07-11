@@ -137,6 +137,8 @@ def test_concurrent_single_writes_smoke(tmp_path):
 
     assert failed == []
 
-    docs = list(tm.TinyMongoClient(db_dir, backend=backend).integrationDB.singleInserts.find({}))
+    docs = list(
+        tm.TinyMongoClient(db_dir, backend=backend).integrationDB.singleInserts.find({})
+    )
     assert len(docs) == expected
     assert len({doc["_id"] for doc in docs}) == expected

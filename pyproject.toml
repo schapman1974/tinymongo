@@ -4,25 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tinymongo"
-version = "1.1.2"
+version = "1.2.0"
 description = "A flat file drop in replacement for mongodb. Requires TinyDB"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [ { name = "Stephen Chapman", email = "schapman1974@gmail.com" } ]
-license = {file = "LICENSE.txt"}
+license = "MIT"
+license-files = ["LICENSE.txt"]
 dependencies = [
-  "tinydb==3.2.1",
-  "tinydb-serialization==1.0.4",
-  "pymongo>=3.4.0",
-  "pyarrow>=10.0.0",
-  "portalocker>=2.7.0",
-  "duckdb>=1.0.0"
+  "tinydb>=3.2.1,<4",
+  "portalocker>=2.7.0"
 ]
 
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Database",
 ]
 
@@ -40,7 +41,7 @@ line-length = 88
 line-length = 88
 
 [tool.mypy]
-python_version = 3.8
+python_version = "3.9"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
@@ -57,8 +58,17 @@ include = ["tinymongo*"]
 include-package-data = true
 
 [project.optional-dependencies]
-uv = ["uvicorn>=0.23.0"]
+serialization = ["tinydb-serialization>=1.0.4,<2"]
+duckdb = ["duckdb>=1.0.0"]
+parquet = ["duckdb>=1.0.0", "pyarrow>=10.0.0"]
 postgres = ["psycopg[binary]>=3.1"]
 mysql = ["PyMySQL>=1.1"]
 mariadb = ["PyMySQL>=1.1"]
 remote-sql = ["psycopg[binary]>=3.1", "PyMySQL>=1.1"]
+all = [
+  "tinydb-serialization>=1.0.4,<2",
+  "duckdb>=1.0.0",
+  "pyarrow>=10.0.0",
+  "psycopg[binary]>=3.1",
+  "PyMySQL>=1.1",
+]

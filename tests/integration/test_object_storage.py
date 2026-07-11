@@ -23,10 +23,12 @@ def test_parquet_object_storage_round_trip():
     docs = client[database][collection]
     docs.delete_many({})
 
-    docs.insert_many([
-        {"_id": "one", "kind": "object-storage", "score": 1},
-        {"_id": "two", "kind": "object-storage", "score": 2},
-    ])
+    docs.insert_many(
+        [
+            {"_id": "one", "kind": "object-storage", "score": 1},
+            {"_id": "two", "kind": "object-storage", "score": 2},
+        ]
+    )
     docs.update_one({"_id": "one"}, {"$inc": {"score": 10}})
 
     assert docs.find_one({"_id": "one"})["score"] == 11

@@ -1,10 +1,17 @@
 import os
 import shutil
 
+import pytest
 import tinymongo as tm
 
 
 DB_DIR = os.path.abspath("./test_db_mongo_like")
+
+
+@pytest.fixture(autouse=True)
+def isolated_db_dir(tmp_path):
+    global DB_DIR
+    DB_DIR = str(tmp_path / "mongo-like")
 
 
 def setup_db():

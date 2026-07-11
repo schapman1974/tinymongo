@@ -1,7 +1,9 @@
 pytest
+coverage
 pyarrow
 portalocker
 pymongo
+mongoengine>=0.29,<1
 duckdb
 black
 ruff

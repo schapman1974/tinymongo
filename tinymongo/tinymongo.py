@@ -1,4 +1,5 @@
 """Acts like a Pymongo client to TinyDB"""
+
 # coding: utf-8
 
 from __future__ import absolute_import
@@ -19,20 +20,23 @@ from .storage_backends import (
     join_storage_uri,
     storage_extension,
 )
+
 # from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
 # from .errors import DuplicateKeyError
 from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
-from .errors import DuplicateKeyError
-try:
-    basestring
-except NameError:
-    basestring = str
+from .errors import DuplicateKeyError, InvalidOperation
+
+basestring = str
 
 
 logger = logging.getLogger(__name__)
 
 ASCENDING = 1
 DESCENDING = -1
+
+
+class _CompatibilityConcern(object):
+    document: dict = {}
 
 
 def Q(query, key):
@@ -81,25 +85,25 @@ def _apply_update_document(item, update_doc):
 
     if not operator_keys:
         replacement = copy.deepcopy(update_doc)
-        if u"_id" not in replacement:
-            replacement[u"_id"] = item[u"_id"]
+        if "_id" not in replacement:  # pragma: no branch
+            replacement["_id"] = item["_id"]
         return replacement
 
     for operator, changes in update_doc.items():
         if not isinstance(changes, dict):
             raise ValueError("{0} update requires a dict".format(operator))
 
-        if operator == u"$set":
+        if operator == "$set":
             for path, value in changes.items():
                 _set_nested(updated, path, value)
-        elif operator == u"$unset":
+        elif operator == "$unset":
             for path in changes:
                 _unset_nested(updated, path)
-        elif operator == u"$inc":
+        elif operator == "$inc":
             for path, value in changes.items():
                 current = _get_nested(updated, path, 0)
                 _set_nested(updated, path, current + value)
-        elif operator == u"$push":
+        elif operator == "$push":
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
                 if not isinstance(current, list):
@@ -107,13 +111,13 @@ def _apply_update_document(item, update_doc):
                 current = list(current)
                 current.append(value)
                 _set_nested(updated, path, current)
-        elif operator == u"$pull":
+        elif operator == "$pull":
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
                 if not isinstance(current, list):
                     raise ValueError("$pull target must be a list")
                 _set_nested(updated, path, [item for item in current if item != value])
-        elif operator == u"$addToSet":
+        elif operator == "$addToSet":
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
                 if not isinstance(current, list):
@@ -125,12 +129,32 @@ def _apply_update_document(item, update_doc):
         else:
             raise ValueError("Unsupported update operator: {0}".format(operator))
 
-    updated[u"_id"] = item[u"_id"]
+    updated["_id"] = item["_id"]
     return updated
 
 
-def _is_operator_update(update_doc):
-    return any(key.startswith("$") for key in update_doc)
+def _validate_update_document(update_doc):
+    if (
+        not isinstance(update_doc, dict)
+        or not update_doc
+        or not all(key.startswith("$") for key in update_doc)
+    ):
+        raise ValueError("update only works with $ operators; use replace_one instead")
+
+
+def _document_for_upsert(query, update_doc):
+    document = {}
+    for key, value in (query or {}).items():
+        if key.startswith("$"):
+            continue
+        if isinstance(value, dict):
+            if set(value) == {"$eq"}:
+                value = value["$eq"]
+            else:
+                continue  # pragma: no cover - continue has no trace event on Python 3.9
+        _set_nested(document, key, copy.deepcopy(value))
+    document.setdefault("_id", generate_id())
+    return _apply_update_document(document, update_doc)
 
 
 def _simple_equality_filter(_filter):
@@ -168,14 +192,14 @@ def _folder_from_mongo_client_args(host, port, kwargs):
     if folder is not None:
         return folder
     if host is None or _looks_like_network_target(host, port):
-        return u"tinydb"
+        return "tinydb"
     return host
 
 
 class TinyMongoClient(object):
     """Represents the Tiny `db` client"""
 
-    def __init__(self, foldername=u"tinydb", backend="tinydb", **kwargs):
+    def __init__(self, foldername="tinydb", backend="tinydb", **kwargs):
         """Initialize container folder and choose a storage backend."""
         self._foldername = foldername
         self._backend = backend or "tinydb"
@@ -185,6 +209,8 @@ class TinyMongoClient(object):
         )
         self._duckdb_config = kwargs.get("duckdb_config")
         self._dsn = kwargs.get("dsn") or self._dsn_from_env(self._backend)
+        self._databases = {}
+        self._closed = False
         try:
             os.makedirs(foldername, exist_ok=True)
         except OSError as x:
@@ -226,10 +252,14 @@ class TinyMongoClient(object):
         return os.path.join(self._foldername, key + storage_extension(self._backend))
 
     def _get_db(self, key):
+        if self._closed:
+            raise InvalidOperation("Cannot use a closed TinyMongoClient")
+        if key in self._databases:
+            return self._databases[key]
         path = self._get_db_path(key)
         if is_table_backend(self._backend):
             engine_class = get_table_backend(self._backend)
-            return TinyMongoDatabase(
+            database = TinyMongoDatabase(
                 key,
                 path,
                 self._storage,
@@ -241,11 +271,25 @@ class TinyMongoClient(object):
                     dsn=self._dsn,
                 ),
             )
-        return TinyMongoDatabase(key, path, self._storage)
+        else:
+            database = TinyMongoDatabase(key, path, self._storage)
+        self._databases[key] = database
+        return database
 
     def close(self):
-        """Do nothing"""
-        pass
+        """Close databases opened by this client."""
+        if self._closed:
+            return
+        for database in self._databases.values():
+            database.close()
+        self._databases.clear()
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def server_info(self):
         """Return local TinyMongo metadata in the shape of PyMongo's call."""
@@ -294,7 +338,9 @@ class TinyMongoClient(object):
     def __getattr__(self, name):
         """Gets a new or existing database based in attribute."""
         if name.startswith("_"):
-            raise AttributeError("{} object has no attribute {}".format(type(self).__name__, name))
+            raise AttributeError(
+                "{} object has no attribute {}".format(type(self).__name__, name)
+            )
         return self._get_db(name)
 
 
@@ -314,7 +360,7 @@ class MongoClient(TinyMongoClient):
         tz_aware=None,
         connect=None,
         type_registry=None,
-        **kwargs
+        **kwargs,
     ):
         backend = kwargs.pop("backend", "tinydb")
         storage_uri = kwargs.pop("storage_uri", None)
@@ -362,6 +408,16 @@ class TinyMongoDatabase(object):
         """Gets a new or existing collection"""
         return TinyMongoCollection(name, self)
 
+    def get_collection(self, name, *args, **kwargs):
+        """Return a collection while accepting PyMongo compatibility options."""
+        return self[name]
+
+    def drop_collection(self, name, *args, **kwargs):
+        """Drop a collection by name or collection object."""
+        if isinstance(name, TinyMongoCollection):
+            name = name.tablename
+        return self[name].drop()
+
     def collection_names(self):
         """Get a list of all the collection names in this database"""
         if self.engine is not None:
@@ -371,6 +427,19 @@ class TinyMongoDatabase(object):
     def list_collection_names(self):
         """Compatibility alias for modern PyMongo."""
         return [name for name in self.collection_names() if name != "_default"]
+
+    def close(self):
+        """Close this database's storage resources."""
+        if self.engine is not None:
+            self.engine.close()
+        elif self.tinydb is not None:  # pragma: no branch
+            self.tinydb.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
 
 class TinyMongoCollection(object):
@@ -395,6 +464,18 @@ class TinyMongoCollection(object):
     def __repr__(self):
         """Return collection name"""
         return self.tablename
+
+    @property
+    def write_concern(self):
+        return _CompatibilityConcern()
+
+    @property
+    def read_concern(self):
+        return _CompatibilityConcern()
+
+    def with_options(self, *args, **kwargs):
+        """Accept PyMongo collection options that local storage does not use."""
+        return self
 
     def __getattr__(self, name):
         """
@@ -474,27 +555,28 @@ class TinyMongoCollection(object):
 
     def _acquire_collection_lock(self):
         lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
-        try:
-            from .parquet_storage import _local_rlocks, _acquire_rlock, portalocker
-            import threading
+        from .parquet_storage import _local_rlocks, _acquire_rlock, portalocker
+        import threading
 
-            rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
-            first_acquire = _acquire_rlock(rlock)
-            portalocker_lock = None
-            if first_acquire and portalocker is not None:
+        rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
+        first_acquire = _acquire_rlock(rlock)
+        portalocker_lock = None
+        try:
+            if first_acquire and portalocker is not None:  # pragma: no branch
                 portalocker_lock = portalocker.Lock(lock_path, timeout=30)
                 portalocker_lock.acquire()
             return rlock, portalocker_lock
         except Exception:
-            return None, None
+            rlock.release()
+            raise
 
     def _release_collection_lock(self, rlock, portalocker_lock):
-        if portalocker_lock is not None:
+        if portalocker_lock is not None:  # pragma: no branch
             try:
                 portalocker_lock.release()
             except Exception:
                 pass
-        if rlock is not None:
+        if rlock is not None:  # pragma: no branch
             try:
                 rlock.release()
             except Exception:
@@ -502,7 +584,7 @@ class TinyMongoCollection(object):
 
     def _set_storage_merge_writes(self, enabled):
         storage = getattr(self.parent.tinydb, "_storage", None)
-        if hasattr(storage, "merge_writes"):
+        if hasattr(storage, "merge_writes"):  # pragma: no branch
             storage.merge_writes = enabled
 
     def count(self):
@@ -519,6 +601,10 @@ class TinyMongoCollection(object):
         """
         return self.find(filter).count()
 
+    def estimated_document_count(self, *args, **kwargs):
+        """Return the local collection size."""
+        return self.count_documents({})
+
     def drop(self, **kwargs):
         """
         Removes a collection from the database.
@@ -528,7 +614,9 @@ class TinyMongoCollection(object):
         """
         if self.parent.engine is not None:
             return self.parent.engine.drop_collection(self.tablename)
-        if self.table:
+        if self.tablename in self.parent.collection_names():
+            if self.table is None:
+                self.build_table()
             self._set_storage_merge_writes(False)
             try:
                 drop_table = getattr(self.parent.tinydb, "drop_table", None)
@@ -561,11 +649,11 @@ class TinyMongoCollection(object):
         """
         if self.parent.engine is not None:
             if not isinstance(doc, dict):
-                raise ValueError(u'"doc" must be a dict')
+                raise ValueError('"doc" must be a dict')
             if "_id" in doc and doc["_id"] is not None:
-                _id = doc[u"_id"] = doc["_id"]
+                _id = doc["_id"] = doc["_id"]
             else:
-                _id = doc[u"_id"] = generate_id()
+                _id = doc["_id"] = generate_id()
             result = self.parent.engine.insert_many(
                 self.tablename,
                 [doc],
@@ -580,14 +668,14 @@ class TinyMongoCollection(object):
                 self.build_table()
             self._refresh_table()
             if not isinstance(doc, dict):
-                raise ValueError(u'"doc" must be a dict')
+                raise ValueError('"doc" must be a dict')
 
             # Respect explicit falsy ids (0, False) — only generate when _id
             # is missing or None.
             if "_id" in doc and doc["_id"] is not None:
-                _id = doc[u"_id"] = doc["_id"]
+                _id = doc["_id"] = doc["_id"]
             else:
-                _id = doc[u"_id"] = generate_id()
+                _id = doc["_id"] = generate_id()
 
             bypass_document_validation = kwargs.get("bypass_document_validation")
             if bypass_document_validation is True:
@@ -599,7 +687,7 @@ class TinyMongoCollection(object):
                     eid = self.table.insert(doc)
                 else:
                     raise DuplicateKeyError(
-                        u"_id:{0} already exists in collection:{1}".format(
+                        "_id:{0} already exists in collection:{1}".format(
                             _id, self.tablename
                         )
                     )
@@ -617,13 +705,13 @@ class TinyMongoCollection(object):
         """
         if self.parent.engine is not None:
             if not isinstance(docs, list):
-                raise ValueError(u'"insert_many" requires a list input')
+                raise ValueError('"insert_many" requires a list input')
             _ids = []
             for doc in docs:
                 if "_id" in doc and doc["_id"] is not None:
-                    _id = doc[u"_id"] = doc["_id"]
+                    _id = doc["_id"] = doc["_id"]
                 else:
-                    _id = doc[u"_id"] = generate_id()
+                    _id = doc["_id"] = generate_id()
                 _ids.append(_id)
             results = self.parent.engine.insert_many(
                 self.tablename,
@@ -639,7 +727,7 @@ class TinyMongoCollection(object):
                 self.build_table()
             self._refresh_table()
             if not isinstance(docs, list):
-                raise ValueError(u'"insert_many" requires a list input')
+                raise ValueError('"insert_many" requires a list input')
 
             bypass_document_validation = kwargs.get("bypass_document_validation")
             if bypass_document_validation is not True:
@@ -652,14 +740,14 @@ class TinyMongoCollection(object):
                 # Respect explicit falsy ids (0, False) — only generate when
                 # _id is missing or None.
                 if "_id" in doc and doc["_id"] is not None:
-                    _id = doc[u"_id"] = doc["_id"]
+                    _id = doc["_id"] = doc["_id"]
                 else:
-                    _id = doc[u"_id"] = generate_id()
+                    _id = doc["_id"] = generate_id()
 
                 if bypass_document_validation is not True:
                     if _id in existing:
                         raise DuplicateKeyError(
-                            u"_id:{0} already exists in collection:{1}".format(
+                            "_id:{0} already exists in collection:{1}".format(
                                 _id, self.tablename
                             )
                         )
@@ -685,11 +773,11 @@ class TinyMongoCollection(object):
         query
         :return: composite Query()
         """
-        logger.debug(u"query to parse2: {}".format(query))
+        logger.debug("query to parse2: {}".format(query))
 
         # this should find all records
         if query == {} or query is None:
-            return Query()._id != u"-1"  # noqa
+            return Query()._id != "-1"  # noqa
 
         q = None
         # find the final result of the generator
@@ -699,7 +787,7 @@ class TinyMongoCollection(object):
             else:
                 q = q & c
 
-        logger.debug(u"new query item2: {}".format(q))
+        logger.debug("new query item2: {}".format(q))
 
         return q
 
@@ -714,7 +802,7 @@ class TinyMongoCollection(object):
         Query() object containing all conditions
         """
         # use this to determine gt/lt/eq on prev_query
-        logger.debug(u"query: {} prev_query: {}".format(query, prev_key))
+        logger.debug("query: {} prev_query: {}".format(query, prev_key))
 
         q = Query()
         conditions = None
@@ -727,68 +815,82 @@ class TinyMongoCollection(object):
 
         # deal with the conditions
         for key, value in query.items():
-            logger.debug(u"conditions: {} {}".format(key, value))
+            logger.debug("conditions: {} {}".format(key, value))
 
-            if key == u"$gte":
+            if key == "$gte":
                 conditions = (
                     (Q(q, prev_key) >= value)
                     if not conditions and prev_key != "$not"
-                    else (conditions & (Q(q, prev_key) >= value))
-                    if prev_key != "$not"
-                    else (q[last_prev_key] < value)
+                    else (
+                        (conditions & (Q(q, prev_key) >= value))
+                        if prev_key != "$not"
+                        else (q[last_prev_key] < value)
+                    )
                 )
-            elif key == u"$gt":
+            elif key == "$gt":
                 conditions = (
                     (Q(q, prev_key) > value)
                     if not conditions and prev_key != "$not"
-                    else (conditions & (Q(q, prev_key) > value))
-                    if prev_key != "$not"
-                    else (q[last_prev_key] <= value)
+                    else (
+                        (conditions & (Q(q, prev_key) > value))
+                        if prev_key != "$not"
+                        else (q[last_prev_key] <= value)
+                    )
                 )
-            elif key == u"$lte":
+            elif key == "$lte":
                 conditions = (
                     (Q(q, prev_key) <= value)
                     if not conditions and prev_key != "$not"
-                    else (conditions & (Q(q, prev_key) <= value))
-                    if prev_key != "$not"
-                    else (q[last_prev_key] > value)
+                    else (
+                        (conditions & (Q(q, prev_key) <= value))
+                        if prev_key != "$not"
+                        else (q[last_prev_key] > value)
+                    )
                 )
-            elif key == u"$lt":
+            elif key == "$lt":
                 conditions = (
                     (Q(q, prev_key) < value)
                     if not conditions and prev_key != "$not"
-                    else (conditions & (Q(q, prev_key) < value))
-                    if prev_key != "$not"
-                    else (q[last_prev_key] >= value)
+                    else (
+                        (conditions & (Q(q, prev_key) < value))
+                        if prev_key != "$not"
+                        else (q[last_prev_key] >= value)
+                    )
                 )
-            elif key == u"$ne":
+            elif key == "$ne":
                 conditions = (
                     (Q(q, prev_key) != value)
                     if not conditions and prev_key != "$not"
-                    else (conditions & (Q(q, prev_key) != value))
-                    if prev_key != "$not"
-                    else (q[last_prev_key] == value)
+                    else (
+                        (conditions & (Q(q, prev_key) != value))
+                        if prev_key != "$not"
+                        else (q[last_prev_key] == value)
+                    )
                 )
-            elif key == u"$not":
-                if not isinstance(value, dict) and not isinstance(value, list):
+            elif key == "$not":
+                if not isinstance(value, dict) and not isinstance(
+                    value, list
+                ):  # pragma: no branch - containers recurse below
                     conditions = (
                         (Q(q, prev_key) != value)
                         if not conditions and prev_key != "$not"
-                        else (conditions & (Q(q, prev_key) != value))
-                        if prev_key != "$not"
-                        else (q[last_prev_key] >= value)
+                        else (
+                            (conditions & (Q(q, prev_key) != value))
+                            if prev_key != "$not"
+                            else (q[last_prev_key] >= value)
+                        )
                     )
                 else:
                     # let the value's condition be parsed below
                     pass
-            elif key == u"$regex":
+            elif key == "$regex":
                 value = value.replace("\\\\\\", "|||")
                 value = value.replace("\\\\", "|||")
                 regex = value.replace("\\", "")
                 regex = regex.replace("|||", "\\")
                 currCond = where(prev_key).matches(regex)
                 conditions = currCond if not conditions else (conditions & currCond)
-            elif key == u"$nin":
+            elif key == "$nin":
                 # Build a conjunctive condition: field != each value
                 vals = value if isinstance(value, list) else [value]
                 nin_cond = None
@@ -796,12 +898,16 @@ class TinyMongoCollection(object):
                     term = Q(q, prev_key) != v
                     nin_cond = term if nin_cond is None else (nin_cond & term)
                 conditions = nin_cond if not conditions else (conditions & nin_cond)
-            elif key == u"$exists":
+            elif key == "$exists":
                 exists_cond = Q(q, prev_key).exists()
                 if value:
-                    conditions = exists_cond if not conditions else conditions & exists_cond
+                    conditions = (
+                        exists_cond if not conditions else conditions & exists_cond
+                    )
                 else:
-                    conditions = ~exists_cond if not conditions else conditions & ~exists_cond
+                    conditions = (
+                        ~exists_cond if not conditions else conditions & ~exists_cond
+                    )
             elif key in ["$and", "$or", "$nor", "$in", "$all"]:
                 pass
             else:
@@ -819,7 +925,7 @@ class TinyMongoCollection(object):
                     )
                     prev_key = key
 
-            logger.debug(u"c: {}".format(conditions))
+            logger.debug("c: {}".format(conditions))
             if isinstance(value, dict):
                 # yield from self.parse_condition(value, key)
                 for parse_condition in self.parse_condition(value, key, prev_key):
@@ -869,7 +975,7 @@ class TinyMongoCollection(object):
                 elif key == "$all":
                     yield Q(q, prev_key).all(value)
                 elif isinstance(key, str) and key.startswith("$"):
-                    if conditions is not None:
+                    if conditions is not None:  # pragma: no branch - parser guard
                         yield conditions
                     continue
                 else:
@@ -892,11 +998,33 @@ class TinyMongoCollection(object):
         :param doc: dictionary representing the item to be updated
         :return: UpdateResult
         """
+        _validate_update_document(doc)
+        upsert = kwargs.get("upsert") is True
+
         if self.parent.engine is not None:
-            result = self.parent.engine.update_many(
-                self.tablename, query, doc, multi=False
+            matches = self.parent.engine.find(self.tablename, query, limit=1)
+            if not matches:
+                if upsert:
+                    inserted = _document_for_upsert(query, doc)
+                    self.parent.engine.insert_many(self.tablename, [inserted])
+                    return UpdateResult(
+                        raw_result=[],
+                        matched_count=0,
+                        modified_count=0,
+                        upserted_id=inserted["_id"],
+                    )
+                return UpdateResult(raw_result=[], matched_count=0, modified_count=0)
+            modified = self.parent.engine.apply_update(matches[0], doc) != matches[0]
+            self.parent.engine.update_many(self.tablename, query, doc, multi=False)
+            return UpdateResult(
+                raw_result={
+                    "n": 1,
+                    "nModified": int(modified),
+                    "updatedExisting": True,
+                },
+                matched_count=1,
+                modified_count=int(modified),
             )
-            return UpdateResult(raw_result=result)
 
         if self.table is None:
             self.build_table()
@@ -908,21 +1036,33 @@ class TinyMongoCollection(object):
             item = self.table.get(allcond)
 
             if item is None:
+                if upsert:
+                    inserted = _document_for_upsert(query, doc)
+                    self.table.insert(inserted)
+                    self._invalidate_indexes()
+                    return UpdateResult(
+                        raw_result=[],
+                        matched_count=0,
+                        modified_count=0,
+                        upserted_id=inserted["_id"],
+                    )
                 return UpdateResult(raw_result=[])
 
-            try:
-                updated = _apply_update_document(item, doc)
-                if _is_operator_update(doc):
-                    result = self.table.update(updated, where(u"_id") == item[u"_id"])
-                else:
-                    self.table.remove(where(u"_id") == item[u"_id"])
-                    self.table.insert(updated)
-                    result = [item[u"_id"]]
+            updated = _apply_update_document(item, doc)
+            modified = updated != item
+            if modified:
+                self.table.update(updated, where("_id") == item["_id"])
                 self._invalidate_indexes()
-            except Exception:
-                result = []
 
-            return UpdateResult(raw_result=result)
+            return UpdateResult(
+                raw_result={
+                    "n": 1,
+                    "nModified": int(modified),
+                    "updatedExisting": True,
+                },
+                matched_count=1,
+                modified_count=int(modified),
+            )
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -934,11 +1074,31 @@ class TinyMongoCollection(object):
         :param doc: dictionary or update document
         :return: UpdateResult
         """
+        _validate_update_document(doc)
+        upsert = kwargs.get("upsert") is True
+
         if self.parent.engine is not None:
+            matches = self.parent.engine.find(self.tablename, query)
+            if not matches and upsert:
+                inserted = _document_for_upsert(query, doc)
+                self.parent.engine.insert_many(self.tablename, [inserted])
+                return UpdateResult(
+                    raw_result=[],
+                    matched_count=0,
+                    modified_count=0,
+                    upserted_id=inserted["_id"],
+                )
+            modified_count = sum(
+                self.parent.engine.apply_update(item, doc) != item for item in matches
+            )
             result = self.parent.engine.update_many(
                 self.tablename, query, doc, multi=True
             )
-            return UpdateResult(raw_result=result)
+            return UpdateResult(
+                raw_result=result,
+                matched_count=len(matches),
+                modified_count=modified_count,
+            )
 
         if self.table is None:
             self.build_table()
@@ -947,24 +1107,34 @@ class TinyMongoCollection(object):
         try:
             self._refresh_table()
             allcond = self.parse_query(query)
-            try:
-                items = list(self.table.search(allcond))
-                result = []
-                for item in items:
-                    updated = _apply_update_document(item, doc)
-                    if _is_operator_update(doc):
-                        result.extend(
-                            self.table.update(updated, where(u"_id") == item[u"_id"])
-                        )
-                    else:
-                        self.table.remove(where(u"_id") == item[u"_id"])
-                        self.table.insert(updated)
-                        result.append(item[u"_id"])
+            items = list(self.table.search(allcond))
+            if not items and upsert:
+                inserted = _document_for_upsert(query, doc)
+                self.table.insert(inserted)
                 self._invalidate_indexes()
-            except Exception:
-                result = []
+                return UpdateResult(
+                    raw_result=[],
+                    matched_count=0,
+                    modified_count=0,
+                    upserted_id=inserted["_id"],
+                )
+            result = []
+            modified_count = 0
+            for item in items:
+                updated = _apply_update_document(item, doc)
+                if updated != item:
+                    modified_count += 1
+                    result.extend(
+                        self.table.update(updated, where("_id") == item["_id"])
+                    )
+            if modified_count:
+                self._invalidate_indexes()
 
-            return UpdateResult(raw_result=result)
+            return UpdateResult(
+                raw_result=result,
+                matched_count=len(items),
+                modified_count=modified_count,
+            )
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -975,10 +1145,27 @@ class TinyMongoCollection(object):
         if self.parent.engine is not None:
             item = self.parent.engine.find_one(self.tablename, query)
             if item is None:
+                if kwargs.get("upsert") is True:
+                    inserted = copy.deepcopy(replacement)
+                    inserted.setdefault("_id", generate_id())
+                    self.parent.engine.insert_many(self.tablename, [inserted])
+                    return UpdateResult(
+                        raw_result=[],
+                        matched_count=0,
+                        modified_count=0,
+                        upserted_id=inserted["_id"],
+                    )
                 return UpdateResult(raw_result=[])
-            replacement[u"_id"] = item[u"_id"]
-            self.parent.engine.replace_one(self.tablename, item[u"_id"], replacement)
-            return UpdateResult(raw_result=[item[u"_id"]])
+            updated = copy.deepcopy(replacement)
+            updated["_id"] = item["_id"]
+            modified = updated != item
+            if modified:
+                self.parent.engine.replace_one(self.tablename, item["_id"], updated)
+            return UpdateResult(
+                raw_result=[item["_id"]] if modified else [],
+                matched_count=1,
+                modified_count=int(modified),
+            )
 
         if self.table is None:
             self.build_table()
@@ -989,18 +1176,33 @@ class TinyMongoCollection(object):
             allcond = self.parse_query(query)
             item = self.table.get(allcond)
             if item is None:
+                if kwargs.get("upsert") is True:
+                    inserted = copy.deepcopy(replacement)
+                    inserted.setdefault("_id", generate_id())
+                    self.table.insert(inserted)
+                    self._invalidate_indexes()
+                    return UpdateResult(
+                        raw_result=[],
+                        matched_count=0,
+                        modified_count=0,
+                        upserted_id=inserted["_id"],
+                    )
                 return UpdateResult(raw_result=[])
 
-            try:
-                replacement[u"_id"] = item[u"_id"]
-                self.table.remove(where(u"_id") == item[u"_id"])
-                self.table.insert(replacement)
+            updated = copy.deepcopy(replacement)
+            updated["_id"] = item["_id"]
+            modified = updated != item
+            if modified:
+                self.table.remove(where("_id") == item["_id"])
+                self.table.insert(updated)
                 self._invalidate_indexes()
-                result = [item[u"_id"]]
-            except Exception:
+                result = [item["_id"]]
+            else:
                 result = []
 
-            return UpdateResult(raw_result=result)
+            return UpdateResult(
+                raw_result=result, matched_count=1, modified_count=int(modified)
+            )
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -1011,9 +1213,12 @@ class TinyMongoCollection(object):
         if self.parent.engine is not None:
             item = self.parent.engine.find_one(self.tablename, query)
             if item is None:
-                return None
+                result = self.update_one(query, update, *args, **kwargs)
+                if result.upserted_id is None:
+                    return None
+                return self.find_one({"_id": result.upserted_id})
             self.update_one(query, update, *args, **kwargs)
-            return item
+            return self.find_one(query) if kwargs.get("return_document") else item
 
         if self.table is None:
             self.build_table()
@@ -1021,10 +1226,25 @@ class TinyMongoCollection(object):
         allcond = self.parse_query(query)
         item = self.table.get(allcond)
         if item is None:
-            return None
+            result = self.update_one(query, update, *args, **kwargs)
+            if result.upserted_id is None:
+                return None
+            return self.find_one({"_id": result.upserted_id})
 
         self.update_one(query, update, *args, **kwargs)
-        return item
+        return self.find_one(query) if kwargs.get("return_document") else item
+
+    def find_one_and_replace(self, query, replacement, *args, **kwargs):
+        """Replace one document and return its previous or resulting value."""
+        previous = self.find_one(query)
+        result = self.replace_one(query, replacement, *args, **kwargs)
+        if previous is None:
+            if result.upserted_id is None:
+                return None
+            return self.find_one({"_id": result.upserted_id})
+        if kwargs.get("return_document"):
+            return self.find_one({"_id": previous["_id"]})
+        return previous
 
     def find(self, _filter=None, sort=None, skip=None, limit=None, *args, **kwargs):
         """
@@ -1036,7 +1256,9 @@ class TinyMongoCollection(object):
         """
         if self.parent.engine is not None:
             result = self.parent.engine.find(self.tablename, _filter)
-            return TinyMongoCursor(result, sort=sort, skip=skip, limit=limit)
+            return TinyMongoCursor(
+                result, sort=sort, skip=skip, limit=limit, collection=self
+            )
 
         if self.table is None:
             self.build_table()
@@ -1050,7 +1272,11 @@ class TinyMongoCollection(object):
                 index = self._get_index(key)
                 if index is not None:
                     return TinyMongoCursor(
-                        list(index.get(value, [])), sort=sort, skip=skip, limit=limit
+                        list(index.get(value, [])),
+                        sort=sort,
+                        skip=skip,
+                        limit=limit,
+                        collection=self,
                     )
             allcond = self.parse_query(_filter)
 
@@ -1059,7 +1285,9 @@ class TinyMongoCollection(object):
             except (AttributeError, TypeError):
                 result = []
 
-        result = TinyMongoCursor(result, sort=sort, skip=skip, limit=limit)
+        result = TinyMongoCursor(
+            result, sort=sort, skip=skip, limit=limit, collection=self
+        )
 
         return result
 
@@ -1094,15 +1322,15 @@ class TinyMongoCollection(object):
         :return: DeleteResult
         """
         if self.parent.engine is not None:
-            result = self.parent.engine.delete_many(
-                self.tablename, query, multi=False
-            )
+            result = self.parent.engine.delete_many(self.tablename, query, multi=False)
             return DeleteResult(raw_result=result)
 
         item = self.find_one(query)
+        if item is None:
+            return DeleteResult(raw_result=[])
         self._set_storage_merge_writes(False)
         try:
-            result = self.table.remove(where(u"_id") == item[u"_id"])
+            result = self.table.remove(where("_id") == item["_id"])
             self._invalidate_indexes()
         finally:
             self._set_storage_merge_writes(True)
@@ -1123,9 +1351,7 @@ class TinyMongoCollection(object):
         items = self.find(query)
         self._set_storage_merge_writes(False)
         try:
-            result = [
-                self.table.remove(where(u"_id") == item[u"_id"]) for item in items
-            ]
+            result = [self.table.remove(where("_id") == item["_id"]) for item in items]
             self._invalidate_indexes()
 
             if query == {}:
@@ -1140,9 +1366,10 @@ class TinyMongoCollection(object):
 class TinyMongoCursor(object):
     """Mongo iterable cursor"""
 
-    def __init__(self, cursordat, sort=None, skip=None, limit=None):
+    def __init__(self, cursordat, sort=None, skip=None, limit=None, collection=None):
         """Initialize the mongo iterable cursor with data"""
         self.cursordat = cursordat
+        self.collection = collection
         self.cursorpos = -1
 
         if len(self.cursordat) == 0:
@@ -1186,7 +1413,7 @@ class TinyMongoCursor(object):
         """
 
         def _dict_parser(dict_doc):
-            """ dict ordered by:
+            """dict ordered by:
             valueType_N -> key_N -> value_N
             """
             result = list()
@@ -1197,8 +1424,7 @@ class TinyMongoCursor(object):
             return tuple(result)
 
         def _list_parser(list_doc):
-            """list will iter members to compare
-            """
+            """list will iter members to compare"""
             result = list()
             for member in list_doc:
                 result.append(self._order(member))
@@ -1207,7 +1433,8 @@ class TinyMongoCursor(object):
         # (TODO) include more data type
         if value is None or not isinstance(
             # value, (dict, list, basestring, bool, float, int)
-            value, (dict, list, str, bool, float, int)
+            value,
+            (dict, list, str, bool, float, int),
         ):
             # not support/sortable value type
             value = (0, None)
@@ -1226,7 +1453,7 @@ class TinyMongoCursor(object):
         elif isinstance(value, dict):
             value = (3, _dict_parser(value))
 
-        elif isinstance(value, list):
+        elif isinstance(value, list):  # pragma: no branch - type chain is exhaustive
             if len(value) == 0:
                 # [] less then None
                 value = [(-1, [])]
@@ -1458,10 +1685,12 @@ class TinyGridFS(object):
         self.database = tinydatabase
         return self
 
+
 def generate_id():
     """Generate new UUID"""
     # TODO: Use six.string_type to Py3 compat
-    return str(uuid4()).replace(u"-", u"")
+    return str(uuid4()).replace("-", "")
+
 
 # def generate_id():
 #     """Generate new UUID"""

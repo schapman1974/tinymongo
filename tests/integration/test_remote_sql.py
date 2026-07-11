@@ -26,10 +26,12 @@ def test_remote_sql_backend_round_trip(backend, env_name):
     docs = client[database][collection]
     docs.drop()
 
-    docs.insert_many([
-        {"_id": "one", "kind": backend, "score": 1},
-        {"_id": "two", "kind": backend, "score": 2},
-    ])
+    docs.insert_many(
+        [
+            {"_id": "one", "kind": backend, "score": 1},
+            {"_id": "two", "kind": backend, "score": 2},
+        ]
+    )
     docs.update_one({"_id": "one"}, {"$inc": {"score": 10}})
 
     assert docs.find_one({"_id": "one"})["score"] == 11

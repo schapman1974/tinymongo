@@ -3,14 +3,18 @@ import os
 import sqlite3
 import tempfile
 import threading
+from typing import Any
 from tinydb.storages import Storage
 from urllib.parse import urlparse
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
+from .errors import StorageCorruptionError
 
 try:
-    import duckdb
+    import duckdb as _duckdb
 except Exception:  # pragma: no cover - optional dependency fallback
-    duckdb = None
+    _duckdb = None  # type: ignore[assignment]
+
+duckdb: Any = _duckdb
 
 
 OBJECT_STORAGE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
@@ -22,7 +26,9 @@ def is_object_storage_uri(value):
 
 def join_storage_uri(base, *parts):
     if is_object_storage_uri(base):
-        return "/".join([str(base).rstrip("/")] + [str(part).strip("/") for part in parts])
+        return "/".join(
+            [str(base).rstrip("/")] + [str(part).strip("/") for part in parts]
+        )
     return os.path.join(base, *parts)
 
 
@@ -66,8 +72,10 @@ class AtomicJSONStorage(Storage):
                 return {}
             with open(self.path, "r", encoding="utf8") as handle:
                 return json.load(handle)
-        except Exception:  # pragma: no cover - corrupt JSON fallback
-            return {}
+        except (OSError, ValueError, TypeError) as exc:
+            raise StorageCorruptionError(
+                "Cannot read JSON database {0}: {1}".format(self.path, exc)
+            ) from exc
         finally:
             self._release_lock(rlock, portalocker_lock)
 
@@ -114,9 +122,13 @@ class AtomicJSONStorage(Storage):
             if self.merge_writes and os.path.exists(self.path):
                 try:
                     with open(self.path, "r", encoding="utf8") as handle:
-                        payload_data = self._merge_data(json.load(handle) or {}, payload_data)
-                except Exception:  # pragma: no cover - corrupt JSON fallback
-                    payload_data = self._merge_data({}, payload_data)
+                        payload_data = self._merge_data(
+                            json.load(handle) or {}, payload_data
+                        )
+                except (OSError, ValueError, TypeError) as exc:
+                    raise StorageCorruptionError(
+                        "Cannot update JSON database {0}: {1}".format(self.path, exc)
+                    ) from exc
 
             payload = json.dumps(payload_data, ensure_ascii=False)
             with os.fdopen(fd, "w", encoding="utf8") as handle:
@@ -156,8 +168,10 @@ class SQLiteStorage(Storage):
             if row is None or row[0] is None:
                 return {}
             return json.loads(row[0])
-        except Exception:
-            return {}
+        except (sqlite3.DatabaseError, ValueError, TypeError, OSError) as exc:
+            raise StorageCorruptionError(
+                "Cannot read SQLite database {0}: {1}".format(self.path, exc)
+            ) from exc
 
     def write(self, data):
         json_str = json.dumps(data or {}, ensure_ascii=False)
@@ -195,7 +209,7 @@ class DuckDBStorage(Storage):
         if duckdb is None:
             raise ImportError(
                 "duckdb backend requires the optional Python driver 'duckdb'. "
-                "Install it with: pip install duckdb or pip install tinymongo"
+                "Install it with: pip install 'tinymongo[duckdb]'"
             )
         self.path = path
 
@@ -210,8 +224,10 @@ class DuckDBStorage(Storage):
             if result is None or result[0] is None:
                 return {}
             return json.loads(result[0])
-        except Exception:
-            return {}
+        except Exception as exc:
+            raise StorageCorruptionError(
+                "Cannot read DuckDB database {0}: {1}".format(self.path, exc)
+            ) from exc
 
     def write(self, data):
         json_str = json.dumps(data or {}, ensure_ascii=False)
@@ -223,10 +239,11 @@ class DuckDBStorage(Storage):
         try:
             os.remove(tmp)
             conn = duckdb.connect(tmp)
-            conn.execute("CREATE TABLE IF NOT EXISTS tinydb(id INTEGER PRIMARY KEY, data TEXT)")
             conn.execute(
-                "INSERT OR REPLACE INTO tinydb(id, data) VALUES(1, ?)",
-                (json_str,)
+                "CREATE TABLE IF NOT EXISTS tinydb(id INTEGER PRIMARY KEY, data TEXT)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO tinydb(id, data) VALUES(1, ?)", (json_str,)
             )
             conn.close()
             os.replace(tmp, self.path)

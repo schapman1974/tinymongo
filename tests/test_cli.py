@@ -12,10 +12,12 @@ def test_cli_inspect_export_import_and_migrate(tmp_path, capsys):
 
     client = tm.TinyMongoClient(str(source))
     users = client.app.users
-    users.insert_many([
-        {"_id": 1, "name": "Ada"},
-        {"_id": 2, "name": "Grace"},
-    ])
+    users.insert_many(
+        [
+            {"_id": 1, "name": "Ada"},
+            {"_id": 2, "name": "Grace"},
+        ]
+    )
 
     assert cli.main(["list-dbs", str(source)]) == 0
     assert "app" in capsys.readouterr().out
@@ -31,34 +33,46 @@ def test_cli_inspect_export_import_and_migrate(tmp_path, capsys):
     }
     assert collections["users"] == 2
 
-    assert cli.main(["export", str(source), "app", "users", "-o", str(export_file)]) == 0
+    assert (
+        cli.main(["export", str(source), "app", "users", "-o", str(export_file)]) == 0
+    )
     assert json.loads(export_file.read_text()) == [
         {"_id": 1, "name": "Ada"},
         {"_id": 2, "name": "Grace"},
     ]
 
-    assert cli.main([
-        "import",
-        str(target),
-        "app",
-        "users",
-        str(export_file),
-        "--mode",
-        "replace",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "import",
+                str(target),
+                "app",
+                "users",
+                str(export_file),
+                "--mode",
+                "replace",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
     assert tm.TinyMongoClient(str(target)).app.users.count() == 2
 
     migrated = tmp_path / "migrated"
-    assert cli.main([
-        "migrate",
-        str(source),
-        str(migrated),
-        "--to-backend",
-        "sqlite",
-        "--database",
-        "app",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "migrate",
+                str(source),
+                str(migrated),
+                "--to-backend",
+                "sqlite",
+                "--database",
+                "app",
+            ]
+        )
+        == 0
+    )
     migrated_payload = json.loads(capsys.readouterr().out)
     migrated_counts = {
         item["collection"]: item["count"] for item in migrated_payload["migrated"]
@@ -72,14 +86,19 @@ def test_cli_backend_option_exports_sqlite_backend(tmp_path, capsys):
     client = tm.TinyMongoClient(str(db_dir), backend="sqlite")
     client.app.users.insert_one({"_id": 1, "name": "Ada"})
 
-    assert cli.main([
-        "export",
-        str(db_dir),
-        "app",
-        "users",
-        "--backend",
-        "sqlite",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "export",
+                str(db_dir),
+                "app",
+                "users",
+                "--backend",
+                "sqlite",
+            ]
+        )
+        == 0
+    )
 
     assert json.loads(capsys.readouterr().out) == [{"_id": 1, "name": "Ada"}]
 
@@ -93,15 +112,20 @@ def test_cli_import_from_stdin_and_replace_mode(tmp_path, monkeypatch, capsys):
         type("Input", (), {"read": lambda self: '[{"_id": 2, "name": "new"}]'})(),
     )
 
-    assert cli.main([
-        "import",
-        str(db_dir),
-        "app",
-        "users",
-        "-",
-        "--mode",
-        "replace",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "import",
+                str(db_dir),
+                "app",
+                "users",
+                "-",
+                "--mode",
+                "replace",
+            ]
+        )
+        == 0
+    )
 
     assert "imported 1 documents" in capsys.readouterr().out
     assert list(client.app.users.find({})) == [{"_id": 2, "name": "new"}]
@@ -122,7 +146,9 @@ def test_cli_migrate_all_databases(tmp_path, capsys):
     client.app.users.insert_one({"_id": 1})
     client.audit.events.insert_one({"_id": "event"})
 
-    assert cli.main(["migrate", str(source), str(target), "--to-backend", "sqlite"]) == 0
+    assert (
+        cli.main(["migrate", str(source), str(target), "--to-backend", "sqlite"]) == 0
+    )
 
     payload = json.loads(capsys.readouterr().out)
     migrated = {
@@ -175,31 +201,41 @@ def test_cli_storage_uri_options_are_passed_through(monkeypatch, tmp_path, capsy
         lambda path, backend, storage_uri=None, dsn=None: ["app"],
     )
 
-    assert cli.main([
-        "export",
-        str(tmp_path),
-        "app",
-        "users",
-        "--backend",
-        "parquet",
-        "--storage-uri",
-        "s3://bucket/root",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "export",
+                str(tmp_path),
+                "app",
+                "users",
+                "--backend",
+                "parquet",
+                "--storage-uri",
+                "s3://bucket/root",
+            ]
+        )
+        == 0
+    )
     assert json.loads(capsys.readouterr().out) == [{"_id": 1}]
 
-    assert cli.main([
-        "migrate",
-        str(tmp_path / "source"),
-        str(tmp_path / "target"),
-        "--from-backend",
-        "parquet",
-        "--to-backend",
-        "parquet",
-        "--source-uri",
-        "s3://source/root",
-        "--target-uri",
-        "s3://target/root",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "migrate",
+                str(tmp_path / "source"),
+                str(tmp_path / "target"),
+                "--from-backend",
+                "parquet",
+                "--to-backend",
+                "parquet",
+                "--source-uri",
+                "s3://source/root",
+                "--target-uri",
+                "s3://target/root",
+            ]
+        )
+        == 0
+    )
 
     assert calls[0] == (str(tmp_path), "parquet", "s3://bucket/root", None)
     assert calls[1] == (
@@ -215,16 +251,21 @@ def test_cli_storage_uri_options_are_passed_through(monkeypatch, tmp_path, capsy
         None,
     )
 
-    assert cli.main([
-        "export",
-        str(tmp_path),
-        "app",
-        "users",
-        "--backend",
-        "postgres",
-        "--dsn",
-        "postgresql://db",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "export",
+                str(tmp_path),
+                "app",
+                "users",
+                "--backend",
+                "postgres",
+                "--dsn",
+                "postgresql://db",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
     assert calls[3] == (str(tmp_path), "postgres", None, "postgresql://db")
 
@@ -254,15 +295,22 @@ def test_cli_storage_uri_inspect_and_db_names(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(cli, "TinyMongoClient", FakeClient)
 
-    assert cli._db_names(str(tmp_path), "parquet", storage_uri="s3://bucket/root") == ["app"]
-    assert cli.main([
-        "inspect",
-        str(tmp_path),
-        "--backend",
-        "parquet",
-        "--storage-uri",
-        "s3://bucket/root",
-    ]) == 0
+    assert cli._db_names(str(tmp_path), "parquet", storage_uri="s3://bucket/root") == [
+        "app"
+    ]
+    assert (
+        cli.main(
+            [
+                "inspect",
+                str(tmp_path),
+                "--backend",
+                "parquet",
+                "--storage-uri",
+                "s3://bucket/root",
+            ]
+        )
+        == 0
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["storage_uri"] == "s3://bucket/root"

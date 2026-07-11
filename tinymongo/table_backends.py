@@ -3,9 +3,14 @@ import importlib
 import os
 import re
 import sqlite3
+import tempfile
+import threading
+from contextlib import contextmanager
 from urllib.parse import parse_qs, unquote, urlparse
+from typing import Optional
 
 from .errors import DuplicateKeyError
+from .parquet_storage import _acquire_rlock, _local_rlocks, portalocker
 
 
 _MISSING = object()
@@ -18,9 +23,7 @@ def _import_optional_driver(module_name, backend_name, install_hint):
     except Exception as exc:  # pragma: no cover - covered through callers
         raise ImportError(
             "{0} backend requires the optional Python driver '{1}'. "
-            "Install it with: {2}".format(
-                backend_name, module_name, install_hint
-            )
+            "Install it with: {2}".format(backend_name, module_name, install_hint)
         ) from exc
 
 
@@ -30,7 +33,9 @@ def _is_object_store_uri(path):
 
 def _join_uri(base, *parts):
     if _is_object_store_uri(base):
-        return "/".join([str(base).rstrip("/")] + [str(part).strip("/") for part in parts])
+        return "/".join(
+            [str(base).rstrip("/")] + [str(part).strip("/") for part in parts]
+        )
     return os.path.join(base, *parts)
 
 
@@ -57,10 +62,18 @@ def _env_bool(name):
 
 def _duckdb_object_store_settings():
     settings = {
-        "s3_region": _env_first("TINYMONGO_S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"),
-        "s3_access_key_id": _env_first("TINYMONGO_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
-        "s3_secret_access_key": _env_first("TINYMONGO_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
-        "s3_session_token": _env_first("TINYMONGO_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+        "s3_region": _env_first(
+            "TINYMONGO_S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"
+        ),
+        "s3_access_key_id": _env_first(
+            "TINYMONGO_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"
+        ),
+        "s3_secret_access_key": _env_first(
+            "TINYMONGO_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"
+        ),
+        "s3_session_token": _env_first(
+            "TINYMONGO_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"
+        ),
         "s3_endpoint": _env_first("TINYMONGO_S3_ENDPOINT", "AWS_ENDPOINT_URL"),
         "s3_url_style": _env_first("TINYMONGO_S3_URL_STYLE"),
         "azure_storage_connection_string": _env_first(
@@ -93,9 +106,7 @@ def _duckdb_secret_sql_from_env():
     if azure_connection:
         statements.append(
             "CREATE OR REPLACE SECRET tinymongo_azure "
-            "(TYPE azure, CONNECTION_STRING {0})".format(
-                _sql_literal(azure_connection)
-            )
+            "(TYPE azure, CONNECTION_STRING {0})".format(_sql_literal(azure_connection))
         )
     return statements
 
@@ -170,20 +181,33 @@ def matches_filter(doc, filter_doc):
                         return False
                 elif operator == "$in":
                     values = operand if isinstance(operand, list) else [operand]
-                    if not exists or not any(_value_matches(actual, item) for item in values):
+                    if not exists or not any(
+                        _value_matches(actual, item) for item in values
+                    ):
                         return False
                 elif operator == "$nin":
                     values = operand if isinstance(operand, list) else [operand]
                     if exists and any(_value_matches(actual, item) for item in values):
                         return False
                 elif operator == "$all":
-                    if not isinstance(actual, list) or not all(item in actual for item in operand):
+                    if not isinstance(actual, list) or not all(
+                        item in actual for item in operand
+                    ):
                         return False
                 elif operator == "$regex":
                     if not exists or re.search(operand, str(actual)) is None:
                         return False
                 elif operator == "$not":
-                    if matches_filter({key: actual}, {key: operand if isinstance(operand, dict) else {"$eq": operand}}):
+                    if matches_filter(
+                        {key: actual},
+                        {
+                            key: (
+                                operand
+                                if isinstance(operand, dict)
+                                else {"$eq": operand}
+                            )
+                        },
+                    ):
                         return False
                 elif operator == "$eq":
                     if not exists or not _value_matches(actual, operand):
@@ -255,7 +279,9 @@ class SQLCompiler(object):
                 params = []
                 for operator, operand in value.items():
                     if operator in ("$eq", "$ne"):
-                        clauses.append("_id {0} ?".format("!=" if operator == "$ne" else "="))
+                        clauses.append(
+                            "_id {0} ?".format("!=" if operator == "$ne" else "=")
+                        )
                         params.append(str(operand))
                     elif operator == "$in":
                         values = operand if isinstance(operand, list) else [operand]
@@ -264,7 +290,9 @@ class SQLCompiler(object):
                         )
                         params.extend(str(item) for item in values)
                     else:
-                        raise ValueError("Unsupported _id SQL operator: {0}".format(operator))
+                        raise ValueError(
+                            "Unsupported _id SQL operator: {0}".format(operator)
+                        )
                 return "(" + " AND ".join(clauses) + ")", params
             return "_id = ?", [str(value)]
 
@@ -288,7 +316,9 @@ class SQLCompiler(object):
                     params.append(operand)
                 elif operator in ("$eq", "$ne"):
                     expression, expression_params = self.json_value(field, operand)
-                    clauses.append(expression + (" != ?" if operator == "$ne" else " = ?"))
+                    clauses.append(
+                        expression + (" != ?" if operator == "$ne" else " = ?")
+                    )
                     params.extend(expression_params)
                     params.append(self._sql_value(operand))
                 elif operator == "$in":
@@ -299,7 +329,9 @@ class SQLCompiler(object):
                     params.extend(expression_params)
                     params.extend(self._sql_value(item) for item in values)
                 else:
-                    raise ValueError("Unsupported SQL filter operator: {0}".format(operator))
+                    raise ValueError(
+                        "Unsupported SQL filter operator: {0}".format(operator)
+                    )
             return "(" + " AND ".join(clauses) + ")", params
 
         expression, expression_params = self.json_value(field, value)
@@ -312,8 +344,8 @@ class SQLCompiler(object):
 
 
 class TableBackend(object):
-    dialect = None
-    extension = None
+    dialect: Optional[str] = None
+    extension: Optional[str] = None
 
     def __init__(
         self,
@@ -338,19 +370,27 @@ class TableBackend(object):
     def list_collections(self):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
-    def create_collection(self, collection):  # pragma: no cover - abstract backend contract
+    def create_collection(
+        self, collection
+    ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
-    def drop_collection(self, collection):  # pragma: no cover - abstract backend contract
+    def drop_collection(
+        self, collection
+    ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
-    def insert_many(self, collection, docs, bypass_document_validation=False):  # pragma: no cover - abstract backend contract
+    def insert_many(
+        self, collection, docs, bypass_document_validation=False
+    ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
     def all_docs(self, collection):
         return self.find(collection, {})
 
-    def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):  # pragma: no cover - abstract backend contract
+    def find(
+        self, collection, filter_doc=None, sort=None, skip=None, limit=None
+    ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
     def find_one(self, collection, filter_doc=None):
@@ -364,11 +404,14 @@ class TableBackend(object):
         updated_ids = []
         for doc in matches:
             updated = self.apply_update(doc, update_doc)
-            self.replace_one(collection, doc["_id"], updated)
-            updated_ids.append(doc["_id"])
+            if updated != doc:
+                self.replace_one(collection, doc["_id"], updated)
+                updated_ids.append(doc["_id"])
         return updated_ids
 
-    def replace_one(self, collection, doc_id, replacement):  # pragma: no cover - abstract backend contract
+    def replace_one(
+        self, collection, doc_id, replacement
+    ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
     def delete_many(self, collection, filter_doc, multi=True):
@@ -379,7 +422,9 @@ class TableBackend(object):
         self.delete_ids(collection, ids)
         return ids
 
-    def delete_ids(self, collection, ids):  # pragma: no cover - abstract backend contract
+    def delete_ids(
+        self, collection, ids
+    ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
     def create_index(self, collection, field):
@@ -472,7 +517,9 @@ class SQLiteTableBackend(TableBackend):
         existed = collection in self.list_collections()
         conn = self._connect()
         try:
-            conn.execute("DROP TABLE IF EXISTS {0}".format(_quote_identifier(collection)))
+            conn.execute(
+                "DROP TABLE IF EXISTS {0}".format(_quote_identifier(collection))
+            )
             conn.commit()
             return existed
         finally:
@@ -508,7 +555,8 @@ class SQLiteTableBackend(TableBackend):
             return [_json_loads(row[0]) for row in rows]
         except Exception:
             return [
-                doc for doc in self._all_docs_unfiltered(collection)
+                doc
+                for doc in self._all_docs_unfiltered(collection)
                 if matches_filter(doc, filter_doc)
             ]
 
@@ -624,7 +672,7 @@ class DuckDBTableBackend(TableBackend):
                 row = conn.execute("SELECT data FROM tinydb WHERE id = 1").fetchone()
             except Exception:  # pragma: no cover - corrupt legacy fallback
                 row = None
-            if row and row[0]:
+            if row and row[0]:  # pragma: no branch
                 data = json.loads(row[0])
                 for collection, docs in data.items():
                     conn.execute(
@@ -653,7 +701,9 @@ class DuckDBTableBackend(TableBackend):
         conn = self._connect()
         try:
             rows = conn.execute("SHOW TABLES").fetchall()
-            return sorted(row[0] for row in rows if not row[0].startswith("__tinymongo_"))
+            return sorted(
+                row[0] for row in rows if not row[0].startswith("__tinymongo_")
+            )
         finally:
             conn.close()
 
@@ -673,7 +723,9 @@ class DuckDBTableBackend(TableBackend):
         existed = collection in self.list_collections()
         conn = self._connect()
         try:
-            conn.execute("DROP TABLE IF EXISTS {0}".format(_quote_identifier(collection)))
+            conn.execute(
+                "DROP TABLE IF EXISTS {0}".format(_quote_identifier(collection))
+            )
             return existed
         finally:
             conn.close()
@@ -716,7 +768,8 @@ class DuckDBTableBackend(TableBackend):
             return [_json_loads(row[0]) for row in rows]
         except Exception:
             return [
-                doc for doc in self._all_docs_unfiltered(collection)
+                doc
+                for doc in self._all_docs_unfiltered(collection)
                 if matches_filter(doc, filter_doc)
             ]
 
@@ -785,6 +838,27 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
     def _collection_path(self, collection):
         return _join_uri(self.directory, collection + ".parquet")
 
+    @contextmanager
+    def _write_lock(self):
+        """Serialize local Parquet read-modify-write operations."""
+        if self._is_object_store:
+            yield
+            return
+
+        lock_path = os.path.join(self.directory, ".tinymongo.lock")
+        rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
+        first_acquire = _acquire_rlock(rlock)
+        file_lock = None
+        try:
+            if first_acquire and portalocker is not None:  # pragma: no branch
+                file_lock = portalocker.Lock(lock_path, timeout=30)
+                file_lock.acquire()
+            yield
+        finally:
+            if file_lock is not None:  # pragma: no branch
+                file_lock.release()
+            rlock.release()
+
     def _connect(self):
         conn = super(ParquetDuckDBBackend, self)._connect()
         if self._is_object_store:
@@ -793,7 +867,9 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
 
     def _load_object_store_extensions(self, conn):
         scheme = urlparse(self.directory).scheme.lower()
-        extensions = ["azure"] if scheme in {"az", "azure", "abfs", "abfss"} else ["httpfs"]
+        extensions = (
+            ["azure"] if scheme in {"az", "azure", "abfs", "abfss"} else ["httpfs"]
+        )
         for extension in extensions:
             for command in ("INSTALL", "LOAD"):
                 try:
@@ -812,7 +888,7 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             finally:
                 conn.close()
             return sorted(
-                os.path.basename(row[0])[:-len(".parquet")]
+                os.path.basename(row[0])[: -len(".parquet")]
                 for row in rows
                 if str(row[0]).endswith(".parquet")
             )
@@ -820,13 +896,13 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
         if not os.path.isdir(self.directory):
             return []
         return sorted(
-            name[:-len(".parquet")]
+            name[: -len(".parquet")]
             for name in os.listdir(self.directory)
             if name.endswith(".parquet")
         )
 
     def create_collection(self, collection):
-        if not self._is_object_store:
+        if not self._is_object_store:  # pragma: no branch
             os.makedirs(self.directory, exist_ok=True)
 
     def drop_collection(self, collection):
@@ -837,10 +913,11 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             else os.path.exists(path)
         )
         if existed:
-            if self._is_object_store:
-                self._write_rows(collection, [])
-            else:
-                os.remove(path)
+            with self._write_lock():
+                if self._is_object_store:
+                    self._write_rows(collection, [])
+                else:
+                    os.remove(path)
         return existed
 
     def _read_all_rows(self, collection):
@@ -859,28 +936,46 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
 
     def _write_rows(self, collection, rows):
         path = self._collection_path(collection)
+        output_path = path
+        tmp = None
+        if not self._is_object_store:  # pragma: no branch
+            fd, tmp = tempfile.mkstemp(
+                prefix="tmp_{0}_".format(collection),
+                suffix=".parquet",
+                dir=self.directory,
+            )
+            os.close(fd)
+            os.remove(tmp)
+            output_path = tmp
         conn = self._connect()
         try:
             conn.execute("CREATE TABLE docs(_id VARCHAR, data VARCHAR)")
-            if rows:
+            if rows:  # pragma: no branch
                 conn.executemany("INSERT INTO docs VALUES (?, ?)", rows)
-            conn.execute("COPY docs TO ? (FORMAT PARQUET)", (path,))
+            conn.execute("COPY docs TO ? (FORMAT PARQUET)", (output_path,))
         finally:
             conn.close()
+        if tmp is not None:  # pragma: no branch
+            try:
+                os.replace(tmp, path)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
 
     def insert_many(self, collection, docs, bypass_document_validation=False):
-        rows = self._read_all_rows(collection)
-        existing = {row[0] for row in rows}
-        new_rows = []
-        for doc in docs:
-            doc_id = str(doc["_id"])
-            if not bypass_document_validation and doc_id in existing:
-                raise DuplicateKeyError("_id:{0} already exists".format(doc["_id"]))
-            if bypass_document_validation and doc_id in existing:
-                rows = [row for row in rows if row[0] != doc_id]
-            new_rows.append((doc_id, _json_dumps(doc)))
-            existing.add(doc_id)
-        self._write_rows(collection, rows + new_rows)
+        with self._write_lock():
+            rows = self._read_all_rows(collection)
+            existing = {row[0] for row in rows}
+            new_rows = []
+            for doc in docs:
+                doc_id = str(doc["_id"])
+                if not bypass_document_validation and doc_id in existing:
+                    raise DuplicateKeyError("_id:{0} already exists".format(doc["_id"]))
+                if bypass_document_validation and doc_id in existing:
+                    rows = [row for row in rows if row[0] != doc_id]
+                new_rows.append((doc_id, _json_dumps(doc)))
+                existing.add(doc_id)
+            self._write_rows(collection, rows + new_rows)
         return list(range(len(new_rows)))
 
     def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):
@@ -906,16 +1001,20 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             ]
 
     def replace_one(self, collection, doc_id, replacement):
-        rows = [
-            (row_id, _json_dumps(replacement) if row_id == str(doc_id) else data)
-            for row_id, data in self._read_all_rows(collection)
-        ]
-        self._write_rows(collection, rows)
+        with self._write_lock():
+            rows = [
+                (row_id, _json_dumps(replacement) if row_id == str(doc_id) else data)
+                for row_id, data in self._read_all_rows(collection)
+            ]
+            self._write_rows(collection, rows)
 
     def delete_ids(self, collection, ids):
-        id_set = {str(doc_id) for doc_id in ids}
-        rows = [row for row in self._read_all_rows(collection) if row[0] not in id_set]
-        self._write_rows(collection, rows)
+        with self._write_lock():
+            id_set = {str(doc_id) for doc_id in ids}
+            rows = [
+                row for row in self._read_all_rows(collection) if row[0] not in id_set
+            ]
+            self._write_rows(collection, rows)
 
 
 class RemoteSQLTableBackend(TableBackend):
@@ -1108,7 +1207,8 @@ class RemoteSQLTableBackend(TableBackend):
             doc = self._find_by_id(collection, filter_doc["_id"])
             return [doc] if doc else []
         return [
-            doc for doc in self._all_docs_unfiltered(collection)
+            doc
+            for doc in self._all_docs_unfiltered(collection)
             if matches_filter(doc, filter_doc)
         ]
 

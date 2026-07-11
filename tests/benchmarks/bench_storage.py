@@ -83,7 +83,9 @@ def run_backend(backend, doc_count, query_count, work_root):
     query_latencies = []
     for index in range(query_count):
         target = "doc-{0}".format(index % doc_count)
-        elapsed, found = _time_call(lambda target=target: collection.find_one({"_id": target}))
+        elapsed, found = _time_call(
+            lambda target=target: collection.find_one({"_id": target})
+        )
         query_latencies.append(elapsed)
         if found is None:
             raise AssertionError("missing document {0}".format(target))
@@ -155,7 +157,9 @@ def main(argv=None):
     work_root = args.work_root or tempfile.mkdtemp(prefix="tinymongo-bench-")
     os.makedirs(work_root, exist_ok=True)
 
-    results = [run_backend(backend, args.docs, args.queries, work_root) for backend in backends]
+    results = [
+        run_backend(backend, args.docs, args.queries, work_root) for backend in backends
+    ]
     payload = {
         "documents": args.docs,
         "queries": args.queries,

@@ -5,11 +5,8 @@ import shutil
 import tinymongo as tm
 
 
-DB_DIR = os.path.abspath("./test_db_multi")
-
-
-def writer_process(proc_id, count, start_value=0):
-    client = tm.TinyMongoClient(DB_DIR)
+def writer_process(db_dir, proc_id, count, start_value=0):
+    client = tm.TinyMongoClient(db_dir)
     db = client.multiDB
     coll = db.multiCollection
 
@@ -21,11 +18,12 @@ def writer_process(proc_id, count, start_value=0):
     coll.insert_many(items)
 
 
-def test_multi_writer_stress():
+def test_multi_writer_stress(tmp_path):
+    db_dir = str(tmp_path / "multi")
     # ensure clean dir
-    if os.path.exists(DB_DIR):
+    if os.path.exists(db_dir):
         try:
-            shutil.rmtree(DB_DIR)
+            shutil.rmtree(db_dir)
         except Exception:
             pass
 
@@ -34,7 +32,7 @@ def test_multi_writer_stress():
 
     procs = []
     for pid in range(num_procs):
-        p = mp.Process(target=writer_process, args=(pid, per_proc, 0))
+        p = mp.Process(target=writer_process, args=(db_dir, pid, per_proc, 0))
         p.start()
         procs.append(p)
 
@@ -42,7 +40,7 @@ def test_multi_writer_stress():
         p.join()
 
     # validate
-    client = tm.TinyMongoClient(DB_DIR)
+    client = tm.TinyMongoClient(db_dir)
     coll = client.multiDB.multiCollection
     all_docs = list(coll.find())
     assert len(all_docs) == num_procs * per_proc

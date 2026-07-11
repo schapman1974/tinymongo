@@ -6,18 +6,15 @@ class TinyMongoError(Exception):
 
 
 class ConnectionFailure(TinyMongoError):
-    """Raised when a connection to the database file cannot be made or is lost.
-    """
+    """Raised when a connection to the database file cannot be made or is lost."""
 
 
 class ConfigurationError(TinyMongoError):
-    """Raised when something is incorrectly configured.
-    """
+    """Raised when something is incorrectly configured."""
 
 
 class OperationFailure(TinyMongoError):
-    """Raised when a database operation fails.
-    """
+    """Raised when a database operation fails."""
 
     def __init__(self, error, code=None, details=None):
         self.__code = code
@@ -26,8 +23,7 @@ class OperationFailure(TinyMongoError):
 
     @property
     def code(self):
-        """The error code returned by the server, if any.
-        """
+        """The error code returned by the server, if any."""
         return self.__code
 
     @property
@@ -59,3 +55,15 @@ class DuplicateKeyError(WriteError):
 
 class InvalidOperation(TinyMongoError):
     """Raised when a client attempts to perform an invalid operation."""
+
+
+class StorageError(TinyMongoError):
+    """Raised when persistent storage cannot be read or written safely."""
+
+
+class StorageCorruptionError(StorageError):
+    """Raised when an existing database file cannot be decoded."""
+
+
+class LockError(StorageError):
+    """Raised when a storage lock cannot be acquired or released safely."""

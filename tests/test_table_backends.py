@@ -1,3 +1,7 @@
+import os
+import sqlite3
+
+import duckdb
 import pytest
 import sys
 from types import SimpleNamespace
@@ -21,6 +25,64 @@ from tinymongo.table_backends import (
     _join_uri,
     matches_filter,
 )
+
+
+def test_successful_filter_operator_branches():
+    doc = {"value": 5, "tags": ["a", "b"], "name": "Ada"}
+    filters = [
+        {"missing": {"$exists": False}},
+        {"value": {"$gt": 4}},
+        {"value": {"$gte": 5}},
+        {"value": {"$lt": 6}},
+        {"value": {"$lte": 5}},
+        {"value": {"$ne": 6}},
+        {"value": {"$in": [4, 5]}},
+        {"value": {"$nin": [6, 7]}},
+        {"tags": {"$all": ["a", "b"]}},
+        {"name": {"$regex": "^A"}},
+        {"value": {"$not": {"$eq": 6}}},
+        {"value": {"$eq": 5}},
+    ]
+    assert all(matches_filter(doc, filter_doc) for filter_doc in filters)
+
+    sql, params = SQLCompiler("sqlite").compile({"missing": {"$exists": True}})
+    assert "NOT (" not in sql
+    assert params == ["$.missing"]
+
+
+def test_backend_noop_update_and_object_store_initialization(tmp_path):
+    backend = SQLiteTableBackend(str(tmp_path / "db.sqlite"))
+    backend.insert_many("items", [{"_id": 1, "active": True}])
+    assert backend.update_many("items", {"_id": 1}, {"$set": {"active": True}}) == []
+
+    object_backend = TableBackend("s3://bucket/db")
+    assert object_backend.path == "s3://bucket/db"
+
+
+def test_legacy_migration_empty_collection_branches(tmp_path):
+    sqlite_path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(str(sqlite_path))
+    conn.execute("CREATE TABLE tinydb(id INTEGER PRIMARY KEY, data TEXT)")
+    conn.execute("INSERT INTO tinydb VALUES(1, ?)", ('{"empty": {}}',))
+    conn.commit()
+    conn.close()
+    assert SQLiteTableBackend(str(sqlite_path)).list_collections() == ["empty"]
+
+    duck_path = tmp_path / "legacy.duckdb"
+    conn = duckdb.connect(str(duck_path))
+    conn.execute("CREATE TABLE tinydb(id INTEGER PRIMARY KEY, data VARCHAR)")
+    conn.execute("INSERT INTO tinydb VALUES(1, ?)", ('{"empty": {}}',))
+    conn.close()
+    assert DuckDBTableBackend(str(duck_path)).list_collections() == ["empty"]
+
+
+def test_parquet_temporary_file_cleanup_branch(tmp_path, monkeypatch):
+    backend = ParquetDuckDBBackend(str(tmp_path / "parquet"))
+    monkeypatch.setattr(os, "replace", lambda source, target: None)
+
+    backend._write_rows("items", [("1", '{"_id": 1}')])
+
+    assert not list((tmp_path / "parquet").glob("tmp_items_*.parquet"))
 
 
 class FakeRemoteStore:
@@ -53,7 +115,9 @@ class FakeRemoteCursor:
                 if metadata_database == database
             )
         elif upper.startswith("DROP TABLE"):
-            self.store.tables.pop(self._table_after(normalized, "TABLE IF EXISTS"), None)
+            self.store.tables.pop(
+                self._table_after(normalized, "TABLE IF EXISTS"), None
+            )
         elif upper.startswith("DELETE FROM") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.discard(tuple(params))
         elif upper.startswith("DELETE FROM"):
@@ -83,7 +147,11 @@ class FakeRemoteCursor:
         table = self._table_after(" ".join(sql.split()), "INTO")
         target = self.store.tables.setdefault(table, {})
         for doc_id, data in rows:
-            if doc_id in target and "CONFLICT" not in sql.upper() and "REPLACE" not in sql.upper():
+            if (
+                doc_id in target
+                and "CONFLICT" not in sql.upper()
+                and "REPLACE" not in sql.upper()
+            ):
                 raise RuntimeError("duplicate key")
             target[doc_id] = data
 
@@ -161,7 +229,10 @@ def test_sql_compiler_branches():
     assert "_id !=" in duckdb.compile({"_id": {"$ne": 1}})[0]
     assert " OR " in duckdb.compile({"$or": [{"name": "Ada"}, {"name": "Grace"}]})[0]
     assert "NOT" in duckdb.compile({"$nor": [{"name": "Ada"}, {"name": "Grace"}]})[0]
-    assert " AND " in duckdb.compile({"$and": [{"age": {"$gt": 1}}, {"age": {"$lt": 9}}]})[0]
+    assert (
+        " AND "
+        in duckdb.compile({"$and": [{"age": {"$gt": 1}}, {"age": {"$lt": 9}}]})[0]
+    )
     assert "NOT" in duckdb.compile({"missing": {"$exists": False}})[0]
     assert "IN" in duckdb.compile({"name": {"$in": ["Ada", "Grace"]}})[0]
     assert "!=" in duckdb.compile({"name": {"$ne": "Ada"}})[0]
@@ -201,14 +272,19 @@ def test_object_store_uri_helpers_and_env_config(monkeypatch):
     assert _is_object_store_uri("gs://bucket/path")
     assert _is_object_store_uri("az://container/path")
     assert not _is_object_store_uri("/tmp/path")
-    assert _join_uri("s3://bucket/prefix/", "/db.parquet") == "s3://bucket/prefix/db.parquet"
+    assert (
+        _join_uri("s3://bucket/prefix/", "/db.parquet")
+        == "s3://bucket/prefix/db.parquet"
+    )
 
     monkeypatch.setenv("TINYMONGO_S3_REGION", "us-west-004")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     monkeypatch.setenv("TINYMONGO_S3_ENDPOINT", "s3.us-west-004.backblazeb2.com")
     monkeypatch.setenv("TINYMONGO_S3_USE_SSL", "false")
-    monkeypatch.setenv("TINYMONGO_DUCKDB_SETUP_SQL", "SET custom_setting='x'; LOAD httpfs;")
+    monkeypatch.setenv(
+        "TINYMONGO_DUCKDB_SETUP_SQL", "SET custom_setting='x'; LOAD httpfs;"
+    )
     monkeypatch.setenv("GOOGLE_HMAC_KEY_ID", "gcs-key")
     monkeypatch.setenv("GOOGLE_HMAC_SECRET", "gcs-secret")
     monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", "UseDevelopmentStorage=true")
@@ -232,7 +308,9 @@ def test_sqlite_backend_duplicate_bypass_drop_and_indexes(tmp_path):
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
 
-    backend.insert_many("users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True)
+    backend.insert_many(
+        "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
+    )
     assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
     assert backend.create_index("users", "name") == "name"
     assert backend.delete_many("users", {"_id": "missing"}) == []
@@ -248,7 +326,9 @@ def test_duckdb_backend_threads_duplicate_bypass_drop(tmp_path):
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
 
-    backend.insert_many("users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True)
+    backend.insert_many(
+        "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
+    )
     assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
     assert backend.delete_many("users", {"_id": "missing"}) == []
     assert backend.drop_collection("users") is True
@@ -269,7 +349,9 @@ def test_parquet_backend_empty_and_duplicate_paths(tmp_path):
     assert backend.list_collections() == ["users"]
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
-    backend.insert_many("users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True)
+    backend.insert_many(
+        "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
+    )
     assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
     assert backend.drop_collection("users") is True
     assert backend.drop_collection("users") is False
@@ -283,7 +365,10 @@ def test_parquet_object_store_paths_and_fake_listing(monkeypatch):
     )
 
     assert backend._is_object_store is True
-    assert backend._collection_path("users") == "s3://bucket/prefix/app.parquet/users.parquet"
+    assert (
+        backend._collection_path("users")
+        == "s3://bucket/prefix/app.parquet/users.parquet"
+    )
 
     class FakeConn:
         def __init__(self):
@@ -339,7 +424,11 @@ def test_parquet_object_store_missing_and_drop_paths(monkeypatch):
 
     written = []
     monkeypatch.setattr(backend, "list_collections", lambda: ["users"])
-    monkeypatch.setattr(backend, "_write_rows", lambda collection, rows: written.append((collection, rows)))
+    monkeypatch.setattr(
+        backend,
+        "_write_rows",
+        lambda collection, rows: written.append((collection, rows)),
+    )
 
     assert backend.drop_collection("users") is True
     assert written == [("users", [])]
@@ -447,10 +536,28 @@ def test_tinymongo_table_backend_api_branches(tmp_path):
     assert one.inserted_id
     assert many.inserted_ids[0]
     assert collection.update_many({}, {"$set": {"active": True}}).modified_count == 2
-    assert collection.replace_one({"email": "missing"}, {"email": "none"}).matched_count == 0
-    assert collection.replace_one({"email": "one@example.com"}, {"email": "one@example.com"}).matched_count == 1
-    assert collection.find_one_and_update({"email": "two@example.com"}, {"$set": {"active": False}})["active"] is True
-    assert collection.find_one_and_update({"email": "missing"}, {"$set": {"active": False}}) is None
+    assert (
+        collection.replace_one({"email": "missing"}, {"email": "none"}).matched_count
+        == 0
+    )
+    assert (
+        collection.replace_one(
+            {"email": "one@example.com"}, {"email": "one@example.com"}
+        ).matched_count
+        == 1
+    )
+    assert (
+        collection.find_one_and_update(
+            {"email": "two@example.com"}, {"$set": {"active": False}}
+        )["active"]
+        is True
+    )
+    assert (
+        collection.find_one_and_update(
+            {"email": "missing"}, {"$set": {"active": False}}
+        )
+        is None
+    )
     assert collection.delete_one({"email": "one@example.com"}).deleted_count == 1
 
 
@@ -463,13 +570,19 @@ def test_optional_driver_error_messages(monkeypatch):
     def missing_import(name):
         raise ModuleNotFoundError(name)
 
-    monkeypatch.setattr("tinymongo.table_backends.importlib.import_module", missing_import)
+    monkeypatch.setattr(
+        "tinymongo.table_backends.importlib.import_module", missing_import
+    )
 
-    with pytest.raises(ImportError, match='pip install "tinymongo\\[postgres\\]"') as postgres:
+    with pytest.raises(
+        ImportError, match='pip install "tinymongo\\[postgres\\]"'
+    ) as postgres:
         PostgresTableBackend("", database="app", dsn="postgresql://db")
     assert "optional Python driver 'psycopg'" in str(postgres.value)
 
-    with pytest.raises(ImportError, match='pip install "tinymongo\\[mysql\\]"') as mysql:
+    with pytest.raises(
+        ImportError, match='pip install "tinymongo\\[mysql\\]"'
+    ) as mysql:
         MySQLTableBackend("", database="app", dsn="mysql://db")
     assert "optional Python driver 'pymysql'" in str(mysql.value)
 
@@ -598,11 +711,13 @@ def test_table_backends_support_nor_operator(tmp_path, backend):
     pytest.importorskip("duckdb") if backend in {"duckdb", "parquet"} else None
     client = tm.TinyMongoClient(str(tmp_path / backend), backend=backend)
     collection = client.app.items
-    collection.insert_many([
-        {"_id": 1, "status": "draft", "score": 2},
-        {"_id": 2, "status": "published", "score": 5},
-        {"_id": 3, "status": "archived", "score": 9},
-    ])
+    collection.insert_many(
+        [
+            {"_id": 1, "status": "draft", "score": 2},
+            {"_id": 2, "status": "published", "score": 5},
+            {"_id": 3, "status": "archived", "score": 9},
+        ]
+    )
 
     matches = collection.find({"$nor": [{"status": "draft"}, {"score": {"$gt": 8}}]})
 

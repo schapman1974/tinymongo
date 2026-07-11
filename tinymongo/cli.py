@@ -63,7 +63,9 @@ def _dump_json(data, path):
 
 
 def cmd_inspect(args):
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
+    client = _client(
+        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+    )
     payload = {"path": args.path, "backend": args.backend, "databases": []}
     if args.storage_uri:
         payload["storage_uri"] = args.storage_uri
@@ -89,14 +91,18 @@ def cmd_list_dbs(args):
 
 
 def cmd_list_collections(args):
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
+    client = _client(
+        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+    )
     for name in sorted(client[args.database].collection_names()):
         print(name)
     return 0
 
 
 def cmd_export(args):
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
+    client = _client(
+        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+    )
     docs = list(client[args.database][args.collection].find({}))
     _dump_json(docs, args.output)
     return 0
@@ -110,7 +116,9 @@ def cmd_import(args):
         if not isinstance(doc, dict):
             raise SystemExit("import input must contain only JSON objects")
 
-    client = _client(args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn)
+    client = _client(
+        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+    )
     collection = client[args.database][args.collection]
     if args.mode == "replace":
         collection.delete_many({})
@@ -128,11 +136,15 @@ def cmd_migrate(args):
         args.target, args.to_backend, storage_uri=args.target_uri, dsn=args.target_dsn
     )
 
-    database_names = [args.database] if args.database else _db_names(
-        args.source,
-        args.from_backend,
-        storage_uri=args.source_uri,
-        dsn=args.source_dsn,
+    database_names = (
+        [args.database]
+        if args.database
+        else _db_names(
+            args.source,
+            args.from_backend,
+            storage_uri=args.source_uri,
+            dsn=args.source_dsn,
+        )
     )
     migrated = []
     for db_name in database_names:
@@ -169,7 +181,9 @@ def build_parser():
     parser = argparse.ArgumentParser(prog="tinymongo")
     subparsers = parser.add_subparsers(dest="command", required=True)
     backend_parser = argparse.ArgumentParser(add_help=False)
-    backend_parser.add_argument("--backend", default="tinydb", choices=SUPPORTED_BACKENDS)
+    backend_parser.add_argument(
+        "--backend", default="tinydb", choices=SUPPORTED_BACKENDS
+    )
     backend_parser.add_argument(
         "--storage-uri",
         help="object storage URI for parquet/parquetv2, for example s3://bucket/prefix",

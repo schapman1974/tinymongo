@@ -9,8 +9,7 @@ class _WriteResult(object):
 
 
 class InsertOneResult(_WriteResult):
-    """The return type for :meth:`~tinymongo.TinyMongoCollection.insert_one`.
-    """
+    """The return type for :meth:`~tinymongo.TinyMongoCollection.insert_one`."""
 
     __slots__ = ("__inserted_id", "__acknowledged", "__eid")
 
@@ -31,8 +30,7 @@ class InsertOneResult(_WriteResult):
 
 
 class InsertManyResult(_WriteResult):
-    """The return type for :meth:`~tinymongo.TinyMongoCollection.insert_many`.
-    """
+    """The return type for :meth:`~tinymongo.TinyMongoCollection.insert_many`."""
 
     __slots__ = ("__inserted_ids", "__acknowledged", "__eids")
 
@@ -58,10 +56,26 @@ class UpdateResult(_WriteResult):
     :meth:`~tinymongo.TinyMongoCollection.replace_one`.
     """
 
-    __slots__ = ("__raw_result", "__acknowledged")
+    __slots__ = (
+        "__raw_result",
+        "__acknowledged",
+        "__matched_count",
+        "__modified_count",
+        "__upserted_id",
+    )
 
-    def __init__(self, raw_result, acknowledged=True):
+    def __init__(
+        self,
+        raw_result,
+        acknowledged=True,
+        matched_count=None,
+        modified_count=None,
+        upserted_id=None,
+    ):
         self.__raw_result = raw_result
+        self.__matched_count = matched_count
+        self.__modified_count = modified_count
+        self.__upserted_id = upserted_id
         super(UpdateResult, self).__init__(acknowledged)
 
     @property
@@ -72,6 +86,8 @@ class UpdateResult(_WriteResult):
     @property
     def matched_count(self):
         """The number of documents matched for this update."""
+        if self.__matched_count is not None:
+            return self.__matched_count
         if isinstance(self.raw_result, list):
             return len(self.raw_result)
         return 0
@@ -79,6 +95,8 @@ class UpdateResult(_WriteResult):
     @property
     def modified_count(self):
         """The number of documents modified."""
+        if self.__modified_count is not None:
+            return self.__modified_count
         if isinstance(self.raw_result, list):
             return len(self.raw_result)
         return 0
@@ -88,7 +106,7 @@ class UpdateResult(_WriteResult):
         """The _id of the inserted document if an upsert took place. Otherwise
         ``None``.
         """
-        return None
+        return self.__upserted_id
 
 
 class DeleteResult(_WriteResult):

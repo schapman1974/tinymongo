@@ -144,7 +144,10 @@ def test_table_backends_support_common_queries(tmp_path, backend):
         ]
     )
 
-    assert [doc["_id"] for doc in coll.find({"age": {"$gte": 36}}).sort("_id", 1)] == [1, 2]
+    assert [doc["_id"] for doc in coll.find({"age": {"$gte": 36}}).sort("_id", 1)] == [
+        1,
+        2,
+    ]
     assert coll.find({"name": {"$in": ["Ada", "Grace"]}}).count() == 2
     assert coll.find({"active": {"$exists": False}}).count() == 1
     assert coll.find({"tags": {"$all": ["math", "space"]}}).count() == 1

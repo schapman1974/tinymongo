@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.2.0] - 2026-07-11
+
+### Added
+- PyMongo-style `upsert=True` support for `update_one()`, `update_many()`, and
+  `replace_one()` across JSON and table-native backends.
+- Basic MongoEngine compatibility for document creation, repeated saves,
+  queries, atomic updates, deletes, counts, and collection drops.
+- Client and database context-manager support with deterministic resource
+  cleanup.
+- Explicit storage, corruption, and lock exception types.
+- Optional dependency groups for DuckDB, Parquet, serialization, PostgreSQL,
+  MariaDB/MySQL, and complete backend installations.
+
+### Changed
+- `update_one()` and `update_many()` now follow PyMongo semantics and require
+  update operators; callers must use `replace_one()` for document replacement.
+- PyMongo, MongoEngine, DuckDB, PyArrow, and serialization support are no longer
+  mandatory core dependencies.
+- TinyDB now allows compatible 3.x releases with `tinydb>=3.2.1,<4`.
+- Python 3.9 is now the minimum supported version, with CI coverage through
+  Python 3.13.
+- Update results now distinguish matched and modified counts and expose
+  PyMongo-shaped raw result metadata.
+
+### Fixed
+- Parquet writes now acquire advisory locks, and table-native Parquet
+  read-modify-write operations use inter-process locking and atomic replacement.
+- Missing-document `delete_one()` calls now return a zero-count result.
+- Corrupt storage and invalid updates now raise explicit errors instead of being
+  silently treated as empty or unmatched operations.
+- Test database paths are isolated so the unit suite no longer rewrites tracked
+  repository fixtures.
+
+### Quality
+- Package statement and branch coverage is enforced at 100% in CI.
+- Black, Ruff, and mypy checks are enforced rather than advisory.
+
 ## [1.1.2] - 2026-07-09
 
 ### Added

@@ -1,9 +1,6 @@
-[![Gitpod Ready-to-Code](https://img.shields.io/badge/Gitpod-Ready--to--Code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/schapman1974/tinymongo) 
-
-
 ![logo](artwork/tinymongo.png)
 
-[![Build Status](https://travis-ci.org/schapman1974/tinymongo.svg?branch=master)](https://travis-ci.org/schapman1974/tinymongo)
+[![CI](https://github.com/schapman1974/tinymongo/actions/workflows/ci.yml/badge.svg)](https://github.com/schapman1974/tinymongo/actions/workflows/ci.yml)
 
 # Purpose
 
@@ -13,8 +10,8 @@ attempt to add an interface familiar to those currently using pymongo.
 
 # Status
 
-TinyMongo targets modern Python 3 and is tested in GitHub Actions on
-Python 3.9, 3.10, and 3.11.
+TinyMongo supports Python 3.9 and newer and is tested in GitHub Actions on
+Python 3.9, 3.11, and 3.13.
 
 # Installation
 
@@ -28,9 +25,8 @@ to the root project directory, and `pip install -e .`
 
 or use `pip install -e git+https://github.com/schapman1974/tinymongo.git#egg=tinymongo`
 
-This
-is a pure python distribution and - thus - should require no external
-compilers or tools besides those contained within Python itself.
+The default JSON backend has a small dependency set. Optional database backends
+may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
 
 # Project notes
 
@@ -92,7 +88,7 @@ You can select another backend with the `backend` argument:
 
 Parquet can also store collection files in object storage by passing
 `storage_uri` or setting `TINYMONGO_STORAGE_URI`. Object-storage Parquet is
-experimental in `1.1.2` and currently uses one Parquet file per collection, so
+experimental in `1.2.0` and currently uses one Parquet file per collection, so
 updates/deletes rewrite that file:
 
 ```python
@@ -111,6 +107,20 @@ Available backends:
 - `parquet` or `parquetv2`: DuckDB-managed Parquet dataset storage using one Parquet file per collection inside a `.parquet` directory.
 - `postgres` or `postgresql`: Remote PostgreSQL storage using one SQL table per database collection.
 - `mysql` or `mariadb`: Remote MariaDB/MySQL storage using one SQL table per database collection.
+
+Install only the drivers you need:
+
+```bash
+pip install "tinymongo[duckdb]"
+pip install "tinymongo[parquet]"
+pip install "tinymongo[postgres]"
+pip install "tinymongo[mysql]"
+pip install "tinymongo[serialization]"
+```
+
+If an optional driver is missing, selecting that backend raises an `ImportError`
+with the corresponding installation command. PyMongo itself is not a runtime
+dependency; it is used only by the development compatibility tests.
 
 | Backend | Dependency | Best fit | Notes |
 | --- | --- | --- | --- |
@@ -216,8 +226,10 @@ and collection counting. Query support includes equality, nested document paths,
 `$gt`, `$gte`, `$lt`, `$lte`, `$ne`, `$nin`, `$in`, `$all`, `$and`, `$or`,
 `$nor`, `$not`, `$regex`, and `$exists`.
 
-Update support includes replacement-style updates plus `$set`, `$unset`, `$inc`,
-`$push`, `$pull`, and `$addToSet`.
+Update support includes `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
+`$addToSet`, including `upsert=True`. As in PyMongo, `update_one()` and
+`update_many()` require update operators; use `replace_one()` for full-document
+replacement.
 
 Collections also expose lightweight in-memory equality indexes:
 
@@ -242,6 +254,33 @@ pytest tests/test_pymongo_contract.py tests/test_pymongo_dropin.py
 PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract
 tests are the supported compatibility boundary for local file-backed usage.
+
+## MongoEngine
+
+Basic MongoEngine CRUD is supported by passing TinyMongo as the client class.
+Use a string primary key because TinyMongo's JSON backend does not persist BSON
+`ObjectId` values:
+
+```python
+import mongoengine as me
+import tinymongo
+
+me.connect(
+    "app",
+    host="mongodb://localhost",
+    mongo_client_class=tinymongo.MongoClient,
+    tinymongo_folder="./tinydb",
+    uuidRepresentation="standard",
+)
+
+class Person(me.Document):
+    id = me.StringField(primary_key=True, default=tinymongo.generate_id)
+    name = me.StringField(required=True)
+```
+
+The tested subset covers document creation, repeated saves, queries, updates,
+deletes, counts, and collection drops. Advanced aggregation, sessions, and
+MongoDB server features remain outside TinyMongo's compatibility scope.
 
 
 # Examples
@@ -325,7 +364,7 @@ To convert your data to a format that is writable to disk TinyDB uses the Python
 To support serialization of complex types you can write
 your own serializers using the `tinydb-serialization` extension.
 
-First you need to install it `pip install tinydb-serialization`
+First install it with `pip install "tinymongo[serialization]"`.
 
 ## Handling datetime objects
 

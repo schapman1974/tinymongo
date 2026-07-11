@@ -67,3 +67,4 @@ venv/*
 
 # test database folder
 test_db/
+test_db_*/
