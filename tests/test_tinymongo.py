@@ -1,24 +1,14 @@
 import os
 import copy
 import json
+import tempfile
 import pytest
 import pymongo
 import tinymongo as tm
 
-# setup the db
-db_name = os.path.abspath("./test_db")
-try:
-    for f in os.listdir(os.path.join(".", db_name)):
-        print("removing file ", f)
-        os.remove(os.path.join(db_name, f))
-except OSError:
-    pass
-
-try:
-    if len(os.listdir(db_name)) == 0:
-        os.rmdir(db_name)
-except OSError:
-    pass
+# Keep this legacy module-level comparison database outside the repository.
+_test_database_directory = tempfile.TemporaryDirectory(prefix="tinymongo-tests-")
+db_name = _test_database_directory.name
 
 tiny_client = tm.TinyMongoClient(db_name)
 tiny_database = tiny_client.tinyDatabase

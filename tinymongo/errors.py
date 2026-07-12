@@ -57,6 +57,10 @@ class InvalidOperation(TinyMongoError):
     """Raised when a client attempts to perform an invalid operation."""
 
 
+class TinyMongoNotSupportedError(TinyMongoError, NotImplementedError):
+    """Raised when TinyMongo cannot honor the requested database semantics."""
+
+
 class StorageError(TinyMongoError):
     """Raised when persistent storage cannot be read or written safely."""
 

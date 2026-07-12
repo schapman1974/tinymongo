@@ -255,6 +255,27 @@ PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract
 tests are the supported compatibility boundary for local file-backed usage.
 
+## Backend capabilities
+
+TinyMongo reports behavior that each configured backend can honor:
+
+```python
+client = TinyMongoClient("./data", backend="sqlite")
+print(client.capabilities())
+print(client.supports("multiprocess_writes"))
+```
+
+The capability map covers persistence, remote and object storage, table-native
+storage, multiprocess writes, native indexes, projections, bulk writes,
+aggregation, sessions, transactions, change streams, and BSON types. Unknown
+capability names raise `ValueError` so configuration mistakes are visible.
+
+Operations whose semantics TinyMongo cannot honor raise
+`TinyMongoNotSupportedError`. This includes sessions, transactions, change
+streams, aggregation pipelines, bulk writes, database commands, non-default
+read/write concerns, and unsupported index specifications. Connection options
+that only describe an ignored network target remain harmless for drop-in use.
+
 ## MongoEngine
 
 Basic MongoEngine CRUD is supported by passing TinyMongo as the client class.

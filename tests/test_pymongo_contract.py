@@ -2,6 +2,7 @@ import sys
 
 import pytest
 import tinymongo
+from tinymongo.errors import TinyMongoNotSupportedError
 
 
 def test_pymongo_shaped_application_code_can_run_with_tinymongo(tmp_path):
@@ -120,3 +121,84 @@ def test_update_many_upsert_creates_one_document(tmp_path):
     assert result.upserted_id is not None
     assert collection.count_documents({}) == 1
     assert collection.find_one({})["profile"]["email"] == "ada@example.com"
+
+
+@pytest.mark.parametrize("backend", ["tinydb", "sqlite", "duckdb", "parquet"])
+def test_backend_capabilities_are_explicit(tmp_path, backend):
+    client = tinymongo.TinyMongoClient(str(tmp_path / backend), backend=backend)
+    capabilities = client.capabilities()
+
+    assert capabilities["backend"] == backend
+    assert capabilities["persistent"] is True
+    assert capabilities["aggregation"] is False
+    assert capabilities["sessions"] is False
+    assert client.supports("multiprocess_writes") is True
+    assert client.supports("aggregation") is False
+
+
+def test_object_storage_capabilities_are_conservative(tmp_path):
+    client = tinymongo.TinyMongoClient(
+        str(tmp_path), backend="parquet", storage_uri="s3://bucket/path"
+    )
+
+    assert client.supports("object_storage") is True
+    assert client.supports("multiprocess_writes") is False
+    with pytest.raises(ValueError, match="Unknown TinyMongo capability"):
+        client.supports("missing")
+    with pytest.raises(ValueError, match="Unknown TinyMongo capability"):
+        client.supports("backend")
+
+
+def test_unsupported_features_fail_loudly(tmp_path):
+    client = tinymongo.TinyMongoClient(str(tmp_path / "db"))
+    database = client.app
+    collection = database.items
+
+    unsupported_calls = [
+        client.start_session,
+        client.watch,
+        database.command,
+        database.watch,
+        collection.aggregate,
+        collection.bulk_write,
+        collection.watch,
+    ]
+    for call in unsupported_calls:
+        with pytest.raises(TinyMongoNotSupportedError):
+            call([])
+
+    with pytest.raises(TinyMongoNotSupportedError, match="single-field"):
+        collection.create_index([("email", 1)])
+    with pytest.raises(TinyMongoNotSupportedError, match="concerns"):
+        collection.with_options(type("Concern", (), {"document": {"w": 2}})())
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda collection: collection.insert_one({"_id": 1}, session=object()),
+        lambda collection: collection.insert_many([], session=object()),
+        lambda collection: collection.find({}, session=object()),
+        lambda collection: collection.find_one({}, session=object()),
+        lambda collection: collection.count_documents({}, session=object()),
+        lambda collection: collection.update_one(
+            {}, {"$set": {"x": 1}}, session=object()
+        ),
+        lambda collection: collection.update_many(
+            {}, {"$set": {"x": 1}}, session=object()
+        ),
+        lambda collection: collection.replace_one({}, {}, session=object()),
+        lambda collection: collection.find_one_and_update(
+            {}, {"$set": {"x": 1}}, session=object()
+        ),
+        lambda collection: collection.find_one_and_replace({}, {}, session=object()),
+        lambda collection: collection.delete_one({}, session=object()),
+        lambda collection: collection.delete_many({}, session=object()),
+        lambda collection: collection.drop(session=object()),
+    ],
+)
+def test_session_options_are_rejected(tmp_path, operation):
+    collection = tinymongo.TinyMongoClient(str(tmp_path / "db")).app.items
+
+    with pytest.raises(TinyMongoNotSupportedError, match="Sessions"):
+        operation(collection)

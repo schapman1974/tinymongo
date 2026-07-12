@@ -24,7 +24,7 @@ from .storage_backends import (
 # from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
 # from .errors import DuplicateKeyError
 from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
-from .errors import DuplicateKeyError, InvalidOperation
+from .errors import DuplicateKeyError, InvalidOperation, TinyMongoNotSupportedError
 
 basestring = str
 
@@ -140,6 +140,13 @@ def _validate_update_document(update_doc):
         or not all(key.startswith("$") for key in update_doc)
     ):
         raise ValueError("update only works with $ operators; use replace_one instead")
+
+
+def _reject_session(kwargs):
+    if kwargs.get("session") is not None:
+        raise TinyMongoNotSupportedError(
+            "Sessions and transactions are not supported by TinyMongo"
+        )
 
 
 def _document_for_upsert(query, update_doc):
@@ -302,6 +309,45 @@ class TinyMongoClient(object):
             "tinymongo": True,
         }
 
+    def capabilities(self):
+        """Describe behavior that the configured backend can honor."""
+        backend = str(self._backend or "tinydb").lower()
+        remote = is_remote_sql_backend(backend)
+        object_storage = bool(self._storage_uri and backend in ("parquet", "parquetv2"))
+        return {
+            "backend": backend,
+            "persistent": True,
+            "remote_storage": remote,
+            "object_storage": object_storage,
+            "table_native": is_table_backend(backend),
+            "multiprocess_writes": not object_storage,
+            "native_indexes": backend == "sqlite",
+            "projections": False,
+            "bulk_writes": False,
+            "aggregation": False,
+            "sessions": False,
+            "transactions": False,
+            "change_streams": False,
+            "bson_types": False,
+        }
+
+    def supports(self, feature):
+        """Return whether a named capability is available."""
+        capabilities = self.capabilities()
+        if feature not in capabilities or feature == "backend":
+            raise ValueError("Unknown TinyMongo capability: {0}".format(feature))
+        return bool(capabilities[feature])
+
+    def start_session(self, *args, **kwargs):
+        raise TinyMongoNotSupportedError(
+            "Sessions and transactions are not supported by TinyMongo"
+        )
+
+    def watch(self, *args, **kwargs):
+        raise TinyMongoNotSupportedError(
+            "Change streams are not supported by TinyMongo"
+        )
+
     def list_database_names(self):
         """Return database names found in the configured local storage folder."""
         extension = storage_extension(self._backend)
@@ -418,6 +464,16 @@ class TinyMongoDatabase(object):
             name = name.tablename
         return self[name].drop()
 
+    def command(self, *args, **kwargs):
+        raise TinyMongoNotSupportedError(
+            "Database commands are not supported by TinyMongo"
+        )
+
+    def watch(self, *args, **kwargs):
+        raise TinyMongoNotSupportedError(
+            "Change streams are not supported by TinyMongo"
+        )
+
     def collection_names(self):
         """Get a list of all the collection names in this database"""
         if self.engine is not None:
@@ -475,7 +531,27 @@ class TinyMongoCollection(object):
 
     def with_options(self, *args, **kwargs):
         """Accept PyMongo collection options that local storage does not use."""
+        options = list(args) + [value for value in kwargs.values() if value is not None]
+        for option in options:
+            document = getattr(option, "document", {})
+            if document:
+                raise TinyMongoNotSupportedError(
+                    "Non-default read and write concerns are not supported"
+                )
         return self
+
+    def aggregate(self, *args, **kwargs):
+        raise TinyMongoNotSupportedError(
+            "Aggregation pipelines are not supported by TinyMongo"
+        )
+
+    def bulk_write(self, *args, **kwargs):
+        raise TinyMongoNotSupportedError("Bulk writes are not supported by TinyMongo")
+
+    def watch(self, *args, **kwargs):
+        raise TinyMongoNotSupportedError(
+            "Change streams are not supported by TinyMongo"
+        )
 
     def __getattr__(self, name):
         """
@@ -505,8 +581,12 @@ class TinyMongoCollection(object):
         self.table = self.parent.tinydb.table(self.tablename)
         self._index_cache = {}
 
-    def create_index(self, key):
+    def create_index(self, key, *args, **kwargs):
         """Create an in-memory equality index for this collection instance."""
+        if not isinstance(key, str) or args or kwargs:
+            raise TinyMongoNotSupportedError(
+                "Only single-field ascending equality indexes are supported"
+            )
         if self.parent.engine is not None:
             return self.parent.engine.create_index(self.tablename, key)
         self._indexes.add(key)
@@ -594,11 +674,12 @@ class TinyMongoCollection(object):
         """
         return self.find().count()
 
-    def count_documents(self, filter=None):
+    def count_documents(self, filter=None, *args, **kwargs):
         """
         Counts the documents in the collection.
         :return: Integer representing the number of documents in the collection.
         """
+        _reject_session(kwargs)
         return self.find(filter).count()
 
     def estimated_document_count(self, *args, **kwargs):
@@ -612,6 +693,7 @@ class TinyMongoCollection(object):
         :return: Returns True when successfully drops a collection. Returns False when collection to drop does not
         exist.
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             return self.parent.engine.drop_collection(self.tablename)
         if self.tablename in self.parent.collection_names():
@@ -647,6 +729,7 @@ class TinyMongoCollection(object):
         :param doc: the document
         :return: InsertOneResult
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             if not isinstance(doc, dict):
                 raise ValueError('"doc" must be a dict')
@@ -703,6 +786,7 @@ class TinyMongoCollection(object):
         :param docs: a list of documents
         :return: InsertManyResult
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             if not isinstance(docs, list):
                 raise ValueError('"insert_many" requires a list input')
@@ -998,6 +1082,7 @@ class TinyMongoCollection(object):
         :param doc: dictionary representing the item to be updated
         :return: UpdateResult
         """
+        _reject_session(kwargs)
         _validate_update_document(doc)
         upsert = kwargs.get("upsert") is True
 
@@ -1074,6 +1159,7 @@ class TinyMongoCollection(object):
         :param doc: dictionary or update document
         :return: UpdateResult
         """
+        _reject_session(kwargs)
         _validate_update_document(doc)
         upsert = kwargs.get("upsert") is True
 
@@ -1142,6 +1228,7 @@ class TinyMongoCollection(object):
         """
         Replaces one document matching the query with the replacement document.
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             item = self.parent.engine.find_one(self.tablename, query)
             if item is None:
@@ -1210,6 +1297,7 @@ class TinyMongoCollection(object):
         """
         Mimics MongoDB's findOneAndUpdate by returning the document before update.
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             item = self.parent.engine.find_one(self.tablename, query)
             if item is None:
@@ -1236,6 +1324,7 @@ class TinyMongoCollection(object):
 
     def find_one_and_replace(self, query, replacement, *args, **kwargs):
         """Replace one document and return its previous or resulting value."""
+        _reject_session(kwargs)
         previous = self.find_one(query)
         result = self.replace_one(query, replacement, *args, **kwargs)
         if previous is None:
@@ -1254,6 +1343,7 @@ class TinyMongoCollection(object):
         :type _filter: Optional[dict]
         :return: cursor containing the search results
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             result = self.parent.engine.find(self.tablename, _filter)
             return TinyMongoCursor(
@@ -1291,13 +1381,14 @@ class TinyMongoCollection(object):
 
         return result
 
-    def find_one(self, _filter=None):
+    def find_one(self, _filter=None, *args, **kwargs):
         """
         Finds one matching query element
 
         :param query: dictionary representing the mongo query
         :return: the resulting document (if found)
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             return self.parent.engine.find_one(self.tablename, _filter)
 
@@ -1314,13 +1405,14 @@ class TinyMongoCollection(object):
             return self.delete_many(spec_or_id)
         return self.delete_one(spec_or_id)
 
-    def delete_one(self, query):
+    def delete_one(self, query, *args, **kwargs):
         """
         Deletes one document from the collection
 
         :param query: dictionary representing the mongo query
         :return: DeleteResult
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=False)
             return DeleteResult(raw_result=result)
@@ -1337,13 +1429,14 @@ class TinyMongoCollection(object):
 
         return DeleteResult(raw_result=result)
 
-    def delete_many(self, query):
+    def delete_many(self, query, *args, **kwargs):
         """
         Removes all items matching the mongo query
 
         :param query: dictionary representing the mongo query
         :return: DeleteResult
         """
+        _reject_session(kwargs)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=True)
             return DeleteResult(raw_result=result)
