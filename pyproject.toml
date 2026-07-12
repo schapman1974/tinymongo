@@ -30,6 +30,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/schapman1974/tinymongo"
 Source = "https://github.com/schapman1974/tinymongo"
+Roadmap = "https://github.com/schapman1974/tinymongo/blob/master/ROADMAP.md"
 
 [project.scripts]
 tinymongo = "tinymongo.cli:main"
