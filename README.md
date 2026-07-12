@@ -30,6 +30,7 @@ may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
 
 # Project notes
 
+- **Roadmap:** See [ROADMAP.md](ROADMAP.md) for planned compatibility, GridFS, Compass, wire-server, and browser work.
 - **Default storage:** TinyMongo uses TinyDB-compatible JSON storage unless another backend is selected.
 - **Table-native backends:** SQLite, DuckDB, and Parquet backends store one real table/file per collection instead of one serialized database blob.
 - **Concurrency:** writes use atomic temp-file replace and optional advisory locks (`portalocker`) to reduce corruption risk under concurrent writers.
