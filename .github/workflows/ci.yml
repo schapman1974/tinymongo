@@ -41,3 +41,47 @@ jobs:
           ruff check .
           black --check .
           mypy --ignore-missing-imports tinymongo
+
+  mongodb-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TINYMONGO_MONGODB_URI: mongodb://127.0.0.1:27017/?directConnection=true
+      TINYMONGO_REQUIRE_MONGODB: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install ".[all]"
+
+      - name: Run real MongoDB compatibility contracts
+        run: >-
+          pytest -o addopts='' -q -m contract tests/contracts
+          --junitxml=contract-results.xml
+
+      - name: Upload compatibility results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mongodb-compatibility-results
+          path: contract-results.xml

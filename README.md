@@ -252,6 +252,26 @@ TinyMongo includes PyMongo-shaped contract tests that run application code with
 pytest tests/test_pymongo_contract.py tests/test_pymongo_dropin.py
 ```
 
+The shared compatibility contracts run the same application-facing behaviors
+against every embedded backend:
+
+```bash
+pytest tests/contracts
+```
+
+To include a real MongoDB server explicitly:
+
+```bash
+TINYMONGO_MONGODB_URI=mongodb://127.0.0.1:27017/?directConnection=true \
+pytest -o addopts='' -q -m 'contract and mongodb' tests/contracts
+```
+
+Use `-m contract` instead of `-m 'contract and mongodb'` to run the complete
+embedded-plus-MongoDB matrix in one session.
+
+PyMongo remains a development dependency for these comparisons; it is not
+required to use TinyMongo at runtime.
+
 PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract
 tests are the supported compatibility boundary for local file-backed usage.

@@ -2,9 +2,13 @@ import os
 import copy
 import json
 import tempfile
+from uuid import uuid4
+
 import pytest
 import pymongo
 import tinymongo as tm
+
+pytestmark = pytest.mark.legacy_mongodb
 
 # Keep this legacy module-level comparison database outside the repository.
 _test_database_directory = tempfile.TemporaryDirectory(prefix="tinymongo-tests-")
@@ -17,22 +21,25 @@ tiny_collection = tiny_database.tinyCollection
 mongo_client = None
 mongo_database = None
 mongo_collection = None
-try:
-    mongo_client = pymongo.MongoClient("localhost:27017", serverSelectionTimeoutMS=2000)
-    # Trigger server selection to verify availability
-    mongo_client.server_info()
-    mongo_database = mongo_client["test-mongodb"]
-    mongo_collection = mongo_database["test-collection"]
-except Exception:
-    mongo_client = None
-    mongo_database = None
-    mongo_collection = None
+mongo_database_name = "tinymongo_legacy_{0}".format(uuid4().hex)
+mongo_uri = os.environ.get("TINYMONGO_MONGODB_URI")
+if mongo_uri:
+    try:
+        mongo_client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+        # Trigger server selection to verify availability
+        mongo_client.server_info()
+        mongo_database = mongo_client[mongo_database_name]
+        mongo_collection = mongo_database["test-collection"]
+    except Exception:
+        mongo_client = None
+        mongo_database = None
+        mongo_collection = None
 
 
 @pytest.fixture()
-def collection(request):
+def collection():
     if mongo_client is None:
-        pytest.skip("MongoDB server not available on localhost:27017")
+        pytest.skip("Set TINYMONGO_MONGODB_URI to run legacy MongoDB comparisons")
 
     # setup the db, clear if necessary
     # todo: the 'drop()' function from pymongo should work in future revisions
@@ -61,13 +68,14 @@ def collection(request):
         tiny_collection.insert_one(new_obj)
         mongo_collection.insert_one(new_obj)
 
-    def fin():
-        tiny_client.close()
-        mongo_client.close()
-
-    request.addfinalizer(finalizer=fin)
-
     return {"tiny": tiny_collection, "mongo": mongo_collection}
+
+
+def teardown_module():
+    tiny_client.close()
+    if mongo_client is not None:
+        mongo_client.drop_database(mongo_database_name)
+        mongo_client.close()
 
 
 def test_initialize_db():
