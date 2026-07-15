@@ -79,12 +79,27 @@ jobs:
           pytest -o addopts='' -q -m contract tests/contracts
           --junitxml=contract-results.xml
 
-      - name: Upload compatibility results
+      - name: Generate compatibility reports
+        if: always()
+        run: |
+          if [ -f contract-results.xml ]; then
+            python scripts/generate_compatibility_report.py contract-results.xml \
+              --json-output compatibility-report.json \
+              --markdown-output compatibility-report.md
+          else
+            echo "::warning::Contract JUnit output was not created; reports cannot be generated"
+          fi
+
+      - name: Upload compatibility results and reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mongodb-compatibility-results
-          path: contract-results.xml
+          path: |
+            contract-results.xml
+            compatibility-report.json
+            compatibility-report.md
+          if-no-files-found: warn
 
   remote-sql-integration:
     runs-on: ubuntu-latest

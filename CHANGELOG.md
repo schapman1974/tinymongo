@@ -7,6 +7,9 @@
   explicit same-process sharing through named `memory://NAME` namespaces.
 - The memory backend now participates in the shared MongoDB compatibility
   contract matrix.
+- Deterministic JSON and Markdown compatibility reports generated from contract
+  JUnit results, including per-backend outcomes, known gaps, and a documented
+  compatibility score.
 - `tinymongo.patch()` context-manager and decorator forms for temporarily
   routing sync and async PyMongo client construction to a configurable
   TinyMongo backend.

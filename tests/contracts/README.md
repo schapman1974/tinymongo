@@ -19,8 +19,18 @@ pytest -o addopts='' -q -m mongodb tests/contracts
 ```
 
 Run the complete embedded-plus-MongoDB matrix in one session with `-m contract`
-and `-o addopts=''`. CI uses that form and publishes its JUnit result file as a
-workflow artifact.
+and `-o addopts=''`. CI uses that form and publishes its JUnit result file plus
+deterministic JSON and Markdown compatibility reports as a workflow artifact.
+
+To generate those reports locally, add
+`--junitxml=contract-results.xml` to the pytest command and run:
+
+```bash
+python scripts/generate_compatibility_report.py contract-results.xml
+```
+
+The scoring rules, complete command, report schema, and CI failure behavior are
+documented in [Compatibility reports](../../docs/COMPATIBILITY_REPORTS.md).
 
 CI also sets `TINYMONGO_REQUIRE_MONGODB=1`, which turns a missing or unreachable
 server into a failure instead of a skip.
