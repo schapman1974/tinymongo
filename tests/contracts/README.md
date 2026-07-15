@@ -1,9 +1,9 @@
 # Compatibility contracts
 
 These tests describe the application-facing behavior TinyMongo intends to share
-with PyMongo and a real MongoDB server. Each contract runs against JSON, SQLite,
-DuckDB, and Parquet during the normal unit suite. The same test item is marked
-`mongodb` for the real server target.
+with PyMongo and a real MongoDB server. Each contract runs against memory, JSON,
+SQLite, DuckDB, and Parquet during the normal unit suite. The same test item is
+marked `mongodb` for the real server target.
 
 Run the embedded backend matrix:
 

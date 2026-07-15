@@ -13,11 +13,13 @@ from uuid import uuid4
 
 from tinydb import Query, TinyDB, where
 from .storage_backends import (
+    clear_memory_namespace,
     get_storage_class,
     get_table_backend,
     is_remote_sql_backend,
     is_table_backend,
     join_storage_uri,
+    list_memory_databases,
     storage_extension,
 )
 
@@ -203,6 +205,24 @@ def _folder_from_mongo_client_args(host, port, kwargs):
     return host
 
 
+def _memory_namespace(foldername):
+    """Return an isolated or explicitly shared process-memory namespace."""
+    address = str(foldername or "").strip()
+    if "://" not in address:
+        return "memory://__anonymous__{0}".format(uuid4().hex), False
+    if not address.lower().startswith("memory://"):
+        raise ValueError("Memory backend addresses must start with memory://")
+
+    name = address[len("memory://") :]
+    if not name or not all(
+        character.isalnum() or character in "._-" for character in name
+    ):
+        raise ValueError(
+            "Memory addresses must use a simple name such as memory://test-suite"
+        )
+    return "memory://{0}".format(name), True
+
+
 class TinyMongoClient(object):
     """Represents the Tiny `db` client"""
 
@@ -210,6 +230,11 @@ class TinyMongoClient(object):
         """Initialize container folder and choose a storage backend."""
         self._foldername = foldername
         self._backend = backend or "tinydb"
+        self._memory_namespace = None
+        self._shared_memory = False
+        if str(self._backend).lower() == "memory":
+            self._memory_namespace, self._shared_memory = _memory_namespace(foldername)
+            self._foldername = self._memory_namespace
         self._threads = kwargs.get("threads")
         self._storage_uri = kwargs.get("storage_uri") or os.environ.get(
             "TINYMONGO_STORAGE_URI"
@@ -218,10 +243,11 @@ class TinyMongoClient(object):
         self._dsn = kwargs.get("dsn") or self._dsn_from_env(self._backend)
         self._databases = {}
         self._closed = False
-        try:
-            os.makedirs(foldername, exist_ok=True)
-        except OSError as x:
-            logger.info("{}".format(x))
+        if self._memory_namespace is None:
+            try:
+                os.makedirs(foldername, exist_ok=True)
+            except OSError as x:
+                logger.info("{}".format(x))
 
     def _dsn_from_env(self, backend):
         backend = str(backend or "").lower()
@@ -250,6 +276,8 @@ class TinyMongoClient(object):
         return self._get_db(key)
 
     def _get_db_path(self, key):
+        if self._memory_namespace is not None:
+            return self._memory_namespace.rstrip("/") + "/" + str(key)
         if is_remote_sql_backend(self._backend):
             return key
         if self._storage_uri and str(self._backend).lower() in ("parquet", "parquetv2"):
@@ -290,6 +318,8 @@ class TinyMongoClient(object):
         for database in self._databases.values():
             database.close()
         self._databases.clear()
+        if self._memory_namespace is not None and not self._shared_memory:
+            clear_memory_namespace(self._memory_namespace)
         self._closed = True
 
     def __enter__(self):
@@ -316,11 +346,11 @@ class TinyMongoClient(object):
         object_storage = bool(self._storage_uri and backend in ("parquet", "parquetv2"))
         return {
             "backend": backend,
-            "persistent": True,
+            "persistent": backend != "memory",
             "remote_storage": remote,
             "object_storage": object_storage,
             "table_native": is_table_backend(backend),
-            "multiprocess_writes": not object_storage,
+            "multiprocess_writes": backend != "memory" and not object_storage,
             "native_indexes": backend == "sqlite",
             "projections": False,
             "bulk_writes": False,
@@ -350,6 +380,8 @@ class TinyMongoClient(object):
 
     def list_database_names(self):
         """Return database names found in the configured local storage folder."""
+        if self._memory_namespace is not None:
+            return list_memory_databases(self._memory_namespace)
         extension = storage_extension(self._backend)
         if is_remote_sql_backend(self._backend):
             engine_class = get_table_backend(self._backend)
@@ -413,7 +445,20 @@ class MongoClient(TinyMongoClient):
         threads = kwargs.pop("threads", None)
         duckdb_config = kwargs.pop("duckdb_config", None)
         dsn = kwargs.pop("dsn", None)
+        explicit_folder = (
+            kwargs.get("tinymongo_folder")
+            or kwargs.get("tinymongo_path")
+            or kwargs.get("foldername")
+            or os.environ.get("TINYMONGO_HOME")
+        )
         foldername = _folder_from_mongo_client_args(host, port, kwargs)
+        if (
+            str(backend).lower() == "memory"
+            and explicit_folder is None
+            and isinstance(host, str)
+            and "://" in host
+        ):
+            foldername = host
         super(MongoClient, self).__init__(
             foldername=foldername,
             backend=backend,
@@ -431,10 +476,19 @@ class TinyMongoDatabase(object):
         """Initialize a TinyDB file named as the db name in the given folder."""
         self.database = database
         self._path = path
-        self._foldername = os.path.dirname(path) or "."
+        self._foldername = (
+            path.rsplit("/", 1)[0]
+            if str(path).startswith("memory://")
+            else os.path.dirname(path) or "."
+        )
         self._storage = storage
         self.engine = engine
         self.tinydb = None if engine is not None else TinyDB(path, storage=storage)
+        self._memory_revision = self._current_memory_revision()
+
+    def _current_memory_revision(self):
+        storage = getattr(self.tinydb, "_storage", None)
+        return getattr(storage, "revision", None)
 
     def _refresh_table(self):
         """Reload the TinyDB database from disk to pick up external writes."""
@@ -445,6 +499,7 @@ class TinyMongoDatabase(object):
         except Exception:
             pass
         self.tinydb = TinyDB(self._path, storage=self._storage)
+        self._memory_revision = self._current_memory_revision()
 
     def __getattr__(self, name):
         """Gets a new or existing collection"""
@@ -516,6 +571,7 @@ class TinyMongoCollection(object):
         self.parent = parent
         self._indexes = set()
         self._index_cache = {}
+        self._memory_revision = None
 
     def __repr__(self):
         """Return collection name"""
@@ -574,12 +630,24 @@ class TinyMongoCollection(object):
             self.parent.engine.create_collection(self.tablename)
             return
         self.table = self.parent.tinydb.table(self.tablename)
+        self._remember_memory_revision()
 
     def _refresh_table(self):
         """Reload the TinyDB database from disk and reset the table object."""
         self.parent._refresh_table()
         self.table = self.parent.tinydb.table(self.tablename)
         self._index_cache = {}
+        self._remember_memory_revision()
+
+    def _remember_memory_revision(self):
+        self._memory_revision = self.parent._memory_revision
+
+    def _refresh_stale_memory_table(self):
+        """Reset TinyDB query caches after another memory client writes."""
+        storage = getattr(self.parent.tinydb, "_storage", None)
+        revision = getattr(storage, "revision", None)
+        if revision is not None and revision != self._memory_revision:
+            self._refresh_table()
 
     def create_index(self, key, *args, **kwargs):
         """Create an in-memory equality index for this collection instance."""
@@ -633,7 +701,19 @@ class TinyMongoCollection(object):
         self._index_cache[key] = index
         return index
 
+    def _acquire_memory_collection_lock(self):
+        storage = getattr(self.parent.tinydb, "_storage", None)
+        memory_lock = getattr(storage, "collection_lock", None)
+        if memory_lock is not None:
+            memory_lock.acquire()
+            return memory_lock, None
+        return None, None
+
     def _acquire_collection_lock(self):
+        memory_lock, portalocker_lock = self._acquire_memory_collection_lock()
+        if memory_lock is not None:
+            return memory_lock, portalocker_lock
+
         lock_path = os.path.join(self.parent._foldername, ".tinymongo.lock")
         from .parquet_storage import _local_rlocks, _acquire_rlock, portalocker
         import threading
@@ -696,7 +776,10 @@ class TinyMongoCollection(object):
         _reject_session(kwargs)
         if self.parent.engine is not None:
             return self.parent.engine.drop_collection(self.tablename)
-        if self.tablename in self.parent.collection_names():
+        rlock, portalocker_lock = self._acquire_memory_collection_lock()
+        try:
+            if self.tablename not in self.parent.collection_names():
+                return False
             if self.table is None:
                 self.build_table()
             self._set_storage_merge_writes(False)
@@ -710,10 +793,8 @@ class TinyMongoCollection(object):
                 return True
             finally:
                 self._set_storage_merge_writes(True)
-            # from tinydb.database import TinyDB
-            # TinyDB().
-        else:
-            return False
+        finally:
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def insert(self, docs, *args, **kwargs):
         """Backwards compatibility with insert"""
@@ -1308,11 +1389,7 @@ class TinyMongoCollection(object):
             self.update_one(query, update, *args, **kwargs)
             return self.find_one(query) if kwargs.get("return_document") else item
 
-        if self.table is None:
-            self.build_table()
-
-        allcond = self.parse_query(query)
-        item = self.table.get(allcond)
+        item = self.find_one(query)
         if item is None:
             result = self.update_one(query, update, *args, **kwargs)
             if result.upserted_id is None:
@@ -1350,36 +1427,40 @@ class TinyMongoCollection(object):
                 result, sort=sort, skip=skip, limit=limit, collection=self
             )
 
-        if self.table is None:
-            self.build_table()
+        rlock, portalocker_lock = self._acquire_memory_collection_lock()
+        try:
+            if self.table is None:
+                self.build_table()
 
-        if _filter is None:
-            result = self.table.all()
-        else:
-            simple = _simple_equality_filter(_filter)
-            if simple is not None:
-                key, value = simple
-                index = self._get_index(key)
-                if index is not None:
-                    return TinyMongoCursor(
-                        list(index.get(value, [])),
-                        sort=sort,
-                        skip=skip,
-                        limit=limit,
-                        collection=self,
-                    )
-            allcond = self.parse_query(_filter)
+            self._refresh_stale_memory_table()
 
-            try:
-                result = self.table.search(allcond)
-            except (AttributeError, TypeError):
-                result = []
+            if _filter is None:
+                result = self.table.all()
+            else:
+                simple = _simple_equality_filter(_filter)
+                if simple is not None:
+                    key, value = simple
+                    index = self._get_index(key)
+                    if index is not None:
+                        return TinyMongoCursor(
+                            list(index.get(value, [])),
+                            sort=sort,
+                            skip=skip,
+                            limit=limit,
+                            collection=self,
+                        )
+                allcond = self.parse_query(_filter)
 
-        result = TinyMongoCursor(
-            result, sort=sort, skip=skip, limit=limit, collection=self
-        )
+                try:
+                    result = self.table.search(allcond)
+                except (AttributeError, TypeError):
+                    result = []
 
-        return result
+            return TinyMongoCursor(
+                result, sort=sort, skip=skip, limit=limit, collection=self
+            )
+        finally:
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def find_one(self, _filter=None, *args, **kwargs):
         """
@@ -1392,12 +1473,18 @@ class TinyMongoCollection(object):
         if self.parent.engine is not None:
             return self.parent.engine.find_one(self.tablename, _filter)
 
-        if self.table is None:
-            self.build_table()
+        rlock, portalocker_lock = self._acquire_memory_collection_lock()
+        try:
+            if self.table is None:
+                self.build_table()
 
-        allcond = self.parse_query(_filter)
+            self._refresh_stale_memory_table()
 
-        return self.table.get(allcond)
+            allcond = self.parse_query(_filter)
+
+            return self.table.get(allcond)
+        finally:
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def remove(self, spec_or_id, multi=True, *args, **kwargs):
         """Backwards compatibility with remove"""
@@ -1417,17 +1504,21 @@ class TinyMongoCollection(object):
             result = self.parent.engine.delete_many(self.tablename, query, multi=False)
             return DeleteResult(raw_result=result)
 
-        item = self.find_one(query)
-        if item is None:
-            return DeleteResult(raw_result=[])
-        self._set_storage_merge_writes(False)
+        rlock, portalocker_lock = self._acquire_memory_collection_lock()
         try:
-            result = self.table.remove(where("_id") == item["_id"])
-            self._invalidate_indexes()
-        finally:
-            self._set_storage_merge_writes(True)
+            item = self.find_one(query)
+            if item is None:
+                return DeleteResult(raw_result=[])
+            self._set_storage_merge_writes(False)
+            try:
+                result = self.table.remove(where("_id") == item["_id"])
+                self._invalidate_indexes()
+            finally:
+                self._set_storage_merge_writes(True)
 
-        return DeleteResult(raw_result=result)
+            return DeleteResult(raw_result=result)
+        finally:
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def delete_many(self, query, *args, **kwargs):
         """
@@ -1441,19 +1532,25 @@ class TinyMongoCollection(object):
             result = self.parent.engine.delete_many(self.tablename, query, multi=True)
             return DeleteResult(raw_result=result)
 
-        items = self.find(query)
-        self._set_storage_merge_writes(False)
+        rlock, portalocker_lock = self._acquire_memory_collection_lock()
         try:
-            result = [self.table.remove(where("_id") == item["_id"]) for item in items]
-            self._invalidate_indexes()
+            items = self.find(query)
+            self._set_storage_merge_writes(False)
+            try:
+                result = [
+                    self.table.remove(where("_id") == item["_id"]) for item in items
+                ]
+                self._invalidate_indexes()
 
-            if query == {}:
-                # need to reset TinyDB's index for docs order consistency
-                self.table._last_id = 0
+                if query == {}:
+                    # need to reset TinyDB's index for docs order consistency
+                    self.table._last_id = 0
+            finally:
+                self._set_storage_merge_writes(True)
+
+            return DeleteResult(raw_result=result)
         finally:
-            self._set_storage_merge_writes(True)
-
-        return DeleteResult(raw_result=result)
+            self._release_collection_lock(rlock, portalocker_lock)
 
 
 class TinyMongoCursor(object):

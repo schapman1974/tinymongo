@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Process-local `memory` backend for isolated tests and temporary data, with
+  explicit same-process sharing through named `memory://NAME` namespaces.
+- The memory backend now participates in the shared MongoDB compatibility
+  contract matrix.
+
 ## [1.2.0] - 2026-07-11
 
 ### Added
