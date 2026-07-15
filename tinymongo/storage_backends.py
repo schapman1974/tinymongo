@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import sqlite3
@@ -18,6 +19,46 @@ duckdb: Any = _duckdb
 
 
 OBJECT_STORAGE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
+
+
+_memory_registry: dict[str, dict[str, Any]] = {}
+_memory_registry_lock = threading.RLock()
+
+
+def _memory_entry(address):
+    """Return the process-local storage entry for a memory database."""
+    with _memory_registry_lock:
+        return _memory_registry.setdefault(
+            str(address),
+            {"data": None, "revision": 0, "lock": threading.RLock()},
+        )
+
+
+def list_memory_databases(namespace):
+    """List databases currently present in a process-local namespace."""
+    prefix = str(namespace).rstrip("/") + "/"
+    with _memory_registry_lock:
+        return sorted(
+            address[len(prefix) :]
+            for address in _memory_registry
+            if address.startswith(prefix) and address[len(prefix) :]
+        )
+
+
+def clear_memory_namespace(namespace):
+    """Remove all databases belonging to an anonymous memory client."""
+    prefix = str(namespace).rstrip("/") + "/"
+    with _memory_registry_lock:
+        entries = [
+            (address, entry)
+            for address, entry in _memory_registry.items()
+            if address.startswith(prefix)
+        ]
+    for address, entry in entries:
+        with entry["lock"]:
+            with _memory_registry_lock:
+                if _memory_registry.get(address) is entry:
+                    _memory_registry.pop(address, None)
 
 
 def is_object_storage_uri(value):
@@ -146,6 +187,43 @@ class AtomicJSONStorage(Storage):
             self._release_lock(rlock, portalocker_lock)
 
 
+class MemoryStorage(AtomicJSONStorage):
+    """TinyDB storage shared by a named address inside the current process."""
+
+    is_memory = True
+
+    def __init__(self, address):
+        self.address = str(address)
+        self.merge_writes = True
+        self._entry = _memory_entry(self.address)
+
+    @property
+    def collection_lock(self):
+        """Return the lock shared by every client using this database."""
+        return self._entry["lock"]
+
+    @property
+    def revision(self):
+        """Return the generation used to invalidate per-collection caches."""
+        with self.collection_lock:
+            return self._entry["revision"]
+
+    def read(self):
+        with self.collection_lock:
+            return copy.deepcopy(self._entry["data"])
+
+    def write(self, data):
+        with self.collection_lock:
+            payload = json.loads(json.dumps(data or {}, ensure_ascii=False))
+            if self.merge_writes and self._entry["data"] is not None:
+                payload = self._merge_data(self._entry["data"], payload)
+            self._entry["data"] = copy.deepcopy(payload)
+            self._entry["revision"] += 1
+
+    def close(self):
+        """Memory remains available to other clients in the process."""
+
+
 class SQLiteStorage(Storage):
     """TinyDB storage backend using SQLite as a single-row JSON store."""
 
@@ -265,6 +343,8 @@ def get_storage_class(name):
 
     backend = str(name).lower()
 
+    if backend == "memory":
+        return MemoryStorage
     if backend in ("tinydb", "json", "postgres", "postgresql", "mysql", "mariadb"):
         return AtomicJSONStorage
     if backend in ("parquet", "parquetv2"):
@@ -277,7 +357,7 @@ def get_storage_class(name):
         return DuckDBStorage
 
     raise ValueError(
-        "Unsupported backend '{0}'. Supported backends: tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
+        "Unsupported backend '{0}'. Supported backends: memory, tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
             name
         )
     )
@@ -285,6 +365,8 @@ def get_storage_class(name):
 
 def storage_extension(name):
     backend = str(name).lower()
+    if backend == "memory":
+        return ""
     if backend in ("tinydb", "json"):
         return ".json"
     if backend in ("parquet", "parquetv2"):
@@ -296,7 +378,7 @@ def storage_extension(name):
     if backend in ("postgres", "postgresql", "mysql", "mariadb"):
         return ""
     raise ValueError(
-        "Unsupported backend '{0}'. Supported backends: tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
+        "Unsupported backend '{0}'. Supported backends: memory, tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
             name
         )
     )

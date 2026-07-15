@@ -11,6 +11,7 @@ from .support import ContractTarget
 
 
 TARGETS = [
+    pytest.param("memory", id="memory"),
     pytest.param("json", id="json"),
     pytest.param("sqlite", id="sqlite"),
     pytest.param("duckdb", id="duckdb"),
@@ -44,7 +45,7 @@ def _mongo_client(uri):
 
 
 @pytest.fixture(params=TARGETS)
-def contract_target(request, tmp_path):
+def contract_target(request, tmp_path, monkeypatch):
     """Yield an isolated collection for a TinyMongo backend or real MongoDB."""
 
     target_name = request.param
@@ -84,10 +85,16 @@ def contract_target(request, tmp_path):
     if backend == "parquet":
         pytest.importorskip("pyarrow")
 
-    client = tinymongo.TinyMongoClient(
-        str(tmp_path / target_name),
-        backend=backend,
-    )
+    if backend == "memory":
+        working_directory = tmp_path / "memory-cwd"
+        working_directory.mkdir()
+        monkeypatch.chdir(working_directory)
+        client = tinymongo.TinyMongoClient(backend=backend)
+    else:
+        client = tinymongo.TinyMongoClient(
+            str(tmp_path / target_name),
+            backend=backend,
+        )
     database = client[database_name]
     try:
         yield ContractTarget(

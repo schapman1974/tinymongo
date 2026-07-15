@@ -78,6 +78,7 @@ TinyMongo defaults to TinyDB's JSON storage:
 You can select another backend with the `backend` argument:
 
 ```python
+    memory_connection = TinyMongoClient(backend="memory")
     parquet_connection = TinyMongoClient("/path/to/folder", backend="parquet")
     sqlite_connection = TinyMongoClient("/path/to/folder", backend="sqlite")
     duckdb_connection = TinyMongoClient("/path/to/folder", backend="duckdb")
@@ -102,6 +103,7 @@ updates/deletes rewrite that file:
 
 Available backends:
 
+- `memory`: Process-local storage that creates no database or lock files. Each unnamed client is isolated; a `memory://NAME` URI explicitly shares a named namespace within one process.
 - `tinydb` or `json`: TinyDB-compatible JSON storage. This is the default and writes `.json` files.
 - `sqlite`: Table-native SQLite storage using one SQL table per collection. This writes `.sqlite` files.
 - `duckdb`: Table-native DuckDB storage using one DuckDB table per collection. This writes `.duckdb` files.
@@ -125,12 +127,48 @@ dependency; it is used only by the development compatibility tests.
 
 | Backend | Dependency | Best fit | Notes |
 | --- | --- | --- | --- |
+| `memory` | None | Isolated tests and temporary data | Creates no files. Named `memory://NAME` namespaces can be shared only within one process. |
 | `tinydb` / `json` | TinyDB | Default local JSON files | Human-readable and simplest to inspect. |
 | `sqlite` | Python standard library | Embedded transactional storage | Uses `_id` primary keys and JSON document payloads in collection tables. |
 | `duckdb` | `duckdb` | SQL-backed local analytics workflows | Uses real DuckDB collection tables and SQL JSON predicates where supported. |
 | `parquet` / `parquetv2` | `duckdb`, `pyarrow` | Columnar local or object-storage workflows | Stores collection Parquet files that DuckDB reads and writes. |
 | `postgres` / `postgresql` | `tinymongo[postgres]` | Remote transactional storage | Stores documents in PostgreSQL tables with JSONB payloads. |
 | `mysql` / `mariadb` | `tinymongo[mysql]` or `tinymongo[mariadb]` | Remote transactional storage | Stores documents in MariaDB/MySQL tables with JSON payloads. |
+
+## In-memory testing and temporary data
+
+For test isolation or scratch data, select the memory backend without a named
+address. Every client receives a separate in-memory database and creates no
+files:
+
+```python
+from tinymongo import TinyMongoClient
+
+client = TinyMongoClient(backend="memory")
+client.app.users.insert_one({"name": "Ada"})
+assert client.app.users.count_documents({}) == 1
+client.close()
+```
+
+Use a named URI only when clients in the same process need to share data. A
+named namespace remains available after a client closes and can be reopened
+until the process exits:
+
+```python
+writer = TinyMongoClient("memory://shared-test", backend="memory")
+writer.app.users.insert_one({"name": "Grace"})
+writer.close()
+
+reader = TinyMongoClient("memory://shared-test", backend="memory")
+assert reader.app.users.find_one({"name": "Grace"}) is not None
+```
+
+Memory data never persists across process restarts, and named namespaces are not
+safe for sharing between processes. Prefer unnamed clients, or unique names, in
+independent tests. Use a durable backend instead when data must survive a test
+run or application restart. The command-line tool intentionally omits the
+memory backend because every CLI invocation exits immediately; use it through
+the Python API instead.
 
 SQLite, DuckDB, and Parquet compile supported Mongo-style filters into SQL over
 the `_id` column and JSON document payload. Unsupported filter shapes fall back

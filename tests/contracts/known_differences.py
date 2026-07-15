@@ -10,6 +10,7 @@ KNOWN_DIFFERENCES = {
         "parquet": "#77: table-native $in does not yet match values inside arrays",
     },
     "cursor_skip_limit": {
+        "memory": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
         "json": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
         "sqlite": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
         "duckdb": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
