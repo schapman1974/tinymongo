@@ -168,7 +168,7 @@ def test_unsupported_features_fail_loudly(tmp_path):
             call([])
 
     with pytest.raises(TinyMongoNotSupportedError, match="single-field"):
-        collection.create_index([("email", 1)])
+        collection.create_index([("email", 1), ("name", 1)])
     with pytest.raises(TinyMongoNotSupportedError, match="concerns"):
         collection.with_options(type("Concern", (), {"document": {"w": 2}})())
 

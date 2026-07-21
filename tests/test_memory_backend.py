@@ -202,7 +202,7 @@ def test_named_clients_share_collection_lifecycle_and_local_index_behavior():
     collection = writer.app.items
     try:
         collection.insert_one({"_id": 1, "name": "Ada"})
-        assert collection.create_index("name") == "name"
+        assert collection.create_index("name") == "name_1"
         assert {index["name"] for index in collection.list_indexes()} == {
             "_id_",
             "name_1",
@@ -372,6 +372,38 @@ def test_stale_cleanup_does_not_remove_a_replacement_memory_entry():
 
     try:
         storage_backends.clear_memory_namespace(namespace)
+        with storage_backends._memory_registry_lock:
+            assert storage_backends._memory_registry[address] is replacement
+    finally:
+        with storage_backends._memory_registry_lock:
+            storage_backends._memory_registry.pop(address, None)
+
+
+def test_clear_memory_database_handles_missing_and_replaced_entries():
+    address = "memory://clear-database-{0}/app".format(uuid4().hex)
+
+    storage_backends.clear_memory_database(address)
+
+    replacement = {
+        "data": {"items": {"1": {"_id": "replacement"}}},
+        "revision": 1,
+        "lock": storage_backends.threading.RLock(),
+    }
+
+    class ReplaceEntryOnAcquire:
+        def __enter__(self):
+            with storage_backends._memory_registry_lock:
+                storage_backends._memory_registry[address] = replacement
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    stale = {"data": None, "revision": 0, "lock": ReplaceEntryOnAcquire()}
+    with storage_backends._memory_registry_lock:
+        storage_backends._memory_registry[address] = stale
+
+    try:
+        storage_backends.clear_memory_database(address)
         with storage_backends._memory_registry_lock:
             assert storage_backends._memory_registry[address] is replacement
     finally:

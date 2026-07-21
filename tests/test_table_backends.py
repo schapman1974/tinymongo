@@ -7,7 +7,13 @@ import sys
 from types import SimpleNamespace
 
 import tinymongo as tm
-from tinymongo.errors import DuplicateKeyError
+from tinymongo.errors import (
+    DuplicateKeyError,
+    OperationFailure,
+    StorageCorruptionError,
+    TinyMongoNotSupportedError,
+)
+from tinymongo.indexes import parse_index_spec
 from tinymongo.table_backends import (
     DuckDBTableBackend,
     MySQLTableBackend,
@@ -22,9 +28,18 @@ from tinymongo.table_backends import (
     _duckdb_setup_sql_from_env,
     _import_optional_driver,
     _is_object_store_uri,
+    _json_loads,
     _join_uri,
+    _reject_remote_unique_arrays,
     matches_filter,
+    requires_python_filter,
 )
+
+
+def test_json_loader_accepts_remote_driver_decoded_documents():
+    document = {"_id": 1, "nested": {"value": True}}
+
+    assert _json_loads(document) is document
 
 
 def test_successful_filter_operator_branches():
@@ -47,7 +62,8 @@ def test_successful_filter_operator_branches():
 
     sql, params = SQLCompiler("sqlite").compile({"missing": {"$exists": True}})
     assert "NOT (" not in sql
-    assert params == ["$.missing"]
+    assert "$" in sql and "missing" in sql
+    assert params == []
 
 
 def test_backend_noop_update_and_object_store_initialization(tmp_path):
@@ -57,6 +73,8 @@ def test_backend_noop_update_and_object_store_initialization(tmp_path):
 
     object_backend = TableBackend("s3://bucket/db")
     assert object_backend.path == "s3://bucket/db"
+    with object_backend._write_lock():
+        assert object_backend.path == "s3://bucket/db"
 
 
 def test_legacy_migration_empty_collection_branches(tmp_path):
@@ -89,6 +107,8 @@ class FakeRemoteStore:
     def __init__(self):
         self.tables = {}
         self.metadata = set()
+        self.indexes = {}
+        self.index_ddl = []
 
 
 class FakeRemoteCursor:
@@ -101,12 +121,29 @@ class FakeRemoteCursor:
         upper = normalized.upper()
         if upper.startswith("CREATE TABLE"):
             table = self._table_from_create(normalized)
-            if "TINYMONGO_COLLECTIONS" not in table:
+            if "TINYMONGO_" not in table.upper():
                 self.store.tables.setdefault(table, {})
+        elif upper.startswith(("CREATE INDEX", "CREATE UNIQUE INDEX")):
+            self.store.index_ddl.append(normalized)
+        elif upper.startswith(("ALTER TABLE", "DROP INDEX")):
+            self.store.index_ddl.append(normalized)
+        elif upper.startswith("INSERT") and "TINYMONGO_INDEXES" in upper:
+            database, collection, name, field, unique = params
+            self.store.indexes[(database, collection, name)] = (field, bool(unique))
         elif upper.startswith("INSERT") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.add(tuple(params))
         elif upper.startswith("SELECT DISTINCT"):
             self.rows = sorted({(database,) for database, _ in self.store.metadata})
+        elif upper.startswith("SELECT INDEX_NAME"):
+            database, collection = params
+            self.rows = sorted(
+                (name, field, unique)
+                for (index_database, index_collection, name), (
+                    field,
+                    unique,
+                ) in self.store.indexes.items()
+                if index_database == database and index_collection == collection
+            )
         elif upper.startswith("SELECT COLLECTION_NAME"):
             database = params[0]
             self.rows = sorted(
@@ -120,6 +157,19 @@ class FakeRemoteCursor:
             )
         elif upper.startswith("DELETE FROM") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.discard(tuple(params))
+        elif upper.startswith("DELETE FROM") and "TINYMONGO_INDEXES" in upper:
+            if len(params) == 2:
+                database, collection = params
+                names = [
+                    key
+                    for key in self.store.indexes
+                    if key[:2] == (database, collection)
+                ]
+                for key in names:
+                    self.store.indexes.pop(key, None)
+            else:
+                database, collection, name = params
+                self.store.indexes.pop((database, collection, name), None)
         elif upper.startswith("DELETE FROM"):
             self.store.tables.setdefault(self._table_after(normalized, "FROM"), {}).pop(
                 params[0], None
@@ -218,12 +268,53 @@ def test_matches_filter_operator_edges():
     assert not matches_filter(doc, {"name": {"$unknown": "Ada"}})
 
 
+def test_array_equality_supports_exact_arrays_and_scalar_membership():
+    document = {"items": [1, 2], "nested": [["a", "b"], ["c"]]}
+
+    assert matches_filter(document, {"items": [1, 2]})
+    assert matches_filter(document, {"items": 2})
+    assert matches_filter(document, {"nested": ["a", "b"]})
+    assert not matches_filter(document, {"items": [2, 1]})
+
+
+def test_python_filter_error_and_option_edges():
+    doc = {"value": 5, "name": "Ada"}
+
+    assert not matches_filter(doc, {"value": {"$gt": "not-a-number"}})
+    assert not matches_filter(doc, {"name": {"$regex": "["}})
+    assert not matches_filter(doc, {"name": {"$options": "i"}})
+    assert requires_python_filter({"$where": True})
+    assert not requires_python_filter({"$and": [{"_id": 1}]})
+
+
+@pytest.mark.parametrize("backend_class", [SQLiteTableBackend, DuckDBTableBackend])
+def test_local_table_find_falls_back_when_sql_compilation_fails(
+    tmp_path, monkeypatch, backend_class
+):
+    suffix = "sqlite" if backend_class is SQLiteTableBackend else "duckdb"
+    backend = backend_class(str(tmp_path / ("fallback." + suffix)))
+    backend.insert_many(
+        "items",
+        [
+            {"_id": 1, "name": "Ada"},
+            {"_id": 2, "name": "Grace"},
+        ],
+    )
+
+    def fail_compile(_filter_doc):
+        raise ValueError("forced compiler failure")
+
+    monkeypatch.setattr(backend.compiler, "compile", fail_compile)
+
+    assert backend.find("items", {"_id": 2}) == [{"_id": 2, "name": "Grace"}]
+
+
 def test_sql_compiler_branches():
     sqlite = SQLCompiler("sqlite")
     duckdb = SQLCompiler("duckdb")
 
     assert sqlite.compile({}) == ("", [])
-    assert "$.name" in sqlite.compile({"name": "Ada"})[1]
+    assert "json_extract(data, '$.\"name\"')" in sqlite.compile({"name": "Ada"})[0]
     assert duckdb.compile({"active": True})[1][-1] == "true"
     assert "_id IN" in duckdb.compile({"_id": {"$in": [1, 2]}})[0]
     assert "_id !=" in duckdb.compile({"_id": {"$ne": 1}})[0]
@@ -250,7 +341,15 @@ def test_table_backend_abstract_methods(tmp_path):
     assert backend.close() is None
     backend.find = lambda collection, filter_doc=None: [{"_id": 1}]
     assert backend.all_docs("anything") == [{"_id": 1}]
-    assert backend.create_index("anything", "field") == "field"
+    assert backend.create_index("anything", "field") == "field_1"
+    assert backend.create_index("anything", "field") == "field_1"
+    assert (
+        backend.create_index("anything", parse_index_spec("email", unique=True))
+        == "email_1"
+    )
+    assert backend.drop_index("anything", "email") is None
+    with pytest.raises(OperationFailure, match="Index not found"):
+        backend.drop_index("anything", "missing")
     assert backend.drop_index("anything", "field") is None
     assert backend.list_indexes("anything") == [{"name": "_id_", "key": [("_id", 1)]}]
     with pytest.raises(NotImplementedError):
@@ -308,14 +407,165 @@ def test_sqlite_backend_duplicate_bypass_drop_and_indexes(tmp_path):
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
 
-    backend.insert_many(
-        "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
-    )
-    assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
-    assert backend.create_index("users", "name") == "name"
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many(
+            "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
+        )
+    assert backend.find_one("users", {"_id": 1})["name"] == "Ada"
+    assert backend.create_index("users", "name") == "name_1"
     assert backend.delete_many("users", {"_id": "missing"}) == []
     assert backend.drop_collection("users") is True
     assert backend.drop_collection("users") is False
+
+
+def test_sqlite_unique_index_uses_durable_native_ddl(tmp_path):
+    path = str(tmp_path / "db.sqlite")
+    backend = SQLiteTableBackend(path)
+    spec = parse_index_spec("value", unique=True, name="typed_value")
+
+    assert backend.create_index("values", spec) == "typed_value"
+    physical_name = backend._physical_index_name("values", spec)
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (physical_name,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert "CREATE UNIQUE INDEX" in row[0]
+    assert "tinymongo_unique_token" in row[0]
+    backend.insert_many(
+        "values",
+        [
+            {"_id": 1, "value": 1.0},
+            {"_id": 2, "value": 1.0000000000000002},
+        ],
+    )
+    where, params = backend.compiler.compile({"value": 1.0})
+    conn = sqlite3.connect(path)
+    try:
+        plan = conn.execute(
+            'EXPLAIN QUERY PLAN SELECT data FROM "values"' + where, params
+        ).fetchall()
+    finally:
+        conn.close()
+    assert any(physical_name + "_lookup" in item[-1] for item in plan)
+    assert SQLiteTableBackend(path).list_indexes("values")[-1]["name"] == (
+        "typed_value"
+    )
+
+    backend.drop_index("values", "typed_value")
+    conn = sqlite3.connect(path)
+    try:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                (physical_name,),
+            ).fetchone()
+            is None
+        )
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                (physical_name + "_lookup",),
+            ).fetchone()
+            is None
+        )
+    finally:
+        conn.close()
+
+
+def test_sqlite_unique_index_keeps_distinct_arbitrary_precision_integers(tmp_path):
+    backend = SQLiteTableBackend(str(tmp_path / "large-integers.sqlite"))
+    backend.insert_many(
+        "values",
+        [
+            {"_id": 1, "value": 2**63},
+            {"_id": 2, "value": 2**63 + 1},
+        ],
+    )
+
+    assert (
+        backend.create_index("values", parse_index_spec("value", unique=True))
+        == "value_1"
+    )
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many("values", [{"_id": 3, "value": 2**63 + 1}])
+
+
+def test_sqlite_public_index_lookup_unions_scalar_and_array_matches(
+    tmp_path, monkeypatch
+):
+    client = tm.TinyMongoClient(str(tmp_path), backend="sqlite")
+    collection = client.app.people
+    collection.insert_many(
+        [
+            {"_id": 1, "email": "ada@example.com"},
+            {"_id": 2, "email": ["ada@example.com", "other@example.com"]},
+            {"_id": 3, "email": "grace@example.com"},
+        ]
+    )
+    collection.create_index("email", name="email_lookup")
+
+    backend = collection.parent.engine
+    traced_sql = []
+    original_connect = backend._connect
+
+    def traced_connect():
+        conn = original_connect()
+        conn.set_trace_callback(traced_sql.append)
+        return conn
+
+    monkeypatch.setattr(backend, "_connect", traced_connect)
+
+    assert [doc["_id"] for doc in collection.find({"email": "ada@example.com"})] == [
+        1,
+        2,
+    ]
+    assert any("json_type" in sql and "IN ('text'" in sql for sql in traced_sql)
+    assert any("json_type" in sql and "= 'array'" in sql for sql in traced_sql)
+
+    spec = parse_index_spec("email", name="email_lookup")
+    where, params = backend.compiler.compile({"email": "ada@example.com"})
+    path = "'$.\"email\"'"
+    sql = (
+        'EXPLAIN QUERY PLAN SELECT data FROM "people"'
+        + where
+        + " AND json_type(data, {0}) IN "
+        "('text', 'integer', 'real', 'true', 'false')".format(path)
+    )
+    conn = original_connect()
+    try:
+        plan = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+    assert any(backend._physical_index_name("people", spec) in row[-1] for row in plan)
+    client.close()
+
+
+def test_sqlite_maps_native_replace_and_index_integrity_errors(tmp_path, monkeypatch):
+    backend = SQLiteTableBackend(str(tmp_path / "db.sqlite"))
+
+    class FailingConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.IntegrityError("native unique conflict")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backend, "create_collection", lambda collection: None)
+    monkeypatch.setattr(backend, "find", lambda collection, filter_doc: [])
+    monkeypatch.setattr(backend, "validate_unique_post_image", lambda *args: None)
+    monkeypatch.setattr(backend, "get_index_specs", lambda collection: [])
+    monkeypatch.setattr(backend, "_connect", FailingConnection)
+
+    with pytest.raises(DuplicateKeyError, match="native unique conflict"):
+        backend.replace_one("users", 1, {"_id": 1})
+    with pytest.raises(DuplicateKeyError, match="native unique conflict"):
+        backend.create_index("users", parse_index_spec("email"))
 
 
 def test_duckdb_backend_threads_duplicate_bypass_drop(tmp_path):
@@ -326,13 +576,34 @@ def test_duckdb_backend_threads_duplicate_bypass_drop(tmp_path):
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
 
-    backend.insert_many(
-        "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
-    )
-    assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many(
+            "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
+        )
+    assert backend.find_one("users", {"_id": 1})["name"] == "Ada"
     assert backend.delete_many("users", {"_id": "missing"}) == []
     assert backend.drop_collection("users") is True
     assert backend.drop_collection("users") is False
+
+
+def test_duckdb_does_not_mask_non_constraint_insert_errors(tmp_path, monkeypatch):
+    pytest.importorskip("duckdb")
+    backend = DuckDBTableBackend(str(tmp_path / "db.duckdb"))
+
+    class FailingConnection:
+        def executemany(self, *args, **kwargs):
+            raise RuntimeError("duckdb execution failed")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backend, "create_collection", lambda collection: None)
+    monkeypatch.setattr(backend, "find", lambda collection, filter_doc: [])
+    monkeypatch.setattr(backend, "validate_unique_post_image", lambda *args: None)
+    monkeypatch.setattr(backend, "_connect", FailingConnection)
+
+    with pytest.raises(RuntimeError, match="duckdb execution failed"):
+        backend.insert_many("users", [{"_id": 1}])
 
 
 def test_parquet_backend_empty_and_duplicate_paths(tmp_path):
@@ -349,12 +620,37 @@ def test_parquet_backend_empty_and_duplicate_paths(tmp_path):
     assert backend.list_collections() == ["users"]
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
-    backend.insert_many(
-        "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
-    )
-    assert backend.find_one("users", {"_id": 1})["name"] == "Grace"
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many(
+            "users", [{"_id": 1, "name": "Grace"}], bypass_document_validation=True
+        )
+    assert backend.find_one("users", {"_id": 1})["name"] == "Ada"
     assert backend.drop_collection("users") is True
     assert backend.drop_collection("users") is False
+
+
+def test_parquet_empty_index_collection_and_corrupt_catalog_fail_closed(tmp_path):
+    pytest.importorskip("duckdb")
+    backend = ParquetDuckDBBackend(str(tmp_path / "parquet"))
+
+    backend.create_index("empty", parse_index_spec("email", unique=True))
+    assert "empty" in backend.list_collections()
+    assert backend.drop_collection("empty") is True
+    assert backend.get_index_specs("empty") == []
+
+    backend.create_index("metadata_only", parse_index_spec("email"))
+    os.remove(backend._collection_path("metadata_only"))
+    assert backend.drop_collection("metadata_only") is True
+    assert backend.get_index_specs("metadata_only") == []
+
+    backend.create_index("users", parse_index_spec("email", unique=True))
+    with open(backend._collection_path("__tinymongo_indexes"), "wb") as handle:
+        handle.write(b"not a parquet file")
+
+    with pytest.raises(StorageCorruptionError, match="Cannot read Parquet"):
+        backend.get_index_specs("users")
+    with pytest.raises(StorageCorruptionError, match="Cannot read Parquet"):
+        backend.insert_many("users", [{"_id": 1, "email": "same@example.com"}])
 
 
 def test_parquet_object_store_paths_and_fake_listing(monkeypatch):
@@ -431,7 +727,7 @@ def test_parquet_object_store_missing_and_drop_paths(monkeypatch):
     )
 
     assert backend.drop_collection("users") is True
-    assert written == [("users", [])]
+    assert written == [("users", []), ("__tinymongo_indexes", [])]
 
 
 def test_duckdb_object_store_connection_configuration(tmp_path, monkeypatch):
@@ -519,7 +815,7 @@ def test_tinymongo_table_backend_api_branches(tmp_path):
     collection = db.users
 
     assert collection.any_attribute is collection
-    assert collection.create_index("email") == "email"
+    assert collection.create_index("email") == "email_1"
     assert collection.drop_index("email") is None
     assert collection.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
     assert collection.drop() is True
@@ -586,7 +882,7 @@ def test_optional_driver_error_messages(monkeypatch):
         MySQLTableBackend("", database="app", dsn="mysql://db")
     assert "optional Python driver 'pymysql'" in str(mysql.value)
 
-    with pytest.raises(ImportError, match="pip install duckdb") as duckdb:
+    with pytest.raises(ImportError, match=r"tinymongo\[duckdb\]") as duckdb:
         DuckDBTableBackend("db.duckdb")
     assert "optional Python driver 'duckdb'" in str(duckdb.value)
 
@@ -621,10 +917,220 @@ def test_remote_sql_backend_defensive_edges(monkeypatch):
     assert backend._commit(BadConn()) is None
     assert backend._close_cursor(BadCursor()) is None
     assert backend._data_placeholder() == "%s"
+    with backend._write_lock():
+        pass
+
+    postgres_duplicate = RuntimeError("conflict")
+    postgres_duplicate.sqlstate = "23505"
+    assert backend._is_duplicate_error(postgres_duplicate)
+    assert backend._is_duplicate_error(RuntimeError(1062, "duplicate entry"))
+    assert backend._is_duplicate_error(RuntimeError("unique constraint failed"))
+    assert not backend._is_duplicate_error(RuntimeError("syntax error"))
 
     monkeypatch.setattr(backend, "create_collection", lambda collection: None)
     assert backend.delete_ids("users", []) is None
-    assert backend.create_index("users", "email") == "email"
+    with pytest.raises(NotImplementedError):
+        backend._create_native_index(None, "users", parse_index_spec("email"))
+    with pytest.raises(NotImplementedError):
+        backend._drop_native_index(None, "users", parse_index_spec("email"))
+
+
+def _postgres_backend(monkeypatch, store):
+    fake_psycopg = SimpleNamespace(connect=lambda dsn: FakeRemoteConnection(store))
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    return PostgresTableBackend("", database="app", dsn="postgresql://db")
+
+
+def _mysql_backend(monkeypatch, store):
+    monkeypatch.setitem(
+        sys.modules,
+        "pymysql",
+        SimpleNamespace(connect=lambda **kwargs: FakeRemoteConnection(store)),
+    )
+    return MySQLTableBackend("", database="app", dsn="mysql://localhost/db")
+
+
+def test_postgres_indexes_are_native_durable_unique_and_droppable(monkeypatch):
+    store = FakeRemoteStore()
+    backend = _postgres_backend(monkeypatch, store)
+    backend.insert_many(
+        "users",
+        [
+            {"_id": 1, "email": "one@example.com"},
+            {"_id": 2, "email": "two@example.com"},
+        ],
+    )
+
+    spec = parse_index_spec("email", unique=True)
+    assert backend.create_index("users", spec) == "email_1"
+    ddl_count = len(store.index_ddl)
+    assert backend.create_index("users", spec) == "email_1"
+    assert len(store.index_ddl) == ddl_count
+    assert backend.list_indexes("users") == [
+        {"name": "_id_", "key": [("_id", 1)]},
+        {"name": "email_1", "key": [("email", 1)], "unique": True},
+    ]
+    assert _postgres_backend(monkeypatch, store).list_indexes("users") == (
+        backend.list_indexes("users")
+    )
+    assert any(
+        "CREATE UNIQUE INDEX" in sql
+        and "COALESCE(jsonb_extract_path(data, 'email'), 'null'::jsonb)" in sql
+        for sql in store.index_ddl
+    )
+
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many("users", [{"_id": 3, "email": "one@example.com"}])
+    with pytest.raises(DuplicateKeyError):
+        backend.replace_one("users", 2, {"_id": 2, "email": "one@example.com"})
+
+    backend.drop_index("users", "email_1")
+    assert backend.list_indexes("users") == [{"name": "_id_", "key": [("_id", 1)]}]
+    assert any(sql.startswith("DROP INDEX IF EXISTS") for sql in store.index_ddl)
+    with pytest.raises(OperationFailure, match="Index not found"):
+        backend.drop_index("users", "email")
+
+
+def test_remote_unique_creation_preflights_and_drop_cleans_catalog(monkeypatch):
+    store = FakeRemoteStore()
+    backend = _postgres_backend(monkeypatch, store)
+    backend.insert_many(
+        "users",
+        [
+            {"_id": 1, "email": "same@example.com"},
+            {"_id": 2, "email": "same@example.com"},
+        ],
+    )
+
+    with pytest.raises(DuplicateKeyError):
+        backend.create_index("users", parse_index_spec("email", unique=True))
+    assert backend.list_indexes("users") == [{"name": "_id_", "key": [("_id", 1)]}]
+    assert not store.index_ddl
+
+    backend.create_index("users", parse_index_spec("email"))
+    with pytest.raises(OperationFailure, match="different options"):
+        backend.create_index("users", parse_index_spec("email", unique=True))
+    assert backend.drop_collection("users") is True
+    assert not store.indexes
+
+
+def test_remote_native_errors_are_mapped_without_hiding_other_failures(monkeypatch):
+    store = FakeRemoteStore()
+    backend = _postgres_backend(monkeypatch, store)
+    backend.insert_many("users", [{"_id": 1, "email": "one@example.com"}])
+    original_execute = backend._execute
+
+    def fail_update(message):
+        def execute(conn, sql, params=None):
+            if sql.lstrip().upper().startswith("UPDATE"):
+                raise RuntimeError(message)
+            return original_execute(conn, sql, params)
+
+        return execute
+
+    monkeypatch.setattr(backend, "_execute", fail_update("duplicate key"))
+    with pytest.raises(DuplicateKeyError):
+        backend.replace_one("users", 1, {"_id": 1, "email": "changed@example.com"})
+
+    monkeypatch.setattr(backend, "_execute", fail_update("syntax error"))
+    with pytest.raises(RuntimeError, match="syntax error"):
+        backend.replace_one("users", 1, {"_id": 1, "email": "changed@example.com"})
+
+    def fail_native(conn, collection, spec):
+        raise RuntimeError("duplicate key")
+
+    monkeypatch.setattr(backend, "_execute", original_execute)
+    monkeypatch.setattr(backend, "_create_native_index", fail_native)
+    spec = parse_index_spec("email", unique=True)
+    with pytest.raises(DuplicateKeyError):
+        backend.create_index("users", spec)
+
+    def fail_native_syntax(conn, collection, spec):
+        raise RuntimeError("syntax error")
+
+    monkeypatch.setattr(backend, "_create_native_index", fail_native_syntax)
+    with pytest.raises(RuntimeError, match="syntax error"):
+        backend.create_index("users", spec)
+
+    def fail_insert(conn, collection, rows, bypass_document_validation):
+        raise RuntimeError("insert syntax error")
+
+    monkeypatch.setattr(backend, "_insert_rows", fail_insert)
+    with pytest.raises(RuntimeError, match="insert syntax error"):
+        backend.insert_many("users", [{"_id": 2, "email": "two@example.com"}])
+
+
+def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
+    monkeypatch,
+):
+    store = FakeRemoteStore()
+    backend = _mysql_backend(monkeypatch, store)
+    backend.insert_many(
+        "items",
+        [
+            {"_id": 1, "value": True, "tags": ["a"]},
+            {"_id": 2, "value": 1, "tags": ["b"]},
+        ],
+    )
+
+    backend.create_index("items", parse_index_spec("value", unique=True))
+    with pytest.raises(TinyMongoNotSupportedError, match="does not support array"):
+        backend.create_index(
+            "items", parse_index_spec("tags", unique=True, name="unique_tags")
+        )
+
+    assert _mysql_backend(monkeypatch, store).list_indexes("items") == [
+        {"name": "_id_", "key": [("_id", 1)]},
+        {"name": "value_1", "key": [("value", 1)], "unique": True},
+    ]
+    assert any(
+        "GENERATED ALWAYS AS" in sql
+        and "JSON_TYPE(JSON_EXTRACT(data, '$.\"value\"'))" in sql
+        and "CONCAT('bool:'" in sql
+        and "AS DECIMAL(65, 30)" in sql
+        and "SHA2(CASE" in sql
+        and "CHAR(64) CHARACTER SET ascii COLLATE ascii_bin" in sql
+        for sql in store.index_ddl
+    )
+    assert sum("CREATE UNIQUE INDEX" in sql for sql in store.index_ddl) == 1
+
+    with pytest.raises(TinyMongoNotSupportedError, match="does not support array"):
+        backend.insert_many("items", [{"_id": 3, "value": [3], "tags": ["a"]}])
+
+    backend.drop_index("items", "value_1")
+    assert any(sql.startswith("DROP INDEX") for sql in store.index_ddl)
+    assert any("DROP COLUMN" in sql for sql in store.index_ddl)
+
+    backend.insert_many("numbers", [{"_id": 1, "value": 1}, {"_id": 2, "value": 1.0}])
+    with pytest.raises(DuplicateKeyError):
+        backend.create_index("numbers", parse_index_spec("value", unique=True))
+
+
+def test_remote_array_guard_ignores_nonunique_specs():
+    _reject_remote_unique_arrays(
+        [{"_id": 1, "tags": ["a", "b"]}],
+        [parse_index_spec("tags")],
+    )
+
+
+@pytest.mark.parametrize("backend_name", ["postgres", "mysql"])
+def test_remote_unique_array_writes_fail_closed_across_clients(
+    monkeypatch, backend_name
+):
+    store = FakeRemoteStore()
+    factory = _postgres_backend if backend_name == "postgres" else _mysql_backend
+    first = factory(monkeypatch, store)
+    second = factory(monkeypatch, store)
+    first.create_index("items", parse_index_spec("tags", unique=True))
+    first.insert_many("items", [{"_id": 1, "tags": "a"}])
+
+    with pytest.raises(TinyMongoNotSupportedError, match="multikey uniqueness"):
+        second.insert_many("items", [{"_id": 2, "tags": ["a", "b"]}])
+    with pytest.raises(TinyMongoNotSupportedError, match="multikey uniqueness"):
+        second.replace_one("items", 1, {"_id": 1, "tags": ["a"]})
+
+    assert second.find_one("items", {"_id": 1}) == {"_id": 1, "tags": "a"}
+    assert second.find_one("items", {"_id": 2}) is None
 
 
 def test_postgres_table_backend_with_fake_driver(monkeypatch):
@@ -637,11 +1143,13 @@ def test_postgres_table_backend_with_fake_driver(monkeypatch):
     backend.insert_many("users", [{"_id": 1, "name": "Ada", "age": 36}])
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 1, "name": "Grace"}])
-    backend.insert_many(
-        "users",
-        [{"_id": 1, "name": "Grace", "age": 40}],
-        bypass_document_validation=True,
-    )
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many(
+            "users",
+            [{"_id": 1, "name": "Grace", "age": 40}],
+            bypass_document_validation=True,
+        )
+    backend.replace_one("users", 1, {"_id": 1, "name": "Grace", "age": 40})
 
     assert backend.list_databases() == ["app"]
     assert backend.list_collections() == ["users"]
@@ -674,11 +1182,13 @@ def test_mysql_table_backend_with_fake_driver(monkeypatch):
         dsn="mysql://user:pass@localhost:3307/tinymongo?charset=utf8mb4",
     )
     backend.insert_many("users", [{"_id": "a", "name": "Ada"}])
-    backend.insert_many(
-        "users",
-        [{"_id": "a", "name": "Grace"}],
-        bypass_document_validation=True,
-    )
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many(
+            "users",
+            [{"_id": "a", "name": "Grace"}],
+            bypass_document_validation=True,
+        )
+    backend.replace_one("users", "a", {"_id": "a", "name": "Grace"})
 
     assert seen_kwargs[0]["host"] == "localhost"
     assert seen_kwargs[0]["port"] == 3307

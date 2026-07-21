@@ -59,9 +59,8 @@ def test_projection_like():
     c = client.db.collection
 
     c.insert_one({"_id": "p", "a": 1, "b": 2, "c": 3})
-    doc = c.find_one({"_id": "p"})
-    # projection not implemented; ensure full doc available
-    assert set(doc.keys()) >= {"_id", "a", "b", "c"}
+    doc = c.find_one({"_id": "p"}, {"a": 1, "_id": 0})
+    assert doc == {"a": 1}
 
 
 def test_find_and_modify_semantics():

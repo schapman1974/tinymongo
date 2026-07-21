@@ -4,11 +4,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from tinymongo.errors import DuplicateKeyError as TinyMongoDuplicateKeyError
+from tinymongo.errors import OperationFailure as TinyMongoOperationFailure
 
 try:
     from pymongo.errors import DuplicateKeyError as PyMongoDuplicateKeyError
+    from pymongo.errors import OperationFailure as PyMongoOperationFailure
 except ImportError:  # pragma: no cover - development dependency guard
     PyMongoDuplicateKeyError = ()  # type: ignore[assignment,misc]
+    PyMongoOperationFailure = ()  # type: ignore[assignment,misc]
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,11 @@ def error_category(error: Exception) -> str:
         duplicate_errors = duplicate_errors + (PyMongoDuplicateKeyError,)
     if isinstance(error, duplicate_errors):
         return "duplicate_key"
+    operation_errors = (TinyMongoOperationFailure,)
+    if PyMongoOperationFailure:
+        operation_errors = operation_errors + (PyMongoOperationFailure,)
+    if isinstance(error, operation_errors):
+        return "operation_failure"
     return "{0}.{1}".format(type(error).__module__, type(error).__name__)
 
 

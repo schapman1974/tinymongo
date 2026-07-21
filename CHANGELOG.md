@@ -7,6 +7,59 @@
   explicit same-process sharing through named `memory://NAME` namespaces.
 - The memory backend now participates in the shared MongoDB compatibility
   contract matrix.
+- `tinymongo.patch()` context-manager and decorator forms for temporarily
+  routing sync and async PyMongo client construction to a configurable
+  TinyMongo backend.
+- First-class non-blocking async client, database, collection, and lazy cursor
+  APIs with awaited cleanup and off-thread storage work.
+- Mongo-style inclusion and exclusion projections for `find()` and `find_one()`,
+  including nested dotted paths, array behavior, and compatible `_id` handling.
+- Durable single-field index metadata and unique constraints across JSON,
+  memory, SQLite, DuckDB, Parquet, PostgreSQL, and MariaDB/MySQL backends, with
+  native indexes for SQLite and remote SQL.
+- Batched duck-typed `IndexModel` planning with enforced unique indexes and
+  explicit warnings for safe performance-only degradation.
+- Common PyMongo-shaped APIs for database listing/removal,
+  `find_one_and_delete()`, `distinct()`, index information, and cursor
+  pagination, cloning, closing, and `to_list()`.
+- Tagged `datetime` and optional `ObjectId` round trips across all storage
+  backends, with `bson` and `pymongo` optional dependency groups.
+
+### Changed
+- The second positional argument to `find()` is now the PyMongo-compatible
+  projection argument. Use `sort=` or cursor `.sort()` for ordering.
+- The optional `bson` and `pymongo` dependency groups now require PyMongo 4.9
+  or newer, matching the async client and cursor APIs TinyMongo supports.
+- Nonunique descending and hashed indexes use ascending equality indexes;
+  compound indexes use their ascending leading-field prefix. Sparse and TTL
+  differences emit `TinyMongoUnsupportedWarning`, while unsafe unique
+  degradation still fails before creating a batch.
+- `create_index()` now returns the effective index name, matching PyMongo.
+- PostgreSQL and MariaDB/MySQL unique indexes reject array-valued keys because
+  their native scalar constraints cannot safely guarantee multikey uniqueness
+  across processes.
+
+### Fixed
+- `bypass_document_validation=True` no longer bypasses the built-in unique
+  `_id` constraint.
+- Durable index catalogs now use unambiguous collection/index identities, and
+  local write locks cover the complete uniqueness preflight and write.
+- File-backed deletes and find-and-modify operations now hold their collection
+  lock across the complete read/write transaction; AFTER results are fetched
+  by captured `_id`, and embedded-document `_id` values no longer break batch
+  updates.
+- Scalar equality and `$in` match array members consistently on table
+  backends while exact array equality remains supported; combined `$nin`,
+  `$not`, `$regex`, and `$options` queries
+  share missing-field behavior across backends.
+- BSON tag-shaped user dictionaries are escaped instead of being mistaken for
+  encoded datetimes or ObjectIds, and SQLite unique tokens preserve integers
+  outside the signed 64-bit range.
+- Async cursors return isolated documents, index listings are async-iterable,
+  and overlapping patch scopes in independent tasks cannot strand PyMongo's
+  process-global client replacement.
+- TinyMongo exceptions inherit matching PyMongo exception classes when PyMongo
+  is installed, while retaining dependency-free fallbacks.
 
 ## [1.2.0] - 2026-07-11
 

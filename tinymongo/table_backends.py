@@ -1,20 +1,49 @@
-import json
+import hashlib
 import importlib
+import json
 import os
 import re
 import sqlite3
 import tempfile
 import threading
 from contextlib import contextmanager
+from functools import wraps
 from urllib.parse import parse_qs, unquote, urlparse
 from typing import Optional
 
-from .errors import DuplicateKeyError
+from .bson_codec import contains_extended_value
+from .bson_codec import dumps as bson_json_dumps
+from .bson_codec import loads as bson_json_loads
+from .errors import (
+    DuplicateKeyError,
+    OperationFailure,
+    StorageCorruptionError,
+    TinyMongoNotSupportedError,
+)
+from .indexes import (
+    INDEX_CATALOG_TABLE,
+    IndexSpec,
+    index_catalog_id,
+    index_tokens,
+    parse_index_spec,
+    validate_unique_documents,
+)
 from .parquet_storage import _acquire_rlock, _local_rlocks, portalocker
 
 
 _MISSING = object()
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
+
+
+def _write_locked(method):
+    """Serialize a backend read-check-write operation."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._write_lock():
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 def _import_optional_driver(module_name, backend_name, install_hint):
@@ -43,6 +72,12 @@ def _sql_literal(value):
     if isinstance(value, bool):
         return "true" if value else "false"
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _json_path(field):
+    return "$" + "".join(
+        "." + json.dumps(part, ensure_ascii=False) for part in field.split(".")
+    )
 
 
 def _env_first(*names):
@@ -117,11 +152,15 @@ def _duckdb_setup_sql_from_env():
 
 
 def _json_dumps(doc):
-    return json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
+    return bson_json_dumps(doc, ensure_ascii=False, separators=(",", ":"))
 
 
 def _json_loads(value):
-    return json.loads(value)
+    decoded = bson_json_loads(value)
+    if not isinstance(value, (str, bytes, bytearray)) and decoded == value:
+        # Remote JSON drivers may already return an ordinary decoded mapping.
+        return value
+    return decoded
 
 
 def _quote_identifier(name):
@@ -139,8 +178,149 @@ def _get_nested(doc, path, default=_MISSING):
 
 def _value_matches(actual, expected):
     if isinstance(actual, list):
-        return expected in actual
+        return actual == expected or expected in actual
     return actual == expected
+
+
+def _sqlite_unique_token(data, field):
+    """Return the same lossless unique token used by Python validation."""
+    document = _json_loads(data)
+    return json.dumps(
+        index_tokens(document, field),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _simple_scalar_equality(filter_doc):
+    """Return one SQL-safe equality pair, or ``None`` for richer filters."""
+    if not isinstance(filter_doc, dict) or len(filter_doc) != 1:
+        return None
+    field, expected = next(iter(filter_doc.items()))
+    if (
+        not isinstance(field, str)
+        or field.startswith("$")
+        or field == "_id"
+        or expected is None
+        or isinstance(expected, (dict, list, tuple))
+        or not isinstance(expected, (bool, int, float, str))
+    ):
+        return None
+    return field, expected
+
+
+def _reject_remote_unique_arrays(documents, specs):
+    """Fail closed where remote native constraints cannot protect multikey races."""
+    for spec in specs:
+        if not spec.unique:
+            continue
+        for document in documents:
+            value = _get_nested(document, spec.field)
+            if isinstance(value, (list, tuple)):
+                raise TinyMongoNotSupportedError(
+                    "Remote SQL unique index {0!r} does not support array values; "
+                    "cross-process multikey uniqueness cannot be guaranteed".format(
+                        spec.name
+                    )
+                )
+
+
+def _comparison_matches(actual, operand, comparison):
+    values = actual if isinstance(actual, list) else [actual]
+    for value in values:
+        try:
+            if comparison(value, operand):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _regex_matches(actual, pattern, options=""):
+    flags = 0
+    for option, flag in (
+        ("i", re.IGNORECASE),
+        ("m", re.MULTILINE),
+        ("s", re.DOTALL),
+        ("x", re.VERBOSE),
+    ):
+        if option in str(options):
+            flags |= flag
+    try:
+        expression = re.compile(pattern, flags)
+    except (TypeError, ValueError, re.error):
+        return False
+    values = actual if isinstance(actual, list) else [actual]
+    return any(
+        isinstance(value, str) and expression.search(value) is not None
+        for value in values
+    )
+
+
+def _field_matches(actual, expected):
+    exists = actual is not _MISSING
+    if not isinstance(expected, dict) or not any(
+        str(key).startswith("$") for key in expected
+    ):
+        return exists and _value_matches(actual, expected)
+
+    options = expected.get("$options", "")
+    for operator, operand in expected.items():
+        if operator == "$options":
+            if "$regex" not in expected:
+                return False
+        elif operator == "$exists":
+            if bool(operand) != exists:
+                return False
+        elif operator == "$gt":
+            if not exists or not _comparison_matches(
+                actual, operand, lambda a, b: a > b
+            ):
+                return False
+        elif operator == "$gte":
+            if not exists or not _comparison_matches(
+                actual, operand, lambda a, b: a >= b
+            ):
+                return False
+        elif operator == "$lt":
+            if not exists or not _comparison_matches(
+                actual, operand, lambda a, b: a < b
+            ):
+                return False
+        elif operator == "$lte":
+            if not exists or not _comparison_matches(
+                actual, operand, lambda a, b: a <= b
+            ):
+                return False
+        elif operator == "$ne":
+            if exists and _value_matches(actual, operand):
+                return False
+        elif operator == "$in":
+            values = operand if isinstance(operand, list) else [operand]
+            if not exists or not any(_value_matches(actual, item) for item in values):
+                return False
+        elif operator == "$nin":
+            values = operand if isinstance(operand, list) else [operand]
+            if exists and any(_value_matches(actual, item) for item in values):
+                return False
+        elif operator == "$all":
+            if not isinstance(actual, list) or not all(
+                item in actual for item in operand
+            ):
+                return False
+        elif operator == "$regex":
+            if not exists or not _regex_matches(actual, operand, options):
+                return False
+        elif operator == "$not":
+            nested = operand if isinstance(operand, dict) else {"$eq": operand}
+            if exists and _field_matches(actual, nested):
+                return False
+        elif operator == "$eq":
+            if not exists or not _value_matches(actual, operand):
+                return False
+        else:
+            return False
+    return True
 
 
 def matches_filter(doc, filter_doc):
@@ -151,72 +331,58 @@ def matches_filter(doc, filter_doc):
 
     for key, expected in filter_doc.items():
         if key == "$and":
-            return all(matches_filter(doc, spec) for spec in expected)
-        if key == "$or":
-            return any(matches_filter(doc, spec) for spec in expected)
-        if key == "$nor":
-            return not any(matches_filter(doc, spec) for spec in expected)
-
-        actual = _get_nested(doc, key)
-        if isinstance(expected, dict):
-            for operator, operand in expected.items():
-                exists = actual is not _MISSING
-                if operator == "$exists":
-                    if bool(operand) != exists:
-                        return False
-                elif operator == "$gt":
-                    if not exists or not actual > operand:
-                        return False
-                elif operator == "$gte":
-                    if not exists or not actual >= operand:
-                        return False
-                elif operator == "$lt":
-                    if not exists or not actual < operand:
-                        return False
-                elif operator == "$lte":
-                    if not exists or not actual <= operand:
-                        return False
-                elif operator == "$ne":
-                    if exists and _value_matches(actual, operand):
-                        return False
-                elif operator == "$in":
-                    values = operand if isinstance(operand, list) else [operand]
-                    if not exists or not any(
-                        _value_matches(actual, item) for item in values
-                    ):
-                        return False
-                elif operator == "$nin":
-                    values = operand if isinstance(operand, list) else [operand]
-                    if exists and any(_value_matches(actual, item) for item in values):
-                        return False
-                elif operator == "$all":
-                    if not isinstance(actual, list) or not all(
-                        item in actual for item in operand
-                    ):
-                        return False
-                elif operator == "$regex":
-                    if not exists or re.search(operand, str(actual)) is None:
-                        return False
-                elif operator == "$not":
-                    if matches_filter(
-                        {key: actual},
-                        {
-                            key: (
-                                operand
-                                if isinstance(operand, dict)
-                                else {"$eq": operand}
-                            )
-                        },
-                    ):
-                        return False
-                elif operator == "$eq":
-                    if not exists or not _value_matches(actual, operand):
-                        return False
-                else:
-                    return False
-        elif not _value_matches(actual, expected):
-            return False
+            if not all(matches_filter(doc, spec) for spec in expected):
+                return False
+        elif key == "$or":
+            if not any(matches_filter(doc, spec) for spec in expected):
+                return False
+        elif key == "$nor":
+            if any(matches_filter(doc, spec) for spec in expected):
+                return False
+        else:
+            actual = _get_nested(doc, key)
+            if not _field_matches(actual, expected):
+                return False
     return True
+
+
+def requires_python_filter(filter_doc):
+    """Return whether SQL JSON scalar comparison could change query meaning."""
+    if not filter_doc or not isinstance(filter_doc, dict):
+        return False
+    if contains_extended_value(filter_doc):
+        return True
+    for field, expected in filter_doc.items():
+        if field in ("$and", "$or", "$nor"):
+            if any(requires_python_filter(item) for item in expected):
+                return True
+        else:
+            if field.startswith("$"):
+                return True
+            if field != "_id" and not isinstance(expected, dict):
+                # A JSON scalar comparison cannot also see members of array fields.
+                return True
+            if isinstance(expected, dict):
+                if not any(str(operator).startswith("$") for operator in expected):
+                    # Literal embedded-document equality is not an operator
+                    # expression and TinyDB/SQL parsers otherwise treat its keys
+                    # as field or operator names.
+                    return True
+                if any(
+                    operator in expected
+                    for operator in (
+                        "$eq",
+                        "$ne",
+                        "$in",
+                        "$nin",
+                        "$all",
+                        "$regex",
+                        "$not",
+                        "$options",
+                    )
+                ):
+                    return True
+    return False
 
 
 class SQLCompiler(object):
@@ -224,18 +390,18 @@ class SQLCompiler(object):
         self.dialect = dialect
 
     def json_value(self, field, value=None, numeric=False):
-        path = "$." + field
+        path = _json_path(field)
         if self.dialect == "sqlite":
-            expression = "json_extract(data, ?)"
-            return expression, [path]
+            expression = "json_extract(data, {0})".format(_sql_literal(path))
+            return expression, []
         if numeric:
             return "CAST(json_extract_string(data, ?) AS DOUBLE)", [path]
         return "json_extract_string(data, ?)", [path]
 
     def json_exists(self, field):
-        path = "$." + field
+        path = _json_path(field)
         if self.dialect == "sqlite":
-            return "json_type(data, ?) IS NOT NULL", [path]
+            return "json_type(data, {0}) IS NOT NULL".format(_sql_literal(path)), []
         return "json_exists(data, ?)", [path]
 
     def compile(self, filter_doc):
@@ -361,11 +527,34 @@ class TableBackend(object):
         self.database = database
         self.dsn = dsn
         self.compiler = SQLCompiler(self.dialect)
+        self._ephemeral_indexes = {}
         if not _is_object_store_uri(path):
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     def close(self):
         pass
+
+    @contextmanager
+    def _write_lock(self):
+        """Serialize local backend writes across threads and processes."""
+        if _is_object_store_uri(self.path):
+            yield
+            return
+
+        directory = os.path.dirname(self.path) or "."
+        lock_path = os.path.join(directory, ".tinymongo.lock")
+        rlock = _local_rlocks.setdefault(lock_path, threading.RLock())
+        first_acquire = _acquire_rlock(rlock)
+        file_lock = None
+        try:
+            if first_acquire and portalocker is not None:  # pragma: no branch
+                file_lock = portalocker.Lock(lock_path, timeout=30)
+                file_lock.acquire()
+            yield
+        finally:
+            if file_lock is not None:  # pragma: no branch
+                file_lock.release()
+            rlock.release()
 
     def list_collections(self):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
@@ -397,6 +586,7 @@ class TableBackend(object):
         docs = self.find(collection, filter_doc, limit=1)
         return docs[0] if docs else None
 
+    @_write_locked
     def update_many(self, collection, filter_doc, update_doc, multi=True):
         matches = self.find(collection, filter_doc)
         if not multi:
@@ -414,6 +604,7 @@ class TableBackend(object):
     ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
+    @_write_locked
     def delete_many(self, collection, filter_doc, multi=True):
         matches = self.find(collection, filter_doc)
         if not multi:
@@ -427,14 +618,55 @@ class TableBackend(object):
     ):  # pragma: no cover - abstract backend contract
         raise NotImplementedError
 
-    def create_index(self, collection, field):
-        return field
+    def get_index_specs(self, collection):
+        return list(self._ephemeral_indexes.get(collection, {}).values())
 
-    def drop_index(self, collection, field):
-        return None
+    def _coerce_index_spec(self, spec):
+        return spec if isinstance(spec, IndexSpec) else parse_index_spec(spec)
+
+    def _check_index_compatibility(self, collection, spec):
+        specs = self.get_index_specs(collection)
+        existing = next(
+            (current for current in specs if current.name == spec.name),
+            None,
+        )
+        if existing is not None and existing != spec:
+            raise OperationFailure(
+                "An index with the same name or key has different options"
+            )
+        return existing
+
+    def create_index(self, collection, spec):
+        spec = self._coerce_index_spec(spec)
+        existing = self._check_index_compatibility(collection, spec)
+        if existing is not None:
+            return existing.name
+        if spec.unique:
+            validate_unique_documents(self.find(collection, {}), [spec])
+        self._ephemeral_indexes.setdefault(collection, {})[spec.name] = spec
+        return spec.name
+
+    def drop_index(self, collection, name_or_field):
+        indexes = self._ephemeral_indexes.get(collection, {})
+        for name, spec in list(indexes.items()):
+            if name_or_field in (name, spec.field):
+                indexes.pop(name, None)
+                return None
+        raise OperationFailure("Index not found: {0}".format(name_or_field))
 
     def list_indexes(self, collection):
-        return [{"name": "_id_", "key": [("_id", 1)]}]
+        indexes = [{"name": "_id_", "key": [("_id", 1)]}]
+        for spec in sorted(
+            self.get_index_specs(collection), key=lambda item: item.name
+        ):
+            metadata = {"name": spec.name, "key": [(spec.field, spec.direction)]}
+            if spec.unique:
+                metadata["unique"] = True
+            indexes.append(metadata)
+        return indexes
+
+    def validate_unique_post_image(self, collection, documents):
+        validate_unique_documents(documents, self.get_index_specs(collection))
 
     def apply_update(self, doc, update_doc):
         from .tinymongo import _apply_update_document
@@ -445,12 +677,54 @@ class TableBackend(object):
 class SQLiteTableBackend(TableBackend):
     dialect = "sqlite"
     extension = ".sqlite"
+    index_catalog_table = "__tinymongo_indexes"
+
+    def _physical_index_name(self, collection, spec):
+        identity = "{0}\x00{1}\x00{2}".format(
+            self.database or "default", collection, spec.name
+        )
+        digest = hashlib.sha256(identity.encode("utf8")).hexdigest()[:32]
+        return "__tm_idx_{0}".format(digest)
 
     def _connect(self):
         conn = sqlite3.connect(self.path)
+        conn.create_function(
+            "tinymongo_unique_token",
+            2,
+            _sqlite_unique_token,
+            deterministic=True,
+        )
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
+
+    def _ensure_index_catalog(self, conn):
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS {0} ("
+            "collection_name TEXT NOT NULL, index_name TEXT NOT NULL, "
+            "field_name TEXT NOT NULL, unique_flag INTEGER NOT NULL, "
+            "PRIMARY KEY (collection_name, index_name))".format(
+                _quote_identifier(self.index_catalog_table)
+            )
+        )
+
+    def get_index_specs(self, collection):
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            rows = conn.execute(
+                "SELECT index_name, field_name, unique_flag FROM {0} "
+                "WHERE collection_name = ? ORDER BY index_name".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (collection,),
+            ).fetchall()
+            return [
+                IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
+                for row in rows
+            ]
+        finally:
+            conn.close()
 
     def _migrate_legacy_blob(self):
         conn = self._connect()
@@ -513,26 +787,36 @@ class SQLiteTableBackend(TableBackend):
         finally:
             conn.close()
 
+    @_write_locked
     def drop_collection(self, collection):
         existed = collection in self.list_collections()
         conn = self._connect()
         try:
+            self._ensure_index_catalog(conn)
             conn.execute(
                 "DROP TABLE IF EXISTS {0}".format(_quote_identifier(collection))
+            )
+            conn.execute(
+                "DELETE FROM {0} WHERE collection_name = ?".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (collection,),
             )
             conn.commit()
             return existed
         finally:
             conn.close()
 
+    @_write_locked
     def insert_many(self, collection, docs, bypass_document_validation=False):
         self.create_collection(collection)
+        existing_docs = self.find(collection, {})
+        self.validate_unique_post_image(collection, existing_docs + docs)
         rows = [(str(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
-            sql = "INSERT {0} INTO {1} (_id, data) VALUES (?, ?)".format(
-                "OR REPLACE" if bypass_document_validation else "",
-                _quote_identifier(collection),
+            sql = "INSERT INTO {0} (_id, data) VALUES (?, ?)".format(
+                _quote_identifier(collection)
             )
             conn.executemany(sql, rows)
             conn.commit()
@@ -544,6 +828,15 @@ class SQLiteTableBackend(TableBackend):
 
     def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):
         self.create_collection(collection)
+        indexed = self._find_indexed_scalar_with_array_union(collection, filter_doc)
+        if indexed is not None:
+            return indexed
+        if requires_python_filter(filter_doc):
+            return [
+                doc
+                for doc in self._all_docs_unfiltered(collection)
+                if matches_filter(doc, filter_doc)
+            ]
         try:
             where, params = self.compiler.compile(filter_doc)
             sql = "SELECT data FROM {0}{1}".format(_quote_identifier(collection), where)
@@ -560,6 +853,38 @@ class SQLiteTableBackend(TableBackend):
                 if matches_filter(doc, filter_doc)
             ]
 
+    def _find_indexed_scalar_with_array_union(self, collection, filter_doc):
+        equality = _simple_scalar_equality(filter_doc)
+        if equality is None:
+            return None
+        field, _ = equality
+        if not any(spec.field == field for spec in self.get_index_specs(collection)):
+            return None
+
+        where, params = self.compiler.compile(filter_doc)
+        path = _sql_literal(_json_path(field))
+        scalar_sql = (
+            "SELECT data FROM {table}{where} "
+            "AND json_type(data, {path}) IN "
+            "('text', 'integer', 'real', 'true', 'false')"
+        ).format(
+            table=_quote_identifier(collection),
+            where=where,
+            path=path,
+        )
+        array_sql = (
+            "SELECT data FROM {table} WHERE json_type(data, {path}) = 'array'"
+        ).format(table=_quote_identifier(collection), path=path)
+        conn = self._connect()
+        try:
+            scalar_rows = conn.execute(scalar_sql, params).fetchall()
+            array_rows = conn.execute(array_sql).fetchall()
+        finally:
+            conn.close()
+
+        candidates = [_json_loads(row[0]) for row in scalar_rows + array_rows]
+        return [doc for doc in candidates if matches_filter(doc, filter_doc)]
+
     def _all_docs_unfiltered(self, collection):
         self.create_collection(collection)
         conn = self._connect()
@@ -571,20 +896,32 @@ class SQLiteTableBackend(TableBackend):
         finally:
             conn.close()
 
+    @_write_locked
     def replace_one(self, collection, doc_id, replacement):
         self.create_collection(collection)
+        self.validate_unique_post_image(
+            collection,
+            [
+                replacement if doc.get("_id") == doc_id else doc
+                for doc in self.find(collection, {})
+            ],
+        )
         conn = self._connect()
         try:
-            conn.execute(
-                "UPDATE {0} SET data = ? WHERE _id = ?".format(
-                    _quote_identifier(collection)
-                ),
-                (_json_dumps(replacement), str(doc_id)),
-            )
-            conn.commit()
+            try:
+                conn.execute(
+                    "UPDATE {0} SET data = ? WHERE _id = ?".format(
+                        _quote_identifier(collection)
+                    ),
+                    (_json_dumps(replacement), str(doc_id)),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise DuplicateKeyError(str(exc))
         finally:
             conn.close()
 
+    @_write_locked
     def delete_ids(self, collection, ids):
         if not ids:
             return
@@ -599,26 +936,97 @@ class SQLiteTableBackend(TableBackend):
         finally:
             conn.close()
 
-    def create_index(self, collection, field):
+    @_write_locked
+    def create_index(self, collection, spec):
+        spec = self._coerce_index_spec(spec)
         self.create_collection(collection)
-        name = "{0}_{1}_idx".format(collection, field.replace(".", "_"))
-        path = "'$." + field.replace("'", "''") + "'"
+        existing = self._check_index_compatibility(collection, spec)
+        if existing is not None:
+            return existing.name
+        if spec.unique:
+            validate_unique_documents(self.find(collection, {}), [spec])
+        name = self._physical_index_name(collection, spec)
+        path = _sql_literal(_json_path(spec.field))
+        expression = "json_extract(data, {0})".format(path)
+        if spec.unique:
+            expression = "tinymongo_unique_token(data, {0})".format(
+                _sql_literal(spec.field)
+            )
         conn = self._connect()
         try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS {0} ON {1} (json_extract(data, {2}))".format(
-                    _quote_identifier(name), _quote_identifier(collection), path
+            try:
+                self._ensure_index_catalog(conn)
+                conn.execute(
+                    "CREATE {0}INDEX IF NOT EXISTS {1} ON {2} "
+                    "({3})".format(
+                        "UNIQUE " if spec.unique else "",
+                        _quote_identifier(name),
+                        _quote_identifier(collection),
+                        expression,
+                    )
                 )
+                if spec.unique:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS {0} ON {1} "
+                        "(json_extract(data, {2}))".format(
+                            _quote_identifier(name + "_lookup"),
+                            _quote_identifier(collection),
+                            path,
+                        )
+                    )
+                conn.execute(
+                    "INSERT INTO {0} (collection_name, index_name, field_name, unique_flag) "
+                    "VALUES (?, ?, ?, ?)".format(
+                        _quote_identifier(self.index_catalog_table)
+                    ),
+                    (collection, spec.name, spec.field, int(spec.unique)),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise DuplicateKeyError(str(exc))
+        finally:
+            conn.close()
+        return spec.name
+
+    @_write_locked
+    def drop_index(self, collection, name_or_field):
+        spec = next(
+            (
+                item
+                for item in self.get_index_specs(collection)
+                if name_or_field in (item.name, item.field)
+            ),
+            None,
+        )
+        if spec is None:
+            raise OperationFailure("Index not found: {0}".format(name_or_field))
+        physical_name = self._physical_index_name(collection, spec)
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            conn.execute(
+                "DROP INDEX IF EXISTS {0}".format(_quote_identifier(physical_name))
+            )
+            conn.execute(
+                "DROP INDEX IF EXISTS {0}".format(
+                    _quote_identifier(physical_name + "_lookup")
+                )
+            )
+            conn.execute(
+                "DELETE FROM {0} WHERE collection_name = ? AND index_name = ?".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (collection, spec.name),
             )
             conn.commit()
         finally:
             conn.close()
-        return field
 
 
 class DuckDBTableBackend(TableBackend):
     dialect = "duckdb"
     extension = ".duckdb"
+    index_catalog_table = "__tinymongo_indexes"
 
     def __init__(
         self,
@@ -631,7 +1039,7 @@ class DuckDBTableBackend(TableBackend):
         duckdb = _import_optional_driver(
             "duckdb",
             "duckdb/parquet",
-            "pip install duckdb or pip install tinymongo",
+            'pip install "tinymongo[duckdb]"',
         )
         self.duckdb = duckdb
         super(DuckDBTableBackend, self).__init__(
@@ -648,6 +1056,34 @@ class DuckDBTableBackend(TableBackend):
             conn.execute("PRAGMA threads={0}".format(int(self.threads)))
         self._configure_duckdb_connection(conn)
         return conn
+
+    def _ensure_index_catalog(self, conn):
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS {0} ("
+            "collection_name VARCHAR NOT NULL, index_name VARCHAR NOT NULL, "
+            "field_name VARCHAR NOT NULL, unique_flag BOOLEAN NOT NULL, "
+            "PRIMARY KEY (collection_name, index_name))".format(
+                _quote_identifier(self.index_catalog_table)
+            )
+        )
+
+    def get_index_specs(self, collection):
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            rows = conn.execute(
+                "SELECT index_name, field_name, unique_flag FROM {0} "
+                "WHERE collection_name = ? ORDER BY index_name".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (collection,),
+            ).fetchall()
+            return [
+                IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
+                for row in rows
+            ]
+        finally:
+            conn.close()
 
     def _configure_duckdb_connection(self, conn):
         for key, value in (self.duckdb_config or {}).items():
@@ -719,44 +1155,56 @@ class DuckDBTableBackend(TableBackend):
         finally:
             conn.close()
 
+    @_write_locked
     def drop_collection(self, collection):
         existed = collection in self.list_collections()
         conn = self._connect()
         try:
+            self._ensure_index_catalog(conn)
             conn.execute(
                 "DROP TABLE IF EXISTS {0}".format(_quote_identifier(collection))
+            )
+            conn.execute(
+                "DELETE FROM {0} WHERE collection_name = ?".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (collection,),
             )
             return existed
         finally:
             conn.close()
 
+    @_write_locked
     def insert_many(self, collection, docs, bypass_document_validation=False):
         self.create_collection(collection)
+        existing_docs = self.find(collection, {})
+        self.validate_unique_post_image(collection, existing_docs + docs)
         rows = [(str(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
-            if bypass_document_validation:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO {0} (_id, data) VALUES (?, ?)".format(
-                        _quote_identifier(collection)
-                    ),
-                    rows,
-                )
-            else:
-                conn.executemany(
-                    "INSERT INTO {0} (_id, data) VALUES (?, ?)".format(
-                        _quote_identifier(collection)
-                    ),
-                    rows,
-                )
+            conn.executemany(
+                "INSERT INTO {0} (_id, data) VALUES (?, ?)".format(
+                    _quote_identifier(collection)
+                ),
+                rows,
+            )
             return list(range(len(rows)))
         except Exception as exc:
-            raise DuplicateKeyError(str(exc))
+            constraint_error = getattr(self.duckdb, "ConstraintException", ())
+            if constraint_error and isinstance(exc, constraint_error):
+                raise DuplicateKeyError(str(exc))
+            raise
         finally:
             conn.close()
 
     def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):
         self.create_collection(collection)
+        if requires_python_filter(filter_doc):
+            return [
+                doc
+                for doc in self._all_docs_unfiltered(collection)
+                if matches_filter(doc, filter_doc)
+            ]
         try:
             where, params = self.compiler.compile(filter_doc)
             sql = "SELECT data FROM {0}{1}".format(_quote_identifier(collection), where)
@@ -784,8 +1232,16 @@ class DuckDBTableBackend(TableBackend):
         finally:
             conn.close()
 
+    @_write_locked
     def replace_one(self, collection, doc_id, replacement):
         self.create_collection(collection)
+        self.validate_unique_post_image(
+            collection,
+            [
+                replacement if doc.get("_id") == doc_id else doc
+                for doc in self.find(collection, {})
+            ],
+        )
         conn = self._connect()
         try:
             conn.execute(
@@ -797,6 +1253,7 @@ class DuckDBTableBackend(TableBackend):
         finally:
             conn.close()
 
+    @_write_locked
     def delete_ids(self, collection, ids):
         if not ids:
             return
@@ -806,6 +1263,52 @@ class DuckDBTableBackend(TableBackend):
             conn.executemany(
                 "DELETE FROM {0} WHERE _id = ?".format(_quote_identifier(collection)),
                 [(str(doc_id),) for doc_id in ids],
+            )
+        finally:
+            conn.close()
+
+    @_write_locked
+    def create_index(self, collection, spec):
+        spec = self._coerce_index_spec(spec)
+        self.create_collection(collection)
+        existing = self._check_index_compatibility(collection, spec)
+        if existing is not None:
+            return existing.name
+        if spec.unique:
+            validate_unique_documents(self.find(collection, {}), [spec])
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            conn.execute(
+                "INSERT INTO {0} VALUES (?, ?, ?, ?)".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (collection, spec.name, spec.field, spec.unique),
+            )
+        finally:
+            conn.close()
+        return spec.name
+
+    @_write_locked
+    def drop_index(self, collection, name_or_field):
+        spec = next(
+            (
+                item
+                for item in self.get_index_specs(collection)
+                if name_or_field in (item.name, item.field)
+            ),
+            None,
+        )
+        if spec is None:
+            raise OperationFailure("Index not found: {0}".format(name_or_field))
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            conn.execute(
+                "DELETE FROM {0} WHERE collection_name = ? AND index_name = ?".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (collection, spec.name),
             )
         finally:
             conn.close()
@@ -891,6 +1394,7 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
                 os.path.basename(row[0])[: -len(".parquet")]
                 for row in rows
                 if str(row[0]).endswith(".parquet")
+                and not os.path.basename(row[0]).startswith("__tinymongo_")
             )
 
         if not os.path.isdir(self.directory):
@@ -898,7 +1402,7 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
         return sorted(
             name[: -len(".parquet")]
             for name in os.listdir(self.directory)
-            if name.endswith(".parquet")
+            if name.endswith(".parquet") and not name.startswith("__tinymongo_")
         )
 
     def create_collection(self, collection):
@@ -907,18 +1411,35 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
 
     def drop_collection(self, collection):
         path = self._collection_path(collection)
-        existed = (
-            collection in self.list_collections()
-            if self._is_object_store
-            else os.path.exists(path)
-        )
-        if existed:
-            with self._write_lock():
+        with self._write_lock():
+            data_exists = (
+                collection in self.list_collections()
+                if self._is_object_store
+                else os.path.exists(path)
+            )
+            metadata_exists = bool(self.get_index_specs(collection))
+            if not data_exists and not metadata_exists:
+                return False
+            if data_exists:
                 if self._is_object_store:
                     self._write_rows(collection, [])
                 else:
                     os.remove(path)
-        return existed
+            metadata_rows = [
+                row
+                for row in self._read_all_rows(INDEX_CATALOG_TABLE)
+                if _json_loads(row[1]).get("collection") != collection
+            ]
+            self._write_rows(INDEX_CATALOG_TABLE, metadata_rows)
+            return True
+
+    def get_index_specs(self, collection):
+        specs = []
+        for _, data in self._read_all_rows(INDEX_CATALOG_TABLE):
+            document = _json_loads(data)
+            if document.get("collection") == collection:
+                specs.append(IndexSpec.from_metadata(document["spec"]))
+        return specs
 
     def _read_all_rows(self, collection):
         path = self._collection_path(collection)
@@ -929,7 +1450,11 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             return conn.execute(
                 "SELECT _id, data FROM read_parquet(?)", (path,)
             ).fetchall()
-        except Exception:
+        except Exception as exc:
+            if not self._is_object_store and os.path.exists(path):
+                raise StorageCorruptionError(
+                    "Cannot read Parquet collection {0}: {1}".format(collection, exc)
+                ) from exc
             return []
         finally:
             conn.close()
@@ -965,14 +1490,14 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
     def insert_many(self, collection, docs, bypass_document_validation=False):
         with self._write_lock():
             rows = self._read_all_rows(collection)
+            existing_docs = [_json_loads(row[1]) for row in rows]
+            self.validate_unique_post_image(collection, existing_docs + docs)
             existing = {row[0] for row in rows}
             new_rows = []
             for doc in docs:
                 doc_id = str(doc["_id"])
-                if not bypass_document_validation and doc_id in existing:
+                if doc_id in existing:
                     raise DuplicateKeyError("_id:{0} already exists".format(doc["_id"]))
-                if bypass_document_validation and doc_id in existing:
-                    rows = [row for row in rows if row[0] != doc_id]
                 new_rows.append((doc_id, _json_dumps(doc)))
                 existing.add(doc_id)
             self._write_rows(collection, rows + new_rows)
@@ -982,6 +1507,12 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
         path = self._collection_path(collection)
         if not self._is_object_store and not os.path.exists(path):
             return []
+        if requires_python_filter(filter_doc):
+            return [
+                _json_loads(row[1])
+                for row in self._read_all_rows(collection)
+                if matches_filter(_json_loads(row[1]), filter_doc)
+            ]
         try:
             where, params = self.compiler.compile(filter_doc)
             conn = self._connect()
@@ -1002,9 +1533,17 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
 
     def replace_one(self, collection, doc_id, replacement):
         with self._write_lock():
+            current_rows = self._read_all_rows(collection)
+            self.validate_unique_post_image(
+                collection,
+                [
+                    replacement if row_id == str(doc_id) else _json_loads(data)
+                    for row_id, data in current_rows
+                ],
+            )
             rows = [
                 (row_id, _json_dumps(replacement) if row_id == str(doc_id) else data)
-                for row_id, data in self._read_all_rows(collection)
+                for row_id, data in current_rows
             ]
             self._write_rows(collection, rows)
 
@@ -1016,6 +1555,50 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             ]
             self._write_rows(collection, rows)
 
+    def create_index(self, collection, spec):
+        spec = self._coerce_index_spec(spec)
+        with self._write_lock():
+            path = self._collection_path(collection)
+            if (
+                collection not in self.list_collections()
+                if self._is_object_store
+                else not os.path.exists(path)
+            ):
+                self._write_rows(collection, [])
+            existing = self._check_index_compatibility(collection, spec)
+            if existing is not None:
+                return existing.name
+            if spec.unique:
+                validate_unique_documents(self.find(collection, {}), [spec])
+            rows = self._read_all_rows(INDEX_CATALOG_TABLE)
+            document = {
+                "_id": index_catalog_id(collection, spec.name),
+                "collection": collection,
+                "spec": spec.to_metadata(),
+            }
+            rows.append((document["_id"], _json_dumps(document)))
+            self._write_rows(INDEX_CATALOG_TABLE, rows)
+        return spec.name
+
+    def drop_index(self, collection, name_or_field):
+        with self._write_lock():
+            spec = next(
+                (
+                    item
+                    for item in self.get_index_specs(collection)
+                    if name_or_field in (item.name, item.field)
+                ),
+                None,
+            )
+            if spec is None:
+                raise OperationFailure("Index not found: {0}".format(name_or_field))
+            rows = [
+                row
+                for row in self._read_all_rows(INDEX_CATALOG_TABLE)
+                if row[0] != index_catalog_id(collection, spec.name)
+            ]
+            self._write_rows(INDEX_CATALOG_TABLE, rows)
+
 
 class RemoteSQLTableBackend(TableBackend):
     """Shared table backend for remote transactional SQL databases."""
@@ -1023,6 +1606,7 @@ class RemoteSQLTableBackend(TableBackend):
     placeholder = "%s"
     json_type = "TEXT"
     metadata_table = "__tinymongo_collections"
+    index_catalog_table = "__tinymongo_indexes"
 
     def __init__(
         self,
@@ -1044,6 +1628,11 @@ class RemoteSQLTableBackend(TableBackend):
 
     def _connect(self):  # pragma: no cover - implemented by concrete drivers
         raise NotImplementedError
+
+    @contextmanager
+    def _write_lock(self):
+        """Let the remote transaction and native unique index serialize writes."""
+        yield
 
     def _quote(self, name):
         return _quote_identifier(name)
@@ -1087,6 +1676,17 @@ class RemoteSQLTableBackend(TableBackend):
         except Exception:
             pass
 
+    def _is_duplicate_error(self, error):
+        sqlstate = getattr(error, "sqlstate", None) or getattr(error, "pgcode", None)
+        code = error.args[0] if getattr(error, "args", ()) else None
+        message = str(error).lower()
+        return (
+            sqlstate == "23505"
+            or code == 1062
+            or "duplicate key" in message
+            or "unique constraint" in message
+        )
+
     def _ensure_metadata(self, conn):
         self._execute(
             conn,
@@ -1098,6 +1698,63 @@ class RemoteSQLTableBackend(TableBackend):
             ),
         )
         self._commit(conn)
+
+    def _ensure_index_catalog(self, conn):
+        self._execute(
+            conn,
+            "CREATE TABLE IF NOT EXISTS {0} "
+            "(database_name VARCHAR(255) NOT NULL, "
+            "collection_name VARCHAR(255) NOT NULL, "
+            "index_name VARCHAR(255) NOT NULL, "
+            "field_name VARCHAR(512) NOT NULL, "
+            "unique_flag BOOLEAN NOT NULL, "
+            "PRIMARY KEY (database_name, collection_name, index_name))".format(
+                self._quote(self.index_catalog_table)
+            ),
+        )
+        self._commit(conn)
+
+    def get_index_specs(self, collection):
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            cursor = self._execute(
+                conn,
+                "SELECT index_name, field_name, unique_flag FROM {0} "
+                "WHERE database_name = {1} AND collection_name = {1} "
+                "ORDER BY index_name".format(
+                    self._quote(self.index_catalog_table), self.placeholder
+                ),
+                (self.database, collection),
+            )
+            try:
+                return [
+                    IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
+                    for row in cursor.fetchall()
+                ]
+            finally:
+                self._close_cursor(cursor)
+        finally:
+            conn.close()
+
+    def _physical_index_name(self, collection, spec):
+        identity = "{0}\x00{1}\x00{2}".format(
+            self.database or "default", collection, spec.name
+        )
+        digest = hashlib.sha256(identity.encode("utf8")).hexdigest()[:32]
+        return "__tm_idx_{0}".format(digest)
+
+    def _create_native_index(self, conn, collection, spec):
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
+
+    def validate_unique_post_image(self, collection, documents):
+        documents = list(documents)
+        specs = self.get_index_specs(collection)
+        _reject_remote_unique_arrays(documents, specs)
+        validate_unique_documents(documents, specs)
+
+    def _drop_native_index(self, conn, collection, spec):
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
 
     def _record_collection(self, conn, collection):
         self._ensure_metadata(conn)
@@ -1162,6 +1819,7 @@ class RemoteSQLTableBackend(TableBackend):
         existed = collection in self.list_collections()
         conn = self._connect()
         try:
+            self._ensure_index_catalog(conn)
             self._execute(
                 conn,
                 "DROP TABLE IF EXISTS {0}".format(
@@ -1175,6 +1833,13 @@ class RemoteSQLTableBackend(TableBackend):
                 ),
                 (self.database, collection),
             )
+            self._execute(
+                conn,
+                "DELETE FROM {0} WHERE database_name = {1} AND collection_name = {1}".format(
+                    self._quote(self.index_catalog_table), self.placeholder
+                ),
+                (self.database, collection),
+            )
             self._commit(conn)
             return existed
         finally:
@@ -1182,6 +1847,8 @@ class RemoteSQLTableBackend(TableBackend):
 
     def insert_many(self, collection, docs, bypass_document_validation=False):
         self.create_collection(collection)
+        current = self._all_docs_unfiltered(collection)
+        self.validate_unique_post_image(collection, current + docs)
         rows = [(str(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
@@ -1189,7 +1856,9 @@ class RemoteSQLTableBackend(TableBackend):
             self._commit(conn)
             return list(range(len(rows)))
         except Exception as exc:
-            raise DuplicateKeyError(str(exc))
+            if self._is_duplicate_error(exc):
+                raise DuplicateKeyError(str(exc))
+            raise
         finally:
             conn.close()
 
@@ -1248,18 +1917,30 @@ class RemoteSQLTableBackend(TableBackend):
 
     def replace_one(self, collection, doc_id, replacement):
         self.create_collection(collection)
+        self.validate_unique_post_image(
+            collection,
+            [
+                replacement if str(doc.get("_id")) == str(doc_id) else doc
+                for doc in self._all_docs_unfiltered(collection)
+            ],
+        )
         conn = self._connect()
         try:
-            self._execute(
-                conn,
-                "UPDATE {0} SET data = {1} WHERE _id = {2}".format(
-                    self._quote(self._table_name(collection)),
-                    self._data_placeholder(),
-                    self.placeholder,
-                ),
-                (_json_dumps(replacement), str(doc_id)),
-            )
-            self._commit(conn)
+            try:
+                self._execute(
+                    conn,
+                    "UPDATE {0} SET data = {1} WHERE _id = {2}".format(
+                        self._quote(self._table_name(collection)),
+                        self._data_placeholder(),
+                        self.placeholder,
+                    ),
+                    (_json_dumps(replacement), str(doc_id)),
+                )
+                self._commit(conn)
+            except Exception as exc:
+                if self._is_duplicate_error(exc):
+                    raise DuplicateKeyError(str(exc))
+                raise
         finally:
             conn.close()
 
@@ -1280,9 +1961,66 @@ class RemoteSQLTableBackend(TableBackend):
         finally:
             conn.close()
 
-    def create_index(self, collection, field):
+    def create_index(self, collection, spec):
+        spec = self._coerce_index_spec(spec)
         self.create_collection(collection)
-        return field
+        existing = self._check_index_compatibility(collection, spec)
+        if existing is not None:
+            return existing.name
+        if spec.unique:
+            documents = self.find(collection, {})
+            _reject_remote_unique_arrays(documents, [spec])
+            validate_unique_documents(documents, [spec])
+
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            self._create_native_index(conn, collection, spec)
+            self._execute(
+                conn,
+                "INSERT INTO {0} "
+                "(database_name, collection_name, index_name, field_name, unique_flag) "
+                "VALUES ({1}, {1}, {1}, {1}, {1})".format(
+                    self._quote(self.index_catalog_table), self.placeholder
+                ),
+                (self.database, collection, spec.name, spec.field, spec.unique),
+            )
+            self._commit(conn)
+        except Exception as exc:
+            if spec.unique and self._is_duplicate_error(exc):
+                raise DuplicateKeyError(str(exc))
+            raise
+        finally:
+            conn.close()
+        return spec.name
+
+    def drop_index(self, collection, name_or_field):
+        spec = next(
+            (
+                item
+                for item in self.get_index_specs(collection)
+                if name_or_field in (item.name, item.field)
+            ),
+            None,
+        )
+        if spec is None:
+            raise OperationFailure("Index not found: {0}".format(name_or_field))
+
+        conn = self._connect()
+        try:
+            self._ensure_index_catalog(conn)
+            self._drop_native_index(conn, collection, spec)
+            self._execute(
+                conn,
+                "DELETE FROM {0} WHERE database_name = {1} "
+                "AND collection_name = {1} AND index_name = {1}".format(
+                    self._quote(self.index_catalog_table), self.placeholder
+                ),
+                (self.database, collection, spec.name),
+            )
+            self._commit(conn)
+        finally:
+            conn.close()
 
 
 class PostgresTableBackend(RemoteSQLTableBackend):
@@ -1310,6 +2048,31 @@ class PostgresTableBackend(RemoteSQLTableBackend):
     def _data_placeholder(self):
         return self.placeholder + "::jsonb"
 
+    def _create_native_index(self, conn, collection, spec):
+        path = ", ".join(_sql_literal(part) for part in spec.field.split("."))
+        expression = "COALESCE(jsonb_extract_path(data, {0}), 'null'::jsonb)".format(
+            path
+        )
+        # JSONB equality is type-aware and normalizes equivalent numbers. Arrays
+        # are indexed whole; Python validation supplies Mongo-like multikey fan-out.
+        self._execute(
+            conn,
+            "CREATE {0}INDEX {1} ON {2} (({3}))".format(
+                "UNIQUE " if spec.unique else "",
+                self._quote(self._physical_index_name(collection, spec)),
+                self._quote(self._table_name(collection)),
+                expression,
+            ),
+        )
+
+    def _drop_native_index(self, conn, collection, spec):
+        self._execute(
+            conn,
+            "DROP INDEX IF EXISTS {0}".format(
+                self._quote(self._physical_index_name(collection, spec))
+            ),
+        )
+
     def _insert_metadata(self, conn, collection):
         self._execute(
             conn,
@@ -1321,21 +2084,11 @@ class PostgresTableBackend(RemoteSQLTableBackend):
         )
 
     def _insert_rows(self, conn, collection, rows, bypass_document_validation):
-        if bypass_document_validation:
-            sql = (
-                "INSERT INTO {0} (_id, data) VALUES ({1}, {2}) "
-                "ON CONFLICT (_id) DO UPDATE SET data = EXCLUDED.data"
-            ).format(
-                self._quote(self._table_name(collection)),
-                self.placeholder,
-                self._data_placeholder(),
-            )
-        else:
-            sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {2})".format(
-                self._quote(self._table_name(collection)),
-                self.placeholder,
-                self._data_placeholder(),
-            )
+        sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {2})".format(
+            self._quote(self._table_name(collection)),
+            self.placeholder,
+            self._data_placeholder(),
+        )
         self._executemany(conn, sql, rows)
 
 
@@ -1376,6 +2129,63 @@ class MySQLTableBackend(RemoteSQLTableBackend):
             return self.pymysql.connect(**kwargs)
         return self.pymysql.connect(host=self.dsn)
 
+    def _generated_index_column(self, collection, spec):
+        return self._physical_index_name(collection, spec).replace("_idx_", "_key_")
+
+    def _create_native_index(self, conn, collection, spec):
+        json_path = "$" + "".join(
+            "." + json.dumps(part, ensure_ascii=False) for part in spec.field.split(".")
+        )
+        value = "JSON_EXTRACT(data, {0})".format(_sql_literal(json_path))
+        value_type = "JSON_TYPE({0})".format(value)
+        token_expression = (
+            "CASE "
+            "WHEN {value} IS NULL OR {value_type} = 'NULL' THEN 'null:' "
+            "WHEN {value_type} = 'BOOLEAN' "
+            "THEN CONCAT('bool:', JSON_UNQUOTE({value})) "
+            "WHEN {value_type} IN ('INTEGER', 'DOUBLE', 'DECIMAL') "
+            "THEN CONCAT('number:', CAST(CAST(JSON_UNQUOTE({value}) "
+            "AS DECIMAL(65, 30)) AS CHAR)) "
+            "WHEN {value_type} = 'STRING' "
+            "THEN CONCAT('string:', CAST({value} AS CHAR)) "
+            "ELSE CONCAT('json:', CAST({value} AS CHAR)) END"
+        ).format(value=value, value_type=value_type)
+        expression = "SHA2({0}, 256)".format(token_expression)
+        # The typed scalar token mirrors Python uniqueness checks. Arrays remain
+        # whole JSON values here, so native race protection is scalar-only.
+        table = self._quote(self._table_name(collection))
+        column = self._quote(self._generated_index_column(collection, spec))
+        self._execute(
+            conn,
+            "ALTER TABLE {0} ADD COLUMN {1} CHAR(64) "
+            "CHARACTER SET ascii COLLATE ascii_bin "
+            "GENERATED ALWAYS AS ({2}) STORED".format(table, column, expression),
+        )
+        self._execute(
+            conn,
+            "CREATE {0}INDEX {1} ON {2} ({3})".format(
+                "UNIQUE " if spec.unique else "",
+                self._quote(self._physical_index_name(collection, spec)),
+                table,
+                column,
+            ),
+        )
+
+    def _drop_native_index(self, conn, collection, spec):
+        table = self._quote(self._table_name(collection))
+        self._execute(
+            conn,
+            "DROP INDEX {0} ON {1}".format(
+                self._quote(self._physical_index_name(collection, spec)), table
+            ),
+        )
+        self._execute(
+            conn,
+            "ALTER TABLE {0} DROP COLUMN {1}".format(
+                table, self._quote(self._generated_index_column(collection, spec))
+            ),
+        )
+
     def _insert_metadata(self, conn, collection):
         self._execute(
             conn,
@@ -1387,12 +2197,7 @@ class MySQLTableBackend(RemoteSQLTableBackend):
         )
 
     def _insert_rows(self, conn, collection, rows, bypass_document_validation):
-        if bypass_document_validation:
-            sql = "REPLACE INTO {0} (_id, data) VALUES ({1}, {1})".format(
-                self._quote(self._table_name(collection)), self.placeholder
-            )
-        else:
-            sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {1})".format(
-                self._quote(self._table_name(collection)), self.placeholder
-            )
+        sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {1})".format(
+            self._quote(self._table_name(collection)), self.placeholder
+        )
         self._executemany(conn, sql, rows)

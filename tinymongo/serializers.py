@@ -2,11 +2,11 @@ from datetime import datetime
 
 try:
     from tinydb_serialization import Serializer
-except ImportError:
+except ImportError as exc:
     raise RuntimeError(
-        "Cannot import tinydb_serialization due to {0} "
-        'install it with `pip install "tinymongo[serialization]"`'
-    )
+        "Cannot import tinydb_serialization. Install it with: "
+        'pip install "tinymongo[serialization]"'
+    ) from exc
 
 
 class DateTimeSerializer(Serializer):
