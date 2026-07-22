@@ -8,7 +8,7 @@ This guide helps you migrate from earlier `tinymongo` versions to `1.0.0`.
 - Default storage remains TinyDB JSON storage.
 - Parquet v2, SQLite, and DuckDB are available as table-native backends.
 - A `tinymongo` CLI is available for inspecting, exporting, importing, and migrating data.
-- Common update operators and lightweight in-memory equality indexes are supported.
+- Common update operators and durable single-field indexes are supported.
 - Concurrent writes are safer due to atomic file replace and optional file locks.
 - Optional `uv` extras are available for dependency-managed ASGI usage.
 
@@ -33,5 +33,9 @@ pip install .[uv]
 - Select optional storage backends with `TinyMongoClient(path, backend="parquet")`, `backend="sqlite"`, or `backend="duckdb"`.
 - Older blob-format SQLite and DuckDB files are migrated to collection tables when opened.
 - Use `tinymongo migrate SOURCE TARGET --to-backend sqlite` to copy existing TinyDB JSON data into another backend.
-- In-memory indexes created with `collection.create_index("field")` are scoped to the active collection object and are rebuilt from stored documents as needed.
+- Indexes created by earlier releases were collection-handle scoped and cannot
+  be migrated automatically. Recreate them once with `collection.create_index()`;
+  new index metadata persists with the backend, and unique indexes are enforced
+  for later writes. Memory-backend metadata lasts for the named namespace's
+  process lifetime.
 - For local development, install `requirements-dev.txt` and run `pytest -q`.

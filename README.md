@@ -1,12 +1,13 @@
-![logo](artwork/tinymongo.png)
+![TinyMongo logo](https://raw.githubusercontent.com/schapman1974/tinymongo/master/artwork/tinymongo.png)
 
 [![CI](https://github.com/schapman1974/tinymongo/actions/workflows/ci.yml/badge.svg)](https://github.com/schapman1974/tinymongo/actions/workflows/ci.yml)
 
 # Purpose
 
-A simple wrapper to make a drop in replacement for mongodb out of
-[tinydb](http://tinydb.readthedocs.io/en/latest/).  This module is an
-attempt to add an interface familiar to those currently using pymongo.
+TinyMongo provides a familiar PyMongo-style document API backed by embedded
+storage instead of a MongoDB server. The default backend uses
+[TinyDB](https://tinydb.readthedocs.io/), with optional memory, SQLite, DuckDB,
+Parquet, PostgreSQL, and MariaDB/MySQL backends.
 
 # Status
 
@@ -30,10 +31,12 @@ may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
 
 # Project notes
 
-- **Roadmap:** See [ROADMAP.md](ROADMAP.md) for planned compatibility, GridFS, Compass, wire-server, and browser work.
+- **Roadmap:** See the [TinyMongo roadmap](https://github.com/schapman1974/tinymongo/blob/master/ROADMAP.md) for planned compatibility, GridFS, Compass, wire-server, and browser work.
 - **Default storage:** TinyMongo uses TinyDB-compatible JSON storage unless another backend is selected.
 - **Table-native backends:** SQLite, DuckDB, and Parquet backends store one real table/file per collection instead of one serialized database blob.
 - **Concurrency:** writes use atomic temp-file replace and optional advisory locks (`portalocker`) to reduce corruption risk under concurrent writers.
+- **Async API:** async clients keep storage and lock waits off the event loop
+  while sharing the synchronous implementation's behavior.
 - **Tests & CI:** a GitHub Actions workflow is included at `.github/workflows/ci.yml` to run unit tests and linters across Python versions. See `requirements-dev.txt` for dev dependencies.
 
 
@@ -63,6 +66,95 @@ sessions, or network connections. MongoDB URIs, host names, ports, and common
 connection kwargs are accepted and ignored so existing code can be tried locally.
 Set `TINYMONGO_HOME` or pass `tinymongo_folder=` to choose where TinyMongo stores
 files. See `examples/pymongo_dropin.py` for a runnable example.
+
+## Async API
+
+`AsyncMongoClient` and `AsyncTinyMongoClient` expose non-blocking client,
+database, collection, and cursor APIs. `find()` is immediate and lazy; storage
+work begins when the cursor is awaited or iterated:
+
+```python
+from tinymongo import AsyncMongoClient
+
+
+async def load_users():
+    async with AsyncMongoClient(
+        tinymongo_folder="./tinydb",
+        backend="sqlite",
+    ) as client:
+        users = client.app.users
+        await users.insert_one({"_id": 1, "name": "Ada", "score": 9})
+        return await users.find({}).sort("score", -1).to_list(length=None)
+```
+
+Async cursors support `async for`, `to_list()`, `sort()`, `skip()`,
+`limit()`, `clone()`, `rewind()`, and `close()`. Potentially blocking
+storage, serialization, locking, query, and cleanup work runs outside the event
+loop.
+
+## Patch PyMongo during tests
+
+`tinymongo.patch()` temporarily routes `pymongo.MongoClient` and
+`pymongo.AsyncMongoClient` calls to TinyMongo
+without making PyMongo a required TinyMongo dependency. Install PyMongo only for
+tests that use the helper:
+
+```bash
+pip install "tinymongo[pymongo]"
+```
+
+The default backend is an isolated in-memory database. Clients created inside
+one patch scope share data, and the original PyMongo client is restored even if
+the test raises an exception:
+
+```python
+import pymongo
+import tinymongo
+
+with tinymongo.patch():
+    writer = pymongo.MongoClient("mongodb://ignored")
+    reader = pymongo.MongoClient()
+    writer.app.users.insert_one({"name": "Ada"})
+    assert reader.app.users.count_documents({}) == 1
+```
+
+The same helper can decorate a test and can select a folder and backend:
+
+```python
+import pymongo
+import tinymongo
+
+
+@tinymongo.patch(folder="./test-data", backend="sqlite")
+def test_application_code():
+    client = pymongo.MongoClient()
+    assert client.server_info()["storage"] == "sqlite"
+```
+
+It can also decorate a `unittest` method:
+
+```python
+import unittest
+
+import pymongo
+import tinymongo
+
+
+class ApplicationTest(unittest.TestCase):
+    @tinymongo.patch()
+    def test_application_code(self):
+        client = pymongo.MongoClient()
+        client.app.users.insert_one({"name": "Ada"})
+        self.assertEqual(client.app.users.count_documents({}), 1)
+```
+
+Patch scopes may be nested. Code must look up `pymongo.MongoClient` while the
+scope is active; a `MongoClient` name imported directly before the patch cannot
+be replaced. Because PyMongo's module attribute is process-global, patch scopes
+cannot overlap across threads. Async tests should put a `with tinymongo.patch()`
+block inside the async function instead of decorating the coroutine. Prefer
+`async with tinymongo.patch()` when creating async clients so cleanup can be
+awaited.
 
 
 # Backend options
@@ -118,12 +210,17 @@ pip install "tinymongo[duckdb]"
 pip install "tinymongo[parquet]"
 pip install "tinymongo[postgres]"
 pip install "tinymongo[mysql]"
+pip install "tinymongo[bson]"
+pip install "tinymongo[pymongo]"
 pip install "tinymongo[serialization]"
 ```
 
 If an optional driver is missing, selecting that backend raises an `ImportError`
 with the corresponding installation command. PyMongo itself is not a runtime
-dependency; it is used only by the development compatibility tests.
+dependency; it is used by the optional patch helper and development compatibility
+tests only when those features are selected. Install `tinymongo[bson]` for
+`ObjectId` values or `tinymongo[pymongo]` for patching and
+installed-version compatibility.
 
 | Backend | Dependency | Best fit | Notes |
 | --- | --- | --- | --- |
@@ -177,14 +274,14 @@ Older blob-format SQLite and DuckDB files are migrated to collection tables when
 opened.
 
 Local load-test results for these backends are documented in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+[backend benchmarks](https://github.com/schapman1974/tinymongo/blob/master/docs/BENCHMARKS.md).
 
 Object-storage setup examples for S3, S3-compatible providers, Backblaze B2,
 Cloudflare R2, Google Cloud Storage, Azure Blob Storage, MinIO, Wasabi, and
 DigitalOcean Spaces are documented in
-[docs/OBJECT_STORAGE.md](docs/OBJECT_STORAGE.md).
+[the object-storage guide](https://github.com/schapman1974/tinymongo/blob/master/docs/OBJECT_STORAGE.md).
 PostgreSQL and MariaDB/MySQL setup is documented in
-[docs/REMOTE_SQL.md](docs/REMOTE_SQL.md).
+[the remote SQL guide](https://github.com/schapman1974/tinymongo/blob/master/docs/REMOTE_SQL.md).
 Remote SQL drivers are optional; if one is missing, TinyMongo raises an
 `ImportError` with the exact `pip install ...` command to run.
 
@@ -261,27 +358,94 @@ the same integration tests against a non-default backend.
 
 TinyMongo intentionally implements a practical subset of PyMongo's collection
 API. It supports common inserts, finds, updates, deletes, sorting, pagination,
-and collection counting. Query support includes equality, nested document paths,
-`$gt`, `$gte`, `$lt`, `$lte`, `$ne`, `$nin`, `$in`, `$all`, `$and`, `$or`,
-`$nor`, `$not`, `$regex`, and `$exists`.
+distinct values, collection counting, `find_one_and_delete()`, database
+listing/removal, index inspection, and batched index creation. Cursors support
+single- and multi-key sorting, `skip()`, `limit()`, `clone()`, `close()`,
+and `to_list()`; `limit(0)` means no limit.
+
+Query support includes equality (including scalar matches against array
+members), nested document paths, `$gt`, `$gte`, `$lt`, `$lte`, `$ne`,
+`$nin`, `$in`, `$all`, `$and`, `$or`, `$nor`, `$not`, `$regex`,
+case-insensitive `$options`, and `$exists`.
 
 Update support includes `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
 `$addToSet`, including `upsert=True`. As in PyMongo, `update_one()` and
 `update_many()` require update operators; use `replace_one()` for full-document
 replacement.
 
-Collections also expose lightweight in-memory equality indexes:
+`find()` and `find_one()` accept Mongo-style inclusion and exclusion
+projections. Dotted paths project nested fields, `_id` follows MongoDB's special
+include/exclude rules, and projection happens after filtering and sorting:
 
 ```python
-    collection.create_index("email")
-    collection.find({"email": "person@example.com"})
-    collection.list_indexes()
-    collection.drop_index("email")
+users.find({"active": True}, {"profile.email": 1, "_id": 0})
+users.find_one({"email": "ada@example.com"}, {"password_hash": 0})
 ```
 
-Indexes are scoped to the active collection object and are rebuilt from stored
-documents as needed. They are a convenience for repeated equality lookups, not a
-durable query-planner feature.
+Inclusion and exclusion cannot be mixed except for `_id`. Computed expressions,
+`$meta`, positional projection, and numeric array positions are rejected with a
+clear error. The second positional argument to `find()` is now the PyMongo-style
+projection argument; pass sorting as `sort=` or call `.sort()` on the cursor.
+
+Collections expose durable indexes and unique constraints:
+
+```python
+collection.create_index("email", unique=True, name="login_email")
+collection.find({"email": "person@example.com"})
+collection.list_indexes()
+collection.drop_index("login_email")
+```
+
+Index definitions and unique constraints survive client restarts on persistent
+backends. SQLite, PostgreSQL, and MariaDB/MySQL create native database indexes;
+JSON, DuckDB, and Parquet persist metadata and enforce unique constraints through
+TinyMongo. Named memory databases retain metadata while their process-local
+namespace exists.
+
+Plural `create_indexes()` accepts duck-typed PyMongo `IndexModel` batches
+without importing PyMongo in TinyMongo's core. Unique indexes are enforced.
+Performance-only declarations degrade safely and emit
+`TinyMongoUnsupportedWarning`: descending and hashed declarations use
+ascending equality indexes, and compound declarations use their ascending
+leading-field prefix. Sparse membership is not honored and TTL expiration is
+not performed; both are reported explicitly. A semantically unsafe unique
+declaration is rejected before any batch entry is created.
+
+Unique indexes support scalar values and flat arrays on embedded backends;
+missing and `null` share one unique key. Object values, nested arrays,
+non-finite numbers, and array traversal inside a dotted index path are not
+supported for unique indexes yet. Remote SQL uses native constraints for scalar
+races. It rejects array values under unique indexes because its native indexes
+cannot yet guarantee cross-process multikey uniqueness.
+
+Use one consistent scalar type for `_id` values. Full BSON-aware `_id`
+comparison is tracked in [#94](https://github.com/schapman1974/tinymongo/issues/94);
+cross-type comparison and sort order remain outside the current BSON slice.
+
+## ObjectId and datetime values
+
+`datetime` values round-trip through every backend. Install the optional BSON
+extra to use `bson.ObjectId` without making PyMongo a core dependency:
+
+```bash
+pip install "tinymongo[bson]"
+```
+
+```python
+from datetime import datetime
+from bson import ObjectId
+
+episode_id = ObjectId()
+episodes.insert_one(
+    {"_id": episode_id, "created_date": datetime.now(), "title": "Async Python"}
+)
+episode = episodes.find_one({"_id": episode_id})
+```
+
+JSON-backed storage uses an explicit tagged representation and restores native
+values on read. Existing plain JSON files and string or integer IDs remain
+compatible. UUID, Decimal128, Binary, and regular-expression round trips remain
+tracked in [#75](https://github.com/schapman1974/tinymongo/issues/75).
 
 TinyMongo includes PyMongo-shaped contract tests that run application code with
 `import pymongo` redirected to TinyMongo:
@@ -307,8 +471,11 @@ pytest -o addopts='' -q -m 'contract and mongodb' tests/contracts
 Use `-m contract` instead of `-m 'contract and mongodb'` to run the complete
 embedded-plus-MongoDB matrix in one session.
 
-PyMongo remains a development dependency for these comparisons; it is not
-required to use TinyMongo at runtime.
+PyMongo remains optional. It is needed for these comparisons,
+`tinymongo.patch()`, and `ObjectId` support, but it is not required for normal
+TinyMongo clients or `datetime` storage. When it is installed, TinyMongo error
+classes also inherit the matching `pymongo.errors` classes, so existing
+`PyMongoError` handlers continue to work.
 
 PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract
@@ -326,8 +493,9 @@ print(client.supports("multiprocess_writes"))
 
 The capability map covers persistence, remote and object storage, table-native
 storage, multiprocess writes, native indexes, projections, bulk writes,
-aggregation, sessions, transactions, change streams, and BSON types. Unknown
-capability names raise `ValueError` so configuration mistakes are visible.
+aggregation, sessions, transactions, change streams, and installed BSON support.
+Unknown capability names raise `ValueError` so configuration mistakes are
+visible.
 
 Operations whose semantics TinyMongo cannot honor raise
 `TinyMongoNotSupportedError`. This includes sessions, transactions, change
@@ -338,8 +506,8 @@ that only describe an ignored network target remain harmless for drop-in use.
 ## MongoEngine
 
 Basic MongoEngine CRUD is supported by passing TinyMongo as the client class.
-Use a string primary key because TinyMongo's JSON backend does not persist BSON
-`ObjectId` values:
+The example keeps a string primary key for maximum portability. Native
+`ObjectId` values also round-trip when `tinymongo[bson]` is installed:
 
 ```python
 import mongoengine as me
@@ -391,7 +559,7 @@ take a look at demo.py within the repository.
     # returns a list of all users of 'module'
     users = db.users.find({'module': 'module'})
 
-    #update data returns True if successful and False if unsuccessful
+    # update data and inspect matched_count or modified_count on the result
     upd = db.users.update_one({"username": "admin"}, {"$set": {"module":"someothermodule"}})
 
     # Sorting users by its username DESC
@@ -446,51 +614,14 @@ your own serializers using the `tinydb-serialization` extension.
 
 First install it with `pip install "tinymongo[serialization]"`.
 
-## Handling datetime objects
+## Custom serialized types
 
-You can create a serializer for the python `datetime` using
-the following snippet:
-
-```python
-    from datetime import datetime
-    from tinydb_serialization import Serializer
-
-    class DatetimeSerializer(Serializer):
-        OBJ_CLASS = datetime
-
-        def __init__(self, format='%Y-%m-%dT%H:%M:%S', *args, **kwargs):
-            super(DatetimeSerializer, self).__init__(*args, **kwargs)
-            self._format = format
-
-        def encode(self, obj):
-            return obj.strftime(self._format)
-
-        def decode(self, s):
-            return datetime.strptime(s, self._format)
-```
-
-> NOTE: this serializer is available in `tinymongo.serializers.DateTimeSerializer`
-
-
-Now you have to subclass `TinyMongoClient` and provide customs storage.
-
-```python
-    from tinymongo import TinyMongoClient
-    from tinymongo.serializers import DateTimeSerializer
-    from tinydb_serialization import SerializationMiddleware
-
-
-    class CustomClient(TinyMongoClient):
-        @property
-        def _storage(self):
-            serialization = SerializationMiddleware()
-            serialization.register_serializer(DateTimeSerializer(), 'TinyDate')
-            # register other custom serializers
-            return serialization
-
-
-    connection = CustomClient('/path/to/folder')
-```
+`datetime` and optional `ObjectId` values are handled directly by TinyMongo;
+they do not need a custom serializer. For application-specific classes, subclass
+`TinyMongoClient` and provide a `tinydb-serialization` middleware as described
+in the TinyDB extension documentation. The legacy
+`tinymongo.serializers.DateTimeSerializer` remains available for existing
+custom-storage integrations, but new TinyMongo storage does not require it.
 
 # Flask-Admin
 
@@ -500,23 +631,22 @@ perform CRUD (Create, Read, Update, Delete) of the TinyDB records.
 
 You can find the example of Flask-Admin with TinyMongo in [Flask-Admin Examples Repository](https://github.com/flask-admin/flask-admin/tree/master/examples/tinymongo)
 
-> NOTE: To use Flask-Admin you need to register a DateTimeSerialization as showed in the previous topic.
+Datetime fields work with TinyMongo's built-in storage codec.
 
 # Contributions
 
-Contributions are welcome!  Currently, the most valuable contributions
+Contributions are welcome! Currently, the most valuable contributions
 would be:
 
-* adding test cases
-* adding functionality consistent with pymongo
-* documentation
-* identifying bugs and issues
+- adding test cases
+- adding functionality consistent with PyMongo
+- improving documentation
+- identifying bugs and issues
 
-# Future Development
+# Future development
 
-I will also be adding support for gridFS by storing the files somehow and indexing them in a db like mongo currently does
-
-More to come......
+Planned compatibility, aggregation, GridFS, wire-server, Compass, and browser
+work is tracked in the [TinyMongo roadmap](https://github.com/schapman1974/tinymongo/blob/master/ROADMAP.md).
 
 # License
 

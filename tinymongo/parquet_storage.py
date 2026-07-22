@@ -1,4 +1,3 @@
-import json
 import os
 import tempfile
 from tinydb.storages import Storage
@@ -6,6 +5,8 @@ import threading
 from typing import Any, Dict
 
 from .errors import StorageCorruptionError
+from .bson_codec import dumps as json_dumps
+from .bson_codec import loads as json_loads
 
 try:
     import pyarrow as _pa
@@ -61,7 +62,9 @@ def _acquire_rlock(rlock):
     first_acquire = rlock.acquire(blocking=False)
     if not first_acquire:
         rlock.acquire()
-        return False
+        # A different thread owned the process-local lock. This thread is now
+        # the outer owner and must acquire the cross-process file lock too.
+        return True
     return True
 
 
@@ -100,7 +103,7 @@ class ParquetStorage(Storage):
                 data_arr = table.column("data").to_pylist()
                 if not data_arr:
                     return {}
-                return json.loads(data_arr[0])
+                return json_loads(data_arr[0])
             except Exception as exc:
                 raise StorageCorruptionError(
                     "Cannot read Parquet database {0}: {1}".format(self.path, exc)
@@ -118,7 +121,7 @@ class ParquetStorage(Storage):
 
     def write(self, data):
         # serialize the entire TinyDB dict to a JSON string
-        json_str = json.dumps(data or {}, ensure_ascii=False)
+        json_str = json_dumps(data or {}, ensure_ascii=False)
 
         # ensure parent dir exists
         dname = os.path.dirname(self.path) or "."
@@ -149,7 +152,7 @@ class ParquetStorage(Storage):
                     if "data" in table.column_names:  # pragma: no branch
                         data_arr = table.column("data").to_pylist()
                         if data_arr:  # pragma: no branch
-                            existing = json.loads(data_arr[0])
+                            existing = json_loads(data_arr[0])
                 except Exception as exc:
                     raise StorageCorruptionError(
                         "Cannot update Parquet database {0}: {1}".format(self.path, exc)
@@ -166,11 +169,11 @@ class ParquetStorage(Storage):
                 incoming_table = {str(k): v for k, v in (table_data or {}).items()}
                 existing_table = merged.get(t, {})
 
-                id_to_eid = {
-                    v.get("_id"): k
+                ids_and_eids = [
+                    (v.get("_id"), k)
                     for k, v in existing_table.items()
                     if isinstance(v, dict) and "_id" in v
-                }
+                ]
                 try:
                     next_eid = max(int(k) for k in existing_table.keys()) + 1
                 except Exception:
@@ -178,15 +181,23 @@ class ParquetStorage(Storage):
 
                 for k, v in incoming_table.items():
                     doc_id = v.get("_id") if isinstance(v, dict) else None
-                    if doc_id is not None and doc_id in id_to_eid:
-                        existing_table[id_to_eid[doc_id]] = v
+                    existing_eid = next(
+                        (
+                            eid
+                            for existing_id, eid in ids_and_eids
+                            if existing_id == doc_id
+                        ),
+                        None,
+                    )
+                    if doc_id is not None and existing_eid is not None:
+                        existing_table[existing_eid] = v
                     else:
                         existing_table[str(next_eid)] = v
                         next_eid += 1
 
                 merged[t] = existing_table
 
-            json_str = json.dumps(merged, ensure_ascii=False)
+            json_str = json_dumps(merged, ensure_ascii=False)
 
             # write Parquet with single column 'data'
             arr = pa.array([json_str], type=pa.string())

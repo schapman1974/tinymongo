@@ -1,5 +1,4 @@
 import copy
-import json
 import os
 import sqlite3
 import tempfile
@@ -7,6 +6,9 @@ import threading
 from typing import Any
 from tinydb.storages import Storage
 from urllib.parse import urlparse
+from .bson_codec import clone as clone_document
+from .bson_codec import dumps as json_dumps
+from .bson_codec import loads as json_loads
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
 
@@ -61,6 +63,18 @@ def clear_memory_namespace(namespace):
                     _memory_registry.pop(address, None)
 
 
+def clear_memory_database(address):
+    """Remove one named database from the process-local storage registry."""
+    with _memory_registry_lock:
+        entry = _memory_registry.get(str(address))
+    if entry is None:
+        return
+    with entry["lock"]:
+        with _memory_registry_lock:
+            if _memory_registry.get(str(address)) is entry:
+                _memory_registry.pop(str(address), None)
+
+
 def is_object_storage_uri(value):
     return urlparse(str(value or "")).scheme.lower() in OBJECT_STORAGE_SCHEMES
 
@@ -112,7 +126,7 @@ class AtomicJSONStorage(Storage):
             if not os.path.exists(self.path) or os.path.getsize(self.path) == 0:
                 return {}
             with open(self.path, "r", encoding="utf8") as handle:
-                return json.load(handle)
+                return json_loads(handle.read())
         except (OSError, ValueError, TypeError) as exc:
             raise StorageCorruptionError(
                 "Cannot read JSON database {0}: {1}".format(self.path, exc)
@@ -133,11 +147,11 @@ class AtomicJSONStorage(Storage):
                 str(key): value for key, value in (table_data or {}).items()
             }
             existing_table = merged.get(table, {})
-            id_to_eid = {
-                value.get("_id"): key
+            ids_and_eids = [
+                (value.get("_id"), key)
                 for key, value in existing_table.items()
                 if isinstance(value, dict) and "_id" in value
-            }
+            ]
             try:
                 next_eid = max(int(key) for key in existing_table.keys()) + 1
             except Exception:
@@ -145,8 +159,12 @@ class AtomicJSONStorage(Storage):
 
             for value in incoming_table.values():
                 doc_id = value.get("_id") if isinstance(value, dict) else None
-                if doc_id is not None and doc_id in id_to_eid:
-                    existing_table[id_to_eid[doc_id]] = value
+                existing_eid = next(
+                    (eid for existing_id, eid in ids_and_eids if existing_id == doc_id),
+                    None,
+                )
+                if doc_id is not None and existing_eid is not None:
+                    existing_table[existing_eid] = value
                 else:
                     existing_table[str(next_eid)] = value
                     next_eid += 1
@@ -164,14 +182,14 @@ class AtomicJSONStorage(Storage):
                 try:
                     with open(self.path, "r", encoding="utf8") as handle:
                         payload_data = self._merge_data(
-                            json.load(handle) or {}, payload_data
+                            json_loads(handle.read()) or {}, payload_data
                         )
                 except (OSError, ValueError, TypeError) as exc:
                     raise StorageCorruptionError(
                         "Cannot update JSON database {0}: {1}".format(self.path, exc)
                     ) from exc
 
-            payload = json.dumps(payload_data, ensure_ascii=False)
+            payload = json_dumps(payload_data, ensure_ascii=False)
             with os.fdopen(fd, "w", encoding="utf8") as handle:
                 handle.write(payload)
                 handle.flush()
@@ -214,7 +232,7 @@ class MemoryStorage(AtomicJSONStorage):
 
     def write(self, data):
         with self.collection_lock:
-            payload = json.loads(json.dumps(data or {}, ensure_ascii=False))
+            payload = clone_document(data or {})
             if self.merge_writes and self._entry["data"] is not None:
                 payload = self._merge_data(self._entry["data"], payload)
             self._entry["data"] = copy.deepcopy(payload)
@@ -245,14 +263,14 @@ class SQLiteStorage(Storage):
             conn.close()
             if row is None or row[0] is None:
                 return {}
-            return json.loads(row[0])
+            return json_loads(row[0])
         except (sqlite3.DatabaseError, ValueError, TypeError, OSError) as exc:
             raise StorageCorruptionError(
                 "Cannot read SQLite database {0}: {1}".format(self.path, exc)
             ) from exc
 
     def write(self, data):
-        json_str = json.dumps(data or {}, ensure_ascii=False)
+        json_str = json_dumps(data or {}, ensure_ascii=False)
         dname = os.path.dirname(self.path) or "."
         os.makedirs(dname, exist_ok=True)
 
@@ -301,14 +319,14 @@ class DuckDBStorage(Storage):
             conn.close()
             if result is None or result[0] is None:
                 return {}
-            return json.loads(result[0])
+            return json_loads(result[0])
         except Exception as exc:
             raise StorageCorruptionError(
                 "Cannot read DuckDB database {0}: {1}".format(self.path, exc)
             ) from exc
 
     def write(self, data):
-        json_str = json.dumps(data or {}, ensure_ascii=False)
+        json_str = json_dumps(data or {}, ensure_ascii=False)
         dname = os.path.dirname(self.path) or "."
         os.makedirs(dname, exist_ok=True)
 

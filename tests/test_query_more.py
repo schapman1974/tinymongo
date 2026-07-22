@@ -55,6 +55,33 @@ def test_update_many_applies_to_all_matches():
     assert c.find({"active": True}).count() == 2
 
 
+def test_write_filters_share_regex_options_semantics():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    c = client.db.collection
+    c.insert_many(
+        [
+            {"_id": 1, "name": "Alpha"},
+            {"_id": 2, "name": "amber"},
+            {"_id": 3, "name": "Beta"},
+        ]
+    )
+    starts_with_a = {"name": {"$regex": "^a", "$options": "i"}}
+
+    one = c.update_one(starts_with_a, {"$set": {"first": True}})
+    many = c.update_many(starts_with_a, {"$set": {"matched": True}})
+    replacement = c.replace_one(
+        {"name": {"$regex": "^b", "$options": "i"}},
+        {"name": "Replaced"},
+    )
+
+    assert one.matched_count == 1
+    assert many.matched_count == 2
+    assert {doc["_id"] for doc in c.find({"matched": True})} == {1, 2}
+    assert replacement.matched_count == 1
+    assert c.find_one({"_id": 3}) == {"_id": 3, "name": "Replaced"}
+
+
 def test_replace_one_replaces_single_document():
     setup_db()
     client = tm.TinyMongoClient(DB_DIR)
@@ -259,15 +286,32 @@ def test_collection_indexes_accelerate_equality_queries():
         ]
     )
 
-    assert c.create_index("email") == "email"
+    assert c.create_index("email") == "email_1"
+    assert c.create_index("secondary") == "secondary_1"
     assert {"name": "email_1", "key": [("email", 1)]} in c.list_indexes()
     assert c.find({"email": "b@example.com"})[0]["_id"] == 2
 
     c.update_one({"_id": 2}, {"$set": {"email": "c@example.com"}})
     assert c.find({"email": "c@example.com"})[0]["_id"] == 2
 
+    # A fresh collection handle exercises durable index loading before a drop;
+    # choosing the second index also verifies name/field lookup traversal.
+    client.db.collection.drop_index("secondary")
     c.drop_index("email")
     assert c.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
+
+
+def test_equality_index_deduplicates_repeated_array_values():
+    setup_db()
+    client = tm.TinyMongoClient(DB_DIR)
+    collection = client.db.collection
+    collection.insert_one({"_id": 1, "tags": ["same", "same"]})
+
+    assert len(list(collection.find({"tags": "same"}))) == 1
+    collection.create_index("tags")
+    assert list(collection.find({"tags": "same"})) == [
+        {"_id": 1, "tags": ["same", "same"]}
+    ]
 
 
 def test_index_cache_is_invalidated_after_insert_and_delete():

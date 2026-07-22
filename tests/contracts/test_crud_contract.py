@@ -2,7 +2,6 @@
 
 import pytest
 
-from .known_differences import mark_known_difference
 from .support import observe
 
 
@@ -29,8 +28,7 @@ def test_insert_query_sort_and_count(contract_target):
     assert collection.count_documents({"score": {"$gte": 8}}) == 2
 
 
-def test_array_in_query_contract(contract_target, request):
-    mark_known_difference(request, contract_target.name, "array_in_query")
+def test_array_in_query_contract(contract_target):
     collection = contract_target.collection
     collection.insert_many(
         [
@@ -98,8 +96,7 @@ def test_duplicate_id_has_a_shared_error_category(contract_target):
     assert collection.count_documents({"_id": 1}) == 1
 
 
-def test_sort_skip_and_limit_contract(contract_target, request):
-    mark_known_difference(request, contract_target.name, "cursor_skip_limit")
+def test_sort_skip_and_limit_contract(contract_target):
     collection = contract_target.collection
     collection.insert_many([{"_id": number, "score": number} for number in range(1, 6)])
 

@@ -3,20 +3,7 @@
 import pytest
 
 
-KNOWN_DIFFERENCES = {
-    "array_in_query": {
-        "sqlite": "#77: table-native $in does not yet match values inside arrays",
-        "duckdb": "#77: table-native $in does not yet match values inside arrays",
-        "parquet": "#77: table-native $in does not yet match values inside arrays",
-    },
-    "cursor_skip_limit": {
-        "memory": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
-        "json": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
-        "sqlite": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
-        "duckdb": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
-        "parquet": "#73: cursor pagination does not yet retain a PyMongo-style query spec",
-    },
-}
+KNOWN_DIFFERENCES = {}
 
 
 def mark_known_difference(request, target_name, contract_name):

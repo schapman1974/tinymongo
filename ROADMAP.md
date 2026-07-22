@@ -5,32 +5,58 @@ while remaining an embedded, multi-backend database.
 
 The compatibility target is to pass at least 90% of a published,
 application-focused contract suite against real MongoDB. Unsupported server
-features should fail clearly instead of behaving approximately.
+features should fail clearly instead of behaving approximately. Talk Python is
+the first end-to-end application target: its real data layer should run through
+TinyMongo's synchronous and asynchronous APIs without rewriting its data-access
+call sites, with any remaining differences reported explicitly.
 
 The live checklist is [GitHub issue #103](https://github.com/schapman1974/tinymongo/issues/103),
 and progress by release is available on the
 [milestones page](https://github.com/schapman1974/tinymongo/milestones).
 
-## 1. Compatibility foundation
+## 1. Compatibility foundation and application acceptance
 
 [View milestone](https://github.com/schapman1974/tinymongo/milestone/1)
 
 Prerequisite backend work:
 
-- [ ] [#69: In-memory storage backend](https://github.com/schapman1974/tinymongo/issues/69)
-- [ ] [#70: PyMongo patching helper](https://github.com/schapman1974/tinymongo/issues/70)
-- [ ] [#74: Field projections](https://github.com/schapman1974/tinymongo/issues/74)
-- [ ] [#76: Durable indexes and unique constraints](https://github.com/schapman1974/tinymongo/issues/76)
+- [x] [#69: In-memory storage backend](https://github.com/schapman1974/tinymongo/issues/69)
+- [x] [#70: PyMongo patching helper](https://github.com/schapman1974/tinymongo/issues/70)
+- [x] [#74: Field projections](https://github.com/schapman1974/tinymongo/issues/74)
+- [x] [#76: Durable indexes and unique constraints](https://github.com/schapman1974/tinymongo/issues/76)
 
-Compatibility work:
+Application-compatibility work:
 
-- [ ] [#72: Real MongoDB contract suite](https://github.com/schapman1974/tinymongo/issues/72)
-- [ ] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
+- [ ] [#136: Full non-blocking PyMongo async API parity](https://github.com/schapman1974/tinymongo/issues/136)
+  - [x] Public async client/database/collection/cursor facade with lazy cursors,
+    off-thread storage calls, async cleanup, and sync-result parity.
+  - [ ] Run the complete async application contract against Talk Python and
+    record any remaining differences.
+- [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
+- [ ] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
+  - [x] Milestone 1 ObjectId and datetime storage/query support.
+  - [ ] Add UUID, Decimal128, Binary, and regular-expression round trips.
+- [ ] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
+  - [x] Talk Python query slice: scalar-to-array equality, combined `$nin`,
+    `$not`, `$regex`, case-insensitive `$options`, and missing fields.
+  - [ ] Prioritize the remaining query and update candidates from measured
+    application failures.
+- [ ] [#102: Optional PyMongo-version adaptation](https://github.com/schapman1974/tinymongo/issues/102)
+  - [x] TinyMongo errors conditionally inherit matching PyMongo errors.
+  - [ ] Add version-matrix CI plus broader signature and result adaptation.
+- [ ] [#72: Real MongoDB and application contract suite](https://github.com/schapman1974/tinymongo/issues/72)
 - [ ] [#87: Differential compatibility fuzzing](https://github.com/schapman1974/tinymongo/issues/87)
 
 Exit criteria:
 
-- Shared contracts run against real MongoDB and every applicable backend.
+- Every supported synchronous operation has a PyMongo-shaped asynchronous peer;
+  immediate cursor-building calls stay immediate and blocking work stays off the
+  event loop.
+- Shared contracts run both APIs against real MongoDB and every applicable
+  backend.
+- Talk Python runs against TinyMongo's async client, and any remaining
+  incompatibilities are captured as reproducible contracts or documented
+  differences.
 - Generated cases can reproduce behavioral differences.
 - Memory, projection, patching, durable indexes, and common APIs are available.
 
@@ -53,7 +79,6 @@ Exit criteria:
 
 [View milestone](https://github.com/schapman1974/tinymongo/milestone/3)
 
-- [ ] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
 - [ ] [#78: Ordered bulk writes](https://github.com/schapman1974/tinymongo/issues/78)
 - [ ] [#80: Advanced array update modifiers](https://github.com/schapman1974/tinymongo/issues/80)
 - [ ] [#95: Aggregation lookup](https://github.com/schapman1974/tinymongo/issues/95)
@@ -72,14 +97,12 @@ Exit criteria:
 
 [View milestone](https://github.com/schapman1974/tinymongo/milestone/4)
 
-- [ ] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
 - [ ] [#79: Backend benchmarks and compatibility reports](https://github.com/schapman1974/tinymongo/issues/79)
 - [ ] [#55: ODM integration](https://github.com/schapman1974/tinymongo/issues/55)
 - [ ] [#81: MongoDB document and key validation](https://github.com/schapman1974/tinymongo/issues/81)
 - [ ] [#83: Remaining common BSON types](https://github.com/schapman1974/tinymongo/issues/83)
 - [ ] [#93: Backend concurrency and compatibility stress tests](https://github.com/schapman1974/tinymongo/issues/93)
 - [ ] [#94: BSON comparison and sort order](https://github.com/schapman1974/tinymongo/issues/94)
-- [ ] [#102: Optional PyMongo-version adaptation](https://github.com/schapman1974/tinymongo/issues/102)
 
 Exit criteria:
 
@@ -189,16 +212,21 @@ Exit criteria:
 
 ## Execution order
 
-1. Complete compatibility foundations and generate a baseline score.
-2. Build aggregation core.
-3. Add advanced query, update, array, and bulk operations.
-4. Finish BSON semantics, durable indexes, and integration hardening.
-5. Implement GridFS on stable BSON, index, and cursor foundations.
-6. Publish release compatibility evidence against the 90% target.
-7. Build the wire-server foundation.
-8. Deliver read-only Compass browsing.
-9. Add Compass editing, GridFS wire clients, and broader driver support.
-10. Deliver WASM/browser support as a parallel local-first track.
+1. [x] Finish patching, projection, durable indexes, and practical batched
+   `IndexModel` behavior.
+2. [x] Complete the common synchronous API and build the asynchronous facade
+   over the same shared semantics.
+3. [x] Add the ObjectId, datetime, query, and PyMongo exception behavior
+   required by the first Talk Python contracts.
+4. [ ] Run Talk Python against TinyMongo's async client, turn every failure into a
+   contract, and publish the baseline compatibility score.
+5. [ ] Build aggregation core after the real-application acceptance path works.
+6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
+   compatibility gaps.
+7. [ ] Implement GridFS on stable BSON, index, and cursor foundations.
+8. [ ] Build the wire-server foundation, followed by read-only Compass browsing and
+   then editing support.
+9. [ ] Deliver WASM/browser support as a parallel local-first track.
 
 ## Scope boundary
 

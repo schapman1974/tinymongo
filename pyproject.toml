@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tinymongo"
 version = "1.2.0"
-description = "A flat file drop in replacement for mongodb. Requires TinyDB"
+description = "Embedded MongoDB-compatible database with sync, async, and multi-backend storage"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [ { name = "Stephen Chapman", email = "schapman1974@gmail.com" } ]
@@ -63,6 +63,8 @@ include-package-data = true
 
 [project.optional-dependencies]
 serialization = ["tinydb-serialization>=1.0.4,<2"]
+bson = ["pymongo>=4.9"]
+pymongo = ["pymongo>=4.9"]
 duckdb = ["duckdb>=1.0.0"]
 parquet = ["duckdb>=1.0.0", "pyarrow>=10.0.0"]
 postgres = ["psycopg[binary]>=3.1"]
@@ -71,6 +73,7 @@ mariadb = ["PyMySQL>=1.1"]
 remote-sql = ["psycopg[binary]>=3.1", "PyMySQL>=1.1"]
 all = [
   "tinydb-serialization>=1.0.4,<2",
+  "pymongo>=4.9",
   "duckdb>=1.0.0",
   "pyarrow>=10.0.0",
   "psycopg[binary]>=3.1",

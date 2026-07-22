@@ -2,7 +2,7 @@ pytest
 coverage
 pyarrow
 portalocker
-pymongo
+pymongo>=4.9
 mongoengine>=0.29,<1
 duckdb
 black>=25,<26

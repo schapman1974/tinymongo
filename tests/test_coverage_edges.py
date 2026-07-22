@@ -460,7 +460,8 @@ def test_upsert_helpers_database_compatibility_and_find_and_modify(tmp_path):
     replaced = collection.find_one_and_replace(
         {"_id": 3}, {"_id": 3, "value": 2}, upsert=True
     )
-    assert replaced == {"_id": 3, "value": 2}
+    assert replaced is None
+    assert collection.find_one({"_id": 3}) == {"_id": 3, "value": 2}
     assert collection.find_one_and_replace({"_id": "missing"}, {"value": 3}) is None
     assert collection.find_one_and_replace(
         {"_id": 3}, {"value": 4}, return_document=True
@@ -480,9 +481,10 @@ def test_upsert_helpers_database_compatibility_and_find_and_modify(tmp_path):
             {"email": "grace@example.com"},
             {"$set": {"active": True}},
             upsert=True,
-        )["active"]
-        is True
+        )
+        is None
     )
+    assert sqlite.find_one({"email": "grace@example.com"})["active"] is True
 
 
 def test_parquet_lock_helpers_and_fsync_failures(monkeypatch):
@@ -517,7 +519,7 @@ def test_parquet_lock_helpers_and_fsync_failures(monkeypatch):
             self.calls += 1
             return False if self.calls == 1 else True
 
-    assert ps._acquire_rlock(BlockingLock()) is False
+    assert ps._acquire_rlock(BlockingLock()) is True
 
 
 def test_cursor_and_gridfs_edges():
@@ -580,8 +582,8 @@ def test_collection_error_and_compatibility_edges(tmp_path):
     collection.insert_one({"_id": "", "name": "empty"})
     generated = collection.insert_one({"name": "generated"})
     assert generated.inserted_id
-    bypassed = collection.insert_one({"_id": 0}, bypass_document_validation=True)
-    assert bypassed.inserted_id == 0
+    with pytest.raises(DuplicateKeyError):
+        collection.insert_one({"_id": 0}, bypass_document_validation=True)
     with pytest.raises(DuplicateKeyError):
         collection.insert_one({"_id": 0})
     with pytest.raises(DuplicateKeyError):
@@ -714,6 +716,7 @@ def test_collection_write_and_no_match_edges(tmp_path):
     c.build_table()
     c.insert_one({"_id": "drop-table-branch"})
     db.tinydb.drop_table = lambda name: None
+    db._refresh_table = lambda: None
     assert c.drop() is True
     c.insert_many([{"_id": 1}, {"_id": 2}], bypass_document_validation=True)
     assert c.delete_many({}).deleted_count == 3

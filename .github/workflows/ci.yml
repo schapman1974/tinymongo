@@ -85,3 +85,75 @@ jobs:
         with:
           name: mongodb-compatibility-results
           path: contract-results.xml
+
+  remote-sql-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tinymongo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tinymongo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: mariadb
+          MARIADB_DATABASE: tinymongo
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TINYMONGO_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/tinymongo
+      TINYMONGO_MYSQL_DSN: mysql://root:mariadb@127.0.0.1:3306/tinymongo
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install remote SQL test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest ".[remote-sql]"
+
+      - name: Run PostgreSQL and MariaDB integration tests
+        run: pytest -o addopts='' -q -m integration tests/integration/test_remote_sql.py
+
+  pymongo-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          cache: pip
+
+      - name: Install minimum supported PyMongo
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest "pymongo==4.9.*" .
+
+      - name: Run PyMongo and BSON compatibility tests
+        run: >-
+          pytest -o addopts='' -q
+          tests/test_patching.py tests/test_bson_codec.py
