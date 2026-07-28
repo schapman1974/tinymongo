@@ -7,11 +7,18 @@
   explicit same-process sharing through named `memory://NAME` namespaces.
 - The memory backend now participates in the shared MongoDB compatibility
   contract matrix.
+- Deterministic JSON and Markdown compatibility reports generated from one or
+  more contract JUnit files, with sync/async, backend, and suite dimensions,
+  MongoDB-qualified scoring, and incomplete-matrix safeguards.
+- An external pytest acceptance runner that patches both PyMongo client classes
+  before application tests are imported and records report metadata.
 - `tinymongo.patch()` context-manager and decorator forms for temporarily
   routing sync and async PyMongo client construction to a configurable
   TinyMongo backend.
 - First-class non-blocking async client, database, collection, and lazy cursor
   APIs with awaited cleanup and off-thread storage work.
+- Shared MongoDB compatibility contracts now exercise both synchronous and
+  asynchronous APIs against every configured backend and reference target.
 - Mongo-style inclusion and exclusion projections for `find()` and `find_one()`,
   including nested dotted paths, array behavior, and compatible `_id` handling.
 - Durable single-field index metadata and unique constraints across JSON,

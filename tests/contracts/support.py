@@ -27,6 +27,7 @@ class ContractTarget:
     """Objects and metadata exposed to each shared contract."""
 
     name: str
+    api: str
     client: Any
     database: Any
     collection: Any

@@ -42,6 +42,9 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *,cover
+contract-results.xml
+compatibility-report.json
+compatibility-report.md
 
 # Translations
 *.mo
