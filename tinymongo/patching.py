@@ -14,7 +14,7 @@ from .tinymongo import MongoClient
 
 _patch_state_lock = threading.RLock()
 _patch_owner = None
-_patch_entries = []
+_patch_entries: list[tuple] = []
 
 
 def _patch_context_owner():

@@ -6,5 +6,5 @@ pymongo>=4.9
 mongoengine>=0.29,<1
 duckdb
 black>=25,<26
-ruff
-mypy
+ruff>=0.15,<0.16
+mypy>=1.19,<2
