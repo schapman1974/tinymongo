@@ -477,6 +477,10 @@ See [Compatibility reports](docs/COMPATIBILITY_REPORTS.md) to generate them
 locally and understand how passes, expected gaps, skips, and the MongoDB
 reference affect the score.
 
+The shared Talk-Python-derived contracts run through both TinyMongo API modes.
+To exercise the actual application without rewriting its PyMongo call sites,
+follow the [Talk Python acceptance run](docs/TALKPYTHON_ACCEPTANCE.md).
+
 PyMongo remains optional. It is needed for these comparisons,
 `tinymongo.patch()`, and `ObjectId` support, but it is not required for normal
 TinyMongo clients or `datetime` storage. When it is installed, TinyMongo error

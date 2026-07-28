@@ -86,6 +86,7 @@ jobs:
             python scripts/generate_compatibility_report.py contract-results.xml \
               --json-output compatibility-report.json \
               --markdown-output compatibility-report.md
+            cat compatibility-report.md >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::Contract JUnit output was not created; reports cannot be generated"
           fi

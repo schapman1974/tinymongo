@@ -30,6 +30,8 @@ Application-compatibility work:
 - [ ] [#136: Full non-blocking PyMongo async API parity](https://github.com/schapman1974/tinymongo/issues/136)
   - [x] Public async client/database/collection/cursor facade with lazy cursors,
     off-thread storage calls, async cleanup, and sync-result parity.
+  - [x] Run the application-derived compatibility contracts through both the
+    synchronous and asynchronous APIs.
   - [ ] Run the complete async application contract against Talk Python and
     record any remaining differences.
 - [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
@@ -45,6 +47,12 @@ Application-compatibility work:
   - [x] TinyMongo errors conditionally inherit matching PyMongo errors.
   - [ ] Add version-matrix CI plus broader signature and result adaptation.
 - [ ] [#72: Real MongoDB and application contract suite](https://github.com/schapman1974/tinymongo/issues/72)
+  - [x] Generate deterministic, dimensioned compatibility reports from the
+    sync/async backend and MongoDB contract matrix.
+  - [x] Provide an external pytest runner that patches both PyMongo client
+    classes before application tests are imported.
+  - [ ] Run the real Talk Python suite through the runner and publish its
+    reference, memory, and SQLite baseline.
 - [ ] [#87: Differential compatibility fuzzing](https://github.com/schapman1974/tinymongo/issues/87)
 
 Exit criteria:
@@ -220,6 +228,9 @@ Exit criteria:
    required by the first Talk Python contracts.
 4. [ ] Run Talk Python against TinyMongo's async client, turn every failure into a
    contract, and publish the baseline compatibility score.
+   - [x] Exercise the Talk-Python-derived contract slice through sync and async.
+   - [x] Add deterministic reporting and an external application test runner.
+   - [ ] Complete the real application run with Mike and record every difference.
 5. [ ] Build aggregation core after the real-application acceptance path works.
 6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
    compatibility gaps.
