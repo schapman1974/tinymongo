@@ -7,4 +7,4 @@ mongoengine>=0.29,<1
 duckdb
 black>=25,<26
 ruff
-mypy
+mypy>=1.19,<2
