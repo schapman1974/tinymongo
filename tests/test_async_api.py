@@ -151,6 +151,26 @@ def test_storage_work_does_not_block_the_event_loop(monkeypatch):
     run(scenario())
 
 
+def test_async_clients_reject_invalid_backends_without_opening_storage(tmp_path):
+    default_client = AsyncTinyMongoClient()
+    assert default_client._state._client is None
+    run(default_client.close())
+
+    native_path = tmp_path / "native"
+    with pytest.raises(ValueError, match="Unsupported backend"):
+        AsyncTinyMongoClient(str(native_path), "invalid-native")
+    assert not native_path.exists()
+
+    pymongo_path = tmp_path / "pymongo"
+    with pytest.raises(ValueError, match="Unsupported backend"):
+        AsyncMongoClient(
+            "mongodb://localhost:27017",
+            tinymongo_folder=str(pymongo_path),
+            backend="invalid-pymongo",
+        )
+    assert not pymongo_path.exists()
+
+
 def test_cursor_validation_close_and_limit_zero():
     async def scenario():
         client = AsyncTinyMongoClient(

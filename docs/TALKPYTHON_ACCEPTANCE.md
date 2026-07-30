@@ -94,6 +94,52 @@ The report is publishable only when every expected target cell was executed,
 the matching MongoDB reference behavior passed, and no result is unattributed.
 A partial run is still rendered, but it is labeled incomplete.
 
+## First application findings and rerun gate
+
+Mike Kennedy's first real Talk Python pass reached the asynchronous application
+initializer on SQLite, opened all four database handles, and accepted the index
+declarations for all 16 collections. It reduced the first blocking differences
+to reusable contracts:
+
+- datetimes and ObjectIds must sort instead of silently retaining insertion
+  order;
+- BinData must sort by length, subtype, and bytes;
+- `Binary`, `bytes`, and `bytearray` must cross the JSON persistence boundary;
+  generic subtype-0 values must compare like native bytes while other subtypes
+  remain distinct;
+- `insert_many()` must distinguish duplicate-key partial failures from
+  client-side encoding failures; and
+- synchronous and asynchronous code must preserve the same behavior across
+  memory, JSON, SQLite, DuckDB, and Parquet.
+
+The Mongo-compatible portions of these behaviors now run through the shared
+synchronous/asynchronous matrix and real MongoDB contracts. TinyMongo's
+stronger whole-input serialization preflight is covered locally because
+PyMongo may split a very large input across wire batches. Before publishing
+the Talk Python baseline, rerun the two reduced reproductions and the
+application suite, and record the exact Talk Python commit, Python and PyMongo
+versions, selected test inventory, and configuration. The runner's `--api`
+value labels results; the application configuration must actually exercise
+the corresponding client path.
+
+Mike's separate TinyMongo agent reference currently describes unreleased
+`master` behavior as version 1.2.0. After the compatibility branch merges,
+update that guide against the merge SHA or the `v1.2.1` tag, including the
+Binary codec, BSON-aware `_id` identity, `insert_many()` partial failures,
+bounded sort diagnostics, exact `$unset`, BSON-aware CLI, and dotted child
+collections. Also correct the stale list-only `insert_many()` signature and
+defaults, `BulkWriteError` details, blanket session claim, conditional
+`AsyncMongoClient` patch/import caveat, numeric-versus-bool identity wording,
+explicit null `_id` handling, `_default` collection filtering, current
+error/result shapes, and `bytearray` normalization. It should call PyMongo an
+optional runtime dependency—not a core dependency—for ObjectId and nonzero
+Binary values, patching, and conditional exception inheritance.
+The same guide update should correct constructor and sync-laziness wording,
+document validation as a no-op, empty-array and sort-error details,
+backend-specific locking and durability, the full object-storage environment
+table, portable capability and duplicate-error examples, and the fact that CLI
+migration does not copy source index metadata.
+
 ## Handling failures
 
 For each difference found in the real application:

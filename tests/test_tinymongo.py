@@ -103,7 +103,7 @@ def test_list_collections():
     Should list out all collections/tables in database
     """
     tables = tiny_database.collection_names()
-    assert "_default" in tables
+    assert "_default" not in tables
     assert "tinyCollection" in tables
 
 
@@ -518,12 +518,12 @@ def test_insert_many(collection):
 
 def test_insert_many_wrong_input(collection):
     """
-    Testing the 'insert_many' method with a non-list input
+    Testing the 'insert_many' method with a mapping input
     :param collection: pytest fixture that returns the collection
     :return:
     """
     item = {"my_key": "my value"}
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         collection["tiny"].insert_many(item)
 
 

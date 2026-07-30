@@ -28,6 +28,7 @@ from tinymongo.table_backends import (
     _duckdb_setup_sql_from_env,
     _import_optional_driver,
     _is_object_store_uri,
+    _json_dumps,
     _json_loads,
     _join_uri,
     _reject_remote_unique_arrays,
@@ -106,9 +107,11 @@ def test_parquet_temporary_file_cleanup_branch(tmp_path, monkeypatch):
 class FakeRemoteStore:
     def __init__(self):
         self.tables = {}
+        self.columns = {}
         self.metadata = set()
         self.indexes = {}
         self.index_ddl = []
+        self.schema_ddl = []
 
 
 class FakeRemoteCursor:
@@ -122,9 +125,17 @@ class FakeRemoteCursor:
         if upper.startswith("CREATE TABLE"):
             table = self._table_from_create(normalized)
             if "TINYMONGO_" not in table.upper():
-                self.store.tables.setdefault(table, {})
+                if table not in self.store.tables:
+                    self.store.tables[table] = {}
+                    self.store.columns[table] = {"_id", "data"}
+                    if "DATA_ORDERED" in upper:
+                        self.store.columns[table].add("data_ordered")
         elif upper.startswith(("CREATE INDEX", "CREATE UNIQUE INDEX")):
             self.store.index_ddl.append(normalized)
+        elif upper.startswith("ALTER TABLE") and "DATA_ORDERED" in upper:
+            table = self._table_after(normalized, "TABLE")
+            self.store.columns.setdefault(table, {"_id", "data"}).add("data_ordered")
+            self.store.schema_ddl.append(normalized)
         elif upper.startswith(("ALTER TABLE", "DROP INDEX")):
             self.store.index_ddl.append(normalized)
         elif upper.startswith("INSERT") and "TINYMONGO_INDEXES" in upper:
@@ -132,6 +143,11 @@ class FakeRemoteCursor:
             self.store.indexes[(database, collection, name)] = (field, bool(unique))
         elif upper.startswith("INSERT") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.add(tuple(params))
+        elif upper.startswith("SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS"):
+            table = params[0]
+            self.rows = (
+                [(1,)] if "data_ordered" in self.store.columns.get(table, set()) else []
+            )
         elif upper.startswith("SELECT DISTINCT"):
             self.rows = sorted({(database,) for database, _ in self.store.metadata})
         elif upper.startswith("SELECT INDEX_NAME"):
@@ -152,9 +168,9 @@ class FakeRemoteCursor:
                 if metadata_database == database
             )
         elif upper.startswith("DROP TABLE"):
-            self.store.tables.pop(
-                self._table_after(normalized, "TABLE IF EXISTS"), None
-            )
+            table = self._table_after(normalized, "TABLE IF EXISTS")
+            self.store.tables.pop(table, None)
+            self.store.columns.pop(table, None)
         elif upper.startswith("DELETE FROM") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.discard(tuple(params))
         elif upper.startswith("DELETE FROM") and "TINYMONGO_INDEXES" in upper:
@@ -174,16 +190,52 @@ class FakeRemoteCursor:
             self.store.tables.setdefault(self._table_after(normalized, "FROM"), {}).pop(
                 params[0], None
             )
+        elif upper.startswith("SELECT _ID, DATA_ORDERED, DATA"):
+            table = self._table_after(normalized, "FROM")
+            self.rows = [
+                (
+                    doc_id,
+                    self._payload_columns(value)[1],
+                    self._payload_columns(value)[0],
+                )
+                for doc_id, value in self.store.tables.get(table, {}).items()
+            ]
+        elif upper.startswith("SELECT DATA_ORDERED, DATA") and "WHERE _ID" in upper:
+            table = self._table_after(normalized, "FROM")
+            value = self.store.tables.get(table, {}).get(params[0])
+            if value is None:
+                self.rows = []
+            else:
+                data, ordered_data = self._payload_columns(value)
+                self.rows = [(ordered_data, data)]
+        elif upper.startswith("SELECT DATA_ORDERED, DATA"):
+            table = self._table_after(normalized, "FROM")
+            self.rows = [
+                (self._payload_columns(value)[1], self._payload_columns(value)[0])
+                for value in self.store.tables.get(table, {}).values()
+            ]
         elif upper.startswith("SELECT DATA") and "WHERE _ID" in upper:
             table = self._table_after(normalized, "FROM")
-            data = self.store.tables.get(table, {}).get(params[0])
+            value = self.store.tables.get(table, {}).get(params[0])
+            data = self._payload_columns(value)[0] if value is not None else None
             self.rows = [(data,)] if data is not None else []
         elif upper.startswith("SELECT DATA"):
             table = self._table_after(normalized, "FROM")
-            self.rows = [(data,) for data in self.store.tables.get(table, {}).values()]
+            self.rows = [
+                (self._payload_columns(value)[0],)
+                for value in self.store.tables.get(table, {}).values()
+            ]
         elif upper.startswith("UPDATE"):
             table = self._table_after(normalized, "UPDATE")
-            self.store.tables.setdefault(table, {})[params[1]] = params[0]
+            if len(params) == 3:
+                data, ordered_data, doc_id = params
+                self.store.tables.setdefault(table, {})[doc_id] = (
+                    data,
+                    ordered_data,
+                )
+            else:
+                data, doc_id = params
+                self.store.tables.setdefault(table, {})[doc_id] = data
         return self
 
     def executemany(self, sql, rows):
@@ -196,14 +248,15 @@ class FakeRemoteCursor:
 
         table = self._table_after(" ".join(sql.split()), "INTO")
         target = self.store.tables.setdefault(table, {})
-        for doc_id, data in rows:
+        for row in rows:
+            doc_id, data = row[:2]
             if (
                 doc_id in target
                 and "CONFLICT" not in sql.upper()
                 and "REPLACE" not in sql.upper()
             ):
                 raise RuntimeError("duplicate key")
-            target[doc_id] = data
+            target[doc_id] = (data, row[2]) if len(row) == 3 else data
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
@@ -213,6 +266,11 @@ class FakeRemoteCursor:
 
     def close(self):
         pass
+
+    def _payload_columns(self, value):
+        if isinstance(value, tuple) and len(value) == 2:
+            return value
+        return value, None
 
     def _table_from_create(self, sql):
         return self._clean(sql.split("IF NOT EXISTS", 1)[1].strip().split()[0])
@@ -814,7 +872,8 @@ def test_tinymongo_table_backend_api_branches(tmp_path):
     db._refresh_table()
     collection = db.users
 
-    assert collection.any_attribute is collection
+    assert collection.any_attribute is not collection
+    assert collection.any_attribute.name == "users.any_attribute"
     assert collection.create_index("email") == "email_1"
     assert collection.drop_index("email") is None
     assert collection.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
@@ -823,7 +882,7 @@ def test_tinymongo_table_backend_api_branches(tmp_path):
 
     with pytest.raises(ValueError):
         collection.insert_one("bad")
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         collection.insert_many("bad")
 
     one = collection.insert_one({"email": "one@example.com"})
@@ -914,7 +973,8 @@ def test_remote_sql_backend_defensive_edges(monkeypatch):
         backend._execute(BadConn(), "SELECT 1")
     with pytest.raises(RuntimeError, match="executemany"):
         backend._executemany(BadConn(), "SELECT 1", [])
-    assert backend._commit(BadConn()) is None
+    with pytest.raises(RuntimeError, match="commit"):
+        backend._commit(BadConn())
     assert backend._close_cursor(BadCursor()) is None
     assert backend._data_placeholder() == "%s"
     with backend._write_lock():
@@ -976,6 +1036,7 @@ def test_postgres_indexes_are_native_durable_unique_and_droppable(monkeypatch):
     assert any(
         "CREATE UNIQUE INDEX" in sql
         and "COALESCE(jsonb_extract_path(data, 'email'), 'null'::jsonb)" in sql
+        and "jsonb_typeof(data)" not in sql
         for sql in store.index_ddl
     )
 
@@ -1018,6 +1079,24 @@ def test_remote_native_errors_are_mapped_without_hiding_other_failures(monkeypat
     store = FakeRemoteStore()
     backend = _postgres_backend(monkeypatch, store)
     backend.insert_many("users", [{"_id": 1, "email": "one@example.com"}])
+    assert backend.find_one("users", {"_id": {"$eq": 1}})["email"] == (
+        "one@example.com"
+    )
+    assert (
+        backend.replace_one(
+            "users",
+            "missing",
+            {"_id": "missing", "email": "missing@example.com"},
+        )
+        is None
+    )
+
+    table = backend._table_name("users")
+    store.tables[table]["legacy-collision"] = _json_dumps(
+        {"_id": 2, "email": "legacy@example.com"}
+    )
+    assert backend.find_one("users", {"_id": "legacy-collision"}) is None
+
     original_execute = backend._execute
 
     def fail_update(message):
@@ -1055,9 +1134,16 @@ def test_remote_native_errors_are_mapped_without_hiding_other_failures(monkeypat
     def fail_insert(conn, collection, rows, bypass_document_validation):
         raise RuntimeError("insert syntax error")
 
+    def fail_duplicate_insert(conn, collection, rows, bypass_document_validation):
+        raise RuntimeError("duplicate key")
+
+    monkeypatch.setattr(backend, "_insert_rows", fail_duplicate_insert)
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many("users", [{"_id": 3, "email": "three@example.com"}])
+
     monkeypatch.setattr(backend, "_insert_rows", fail_insert)
     with pytest.raises(RuntimeError, match="insert syntax error"):
-        backend.insert_many("users", [{"_id": 2, "email": "two@example.com"}])
+        backend.insert_many("users", [{"_id": 4, "email": "four@example.com"}])
 
 
 def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
@@ -1086,6 +1172,7 @@ def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
     assert any(
         "GENERATED ALWAYS AS" in sql
         and "JSON_TYPE(JSON_EXTRACT(data, '$.\"value\"'))" in sql
+        and "JSON_TYPE(data)" not in sql
         and "CONCAT('bool:'" in sql
         and "AS DECIMAL(65, 30)" in sql
         and "SHA2(CASE" in sql
@@ -1164,6 +1251,77 @@ def test_postgres_table_backend_with_fake_driver(monkeypatch):
     assert backend.drop_collection("users") is True
     assert backend.drop_collection("users") is False
     assert backend._data_placeholder() == "%s::jsonb"
+
+
+@pytest.mark.parametrize("backend_factory", [_postgres_backend, _mysql_backend])
+def test_remote_dual_payload_preserves_order_and_nonfinite_values(
+    monkeypatch,
+    backend_factory,
+):
+    store = FakeRemoteStore()
+    backend = backend_factory(monkeypatch, store)
+    ordered_id = {"longer": 1, "a": 2}
+    reordered_id = {"a": 2, "longer": 1}
+
+    backend.insert_many(
+        "values",
+        [
+            {
+                "_id": ordered_id,
+                "value": float("nan"),
+            },
+            {
+                "_id": reordered_id,
+                "value": float("inf"),
+            },
+        ],
+    )
+
+    raw_values = list(store.tables[backend._table_name("values")].values())
+    assert all(isinstance(value, tuple) for value in raw_values)
+    assert all(data == ordered_data for data, ordered_data in raw_values)
+    assert all(data.startswith("{") for data, _ordered_data in raw_values)
+    assert all("NaN" not in data and "Infinity" not in data for data, _ in raw_values)
+    assert backend.find_one("values", {"_id": ordered_id})["_id"] == ordered_id
+    assert backend.find_one("values", {"_id": reordered_id})["_id"] == reordered_id
+    assert backend.find_one("values", {"_id": ordered_id})["value"] != (
+        backend.find_one("values", {"_id": ordered_id})["value"]
+    )
+    assert backend.find_one("values", {"_id": reordered_id})["value"] == float("inf")
+
+
+@pytest.mark.parametrize("backend_factory", [_postgres_backend, _mysql_backend])
+def test_remote_dual_payload_upgrades_and_recovers_legacy_rows(
+    monkeypatch,
+    backend_factory,
+):
+    store = FakeRemoteStore()
+    backend = backend_factory(monkeypatch, store)
+    table = backend._table_name("legacy")
+    ordered_id = {"longer": 1, "a": 2}
+    database_reordered_id = {"a": 2, "longer": 1}
+    legacy_row_id = str(ordered_id)
+    store.tables[table] = {
+        legacy_row_id: _json_dumps({"_id": database_reordered_id, "label": "legacy"})
+    }
+    store.columns[table] = {"_id", "data"}
+
+    found = backend.find_one("legacy", {"_id": ordered_id})
+
+    assert found == {"_id": ordered_id, "label": "legacy"}
+    assert backend.find_one("legacy", {"label": "legacy"}) == found
+    assert "data_ordered" in store.columns[table]
+    assert sum("DATA_ORDERED" in sql.upper() for sql in store.schema_ddl) == 1
+
+    backend.replace_one(
+        "legacy",
+        ordered_id,
+        {"_id": ordered_id, "label": "updated"},
+    )
+
+    assert isinstance(store.tables[table][legacy_row_id], tuple)
+    assert backend.find_one("legacy", {"_id": ordered_id})["label"] == "updated"
+    assert backend.find_one("legacy", {"_id": database_reordered_id}) is None
 
 
 def test_mysql_table_backend_with_fake_driver(monkeypatch):

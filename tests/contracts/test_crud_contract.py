@@ -63,6 +63,28 @@ def test_update_and_result_metadata(contract_target):
     ]
 
 
+def test_unset_removes_top_level_and_nested_fields(contract_target):
+    collection = contract_target.collection
+    collection.insert_one(
+        {
+            "_id": "unset",
+            "remove_me": True,
+            "nested": {"keep": 1, "remove_me": 2},
+        }
+    )
+
+    result = collection.update_one(
+        {"_id": "unset"},
+        {"$unset": {"remove_me": "", "nested.remove_me": ""}},
+    )
+
+    assert (result.matched_count, result.modified_count) == (1, 1)
+    assert collection.find_one({"_id": "unset"}) == {
+        "_id": "unset",
+        "nested": {"keep": 1},
+    }
+
+
 def test_replace_upsert_and_delete_metadata(contract_target):
     collection = contract_target.collection
     collection.insert_one({"_id": 1, "name": "Ada", "active": False})
@@ -94,6 +116,21 @@ def test_duplicate_id_has_a_shared_error_category(contract_target):
 
     assert outcome.error == "duplicate_key"
     assert collection.count_documents({"_id": 1}) == 1
+
+
+def test_explicit_null_id_is_preserved_and_unique(contract_target):
+    collection = contract_target.collection
+    document = {"_id": None, "name": "explicit null"}
+
+    result = collection.insert_one(document)
+    duplicate = observe(
+        lambda: collection.insert_one({"_id": None, "name": "duplicate"})
+    )
+
+    assert result.inserted_id is None
+    assert document["_id"] is None
+    assert duplicate.error == "duplicate_key"
+    assert collection.find_one({"_id": None})["name"] == "explicit null"
 
 
 def test_sort_skip_and_limit_contract(contract_target):

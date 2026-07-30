@@ -46,6 +46,17 @@ except ImportError:  # pragma: no cover - exercised in dependency-free installs
     class _DuplicateKeyError(_WriteError):
         pass
 
+    class _BulkWriteError(_OperationFailure):
+        def __init__(self, results):
+            super(_BulkWriteError, self).__init__(
+                "batch op errors occurred", code=65, details=results
+            )
+
+        @property
+        def timeout(self):
+            write_errors = self.details.get("writeErrors", [])
+            return bool(write_errors and write_errors[-1].get("code") == 50)
+
     class _InvalidOperation(_PyMongoError):
         pass
 
@@ -57,6 +68,7 @@ else:
     _CursorNotFound = _pymongo_errors.CursorNotFound  # type: ignore[misc,assignment]
     _WriteError = _pymongo_errors.WriteError  # type: ignore[misc,assignment]
     _DuplicateKeyError = _pymongo_errors.DuplicateKeyError  # type: ignore[misc,assignment]
+    _BulkWriteError = _pymongo_errors.BulkWriteError  # type: ignore[misc,assignment]
     _InvalidOperation = _pymongo_errors.InvalidOperation  # type: ignore[misc,assignment]
 
 
@@ -86,6 +98,10 @@ class WriteError(_WriteError, OperationFailure):
 
 class DuplicateKeyError(_DuplicateKeyError, WriteError):
     """Raised when a write violates a unique key constraint."""
+
+
+class BulkWriteError(_BulkWriteError, OperationFailure):
+    """Raised when one or more operations in a batch write fail."""
 
 
 class InvalidOperation(_InvalidOperation, TinyMongoError):

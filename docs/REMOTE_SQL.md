@@ -91,7 +91,8 @@ tinymongo migrate ./tinydb ./unused \
 ```
 
 The `path` argument is ignored for remote SQL backends, but it is still present
-to keep CLI commands consistent across all backends.
+to keep CLI commands consistent across all backends. When the DSN flags are
+omitted, CLI commands use the environment-variable precedence documented above.
 
 ## Storage Layout
 
@@ -110,11 +111,27 @@ app__events
 
 Each table has:
 
-- `_id`: string primary key
+- `_id`: opaque BSON-aware primary key for new rows, with legacy stringified
+  keys still readable and mutable
 - `data`: JSON/JSONB document payload
+- `data_ordered`: nullable `TEXT` on PostgreSQL or `LONGTEXT` on
+  MariaDB/MySQL, holding an encoded copy that preserves embedded-document field
+  order and strict-JSON non-finite values
 
 TinyMongo also creates `__tinymongo_collections` to track database and
-collection names.
+collection names and `__tinymongo_indexes` to persist index definitions.
+Supported indexes are backed by native SQL indexes over the unchanged `data`
+JSON object.
+
+When TinyMongo first opens a table created before 1.2.1, it adds
+`data_ordered` automatically. The database account therefore needs
+`ALTER TABLE` permission during the upgrade. Existing rows remain readable
+with a null ordered copy, and existing native JSON indexes remain valid because
+the `data` column keeps its original object representation. PostgreSQL JSONB
+may already have normalized field order in legacy rows. TinyMongo can recover a
+literal container `_id` from its legacy physical row key; other legacy mappings
+retain the order PostgreSQL returns, not necessarily the document's original
+application order.
 
 ## Query Behavior
 

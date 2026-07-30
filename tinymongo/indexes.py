@@ -24,7 +24,7 @@ _MODEL_ALLOWED_OPTIONS = {
 
 
 class TinyMongoUnsupportedWarning(UserWarning):
-    """Warn that an index declaration was accepted with reduced behavior."""
+    """Warn that a request was accepted with explicitly reduced behavior."""
 
 
 def _unsupported(message):

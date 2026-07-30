@@ -7,6 +7,7 @@ from typing import Any, Dict
 from .errors import StorageCorruptionError
 from .bson_codec import dumps as json_dumps
 from .bson_codec import loads as json_loads
+from .bson_types import bson_values_equal
 
 try:
     import pyarrow as _pa
@@ -30,6 +31,7 @@ portalocker: Any = _portalocker
 # acquisitions causing AlreadyLocked errors when the same process/thread
 # re-enters storage write paths.
 _local_rlocks: Dict[str, threading.RLock] = {}
+_MISSING_ID = object()
 
 
 def _require_pyarrow():
@@ -180,16 +182,18 @@ class ParquetStorage(Storage):
                     next_eid = 1
 
                 for k, v in incoming_table.items():
-                    doc_id = v.get("_id") if isinstance(v, dict) else None
+                    doc_id = (
+                        v["_id"] if isinstance(v, dict) and "_id" in v else _MISSING_ID
+                    )
                     existing_eid = next(
                         (
                             eid
                             for existing_id, eid in ids_and_eids
-                            if existing_id == doc_id
+                            if bson_values_equal(existing_id, doc_id)
                         ),
                         None,
                     )
-                    if doc_id is not None and existing_eid is not None:
+                    if doc_id is not _MISSING_ID and existing_eid is not None:
                         existing_table[existing_eid] = v
                     else:
                         existing_table[str(next_eid)] = v

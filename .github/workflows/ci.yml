@@ -7,6 +7,35 @@ on:
     branches: [ main, master ]
 
 jobs:
+  core-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          cache: pip
+
+      - name: Install only core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest .
+
+      - name: Verify optional BSON dependencies are absent
+        run: >-
+          python -c "import importlib.util;
+          assert importlib.util.find_spec('pymongo') is None;
+          assert importlib.util.find_spec('bson') is None"
+
+      - name: Run dependency-free BSON and CLI tests
+        run: >-
+          pytest -o addopts='' -q
+          tests/test_bson_registry_hardening.py tests/test_cli.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -146,7 +175,7 @@ jobs:
       - name: Install remote SQL test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest ".[remote-sql]"
+          pip install pytest ".[remote-sql,bson]"
 
       - name: Run PostgreSQL and MariaDB integration tests
         run: pytest -o addopts='' -q -m integration tests/integration/test_remote_sql.py
@@ -173,3 +202,5 @@ jobs:
         run: >-
           pytest -o addopts='' -q
           tests/test_patching.py tests/test_bson_codec.py
+          tests/test_insert_many_semantics.py tests/test_talkpython_regressions.py
+          -k 'not duckdb and not parquet'
