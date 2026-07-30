@@ -17,14 +17,16 @@ Python 3.9, 3.11, and 3.13.
 # Installation
 
 The latest stable release can be installed via `pip install tinymongo`.
+This checkout is the forthcoming 1.2.1 release line. Until 1.2.1 is published
+on PyPI, install the Git branch directly to use the APIs documented below:
 
-The library is currently under rapid development and a more recent version
-may be desired.
+```bash
+pip install "tinymongo @ git+https://github.com/schapman1974/tinymongo.git@master"
+```
 
-In this case, simply clone this repository, navigate
-to the root project directory, and `pip install -e .`
-
-or use `pip install -e git+https://github.com/schapman1974/tinymongo.git#egg=tinymongo`
+For development, clone this repository and run `pip install -e .` from its
+root. Use the `v1.2.0` tag when you need documentation that matches the current
+stable package exactly; use the `v1.2.1` tag after that release is published.
 
 The default JSON backend has a small dependency set. Optional database backends
 may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
@@ -34,7 +36,9 @@ may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
 - **Roadmap:** See the [TinyMongo roadmap](https://github.com/schapman1974/tinymongo/blob/master/ROADMAP.md) for planned compatibility, GridFS, Compass, wire-server, and browser work.
 - **Default storage:** TinyMongo uses TinyDB-compatible JSON storage unless another backend is selected.
 - **Table-native backends:** SQLite, DuckDB, and Parquet backends store one real table/file per collection instead of one serialized database blob.
-- **Concurrency:** writes use atomic temp-file replace and optional advisory locks (`portalocker`) to reduce corruption risk under concurrent writers.
+- **Concurrency:** local JSON writes use atomic replace, `fsync`, and advisory
+  locks. Table-native and remote backends use their own transactional or
+  file-replacement mechanisms; see the backend-specific documentation.
 - **Async API:** async clients keep storage and lock waits off the event loop
   while sharing the synchronous implementation's behavior.
 - **Tests & CI:** a GitHub Actions workflow is included at `.github/workflows/ci.yml` to run unit tests and linters across Python versions. See `requirements-dev.txt` for dev dependencies.
@@ -182,16 +186,23 @@ You can select another backend with the `backend` argument:
 
 Parquet can also store collection files in object storage by passing
 `storage_uri` or setting `TINYMONGO_STORAGE_URI`. Object-storage Parquet is
-experimental in `1.2.0` and currently uses one Parquet file per collection, so
+experimental and currently uses one Parquet file per collection, so
 updates/deletes rewrite that file:
 
 ```python
     s3_connection = TinyMongoClient(
-        "/local/fallback-folder",
+        "/unused-local-path",
         backend="parquet",
         storage_uri="s3://my-bucket/tinymongo",
     )
 ```
+
+When `storage_uri` is set, it fully determines the Parquet data location. The
+API folder argument is optional and ignored; the CLI path argument remains a
+required placeholder. Neither creates a local cache or fallback directory.
+Remote SQL treats its path argument the same way. Environment-only
+`TINYMONGO_STORAGE_URI` and remote DSN settings also work for CLI database
+discovery and migration summaries.
 
 Available backends:
 
@@ -216,11 +227,11 @@ pip install "tinymongo[serialization]"
 ```
 
 If an optional driver is missing, selecting that backend raises an `ImportError`
-with the corresponding installation command. PyMongo itself is not a runtime
-dependency; it is used by the optional patch helper and development compatibility
-tests only when those features are selected. Install `tinymongo[bson]` for
-`ObjectId` values or `tinymongo[pymongo]` for patching and
-installed-version compatibility.
+with the corresponding installation command. PyMongo is not a core runtime
+dependency. It is selected at runtime for `ObjectId`, non-generic `Binary`
+subtypes, patching, and conditional PyMongo exception inheritance, and is also
+used by development compatibility tests. Install `tinymongo[bson]` for BSON
+values or `tinymongo[pymongo]` for patching and installed-version compatibility.
 
 | Backend | Dependency | Best fit | Notes |
 | --- | --- | --- | --- |
@@ -305,10 +316,19 @@ Use `--backend` with `inspect`, `list-dbs`, `list-collections`, `export`, and
 ```bash
 tinymongo inspect ./sqlite-db --backend sqlite
 tinymongo export ./parquet-db app users --backend parquet -o users.json
-tinymongo inspect ./local-cache --backend parquet --storage-uri s3://my-bucket/tinymongo
-tinymongo migrate ./tinydb ./local-cache --to-backend parquet --target-uri s3://my-bucket/tinymongo
+tinymongo inspect ./unused --backend parquet --storage-uri s3://my-bucket/tinymongo
+tinymongo migrate ./tinydb ./unused --to-backend parquet --target-uri s3://my-bucket/tinymongo
 tinymongo migrate ./tinydb ./unused --to-backend postgres --target-dsn "$TINYMONGO_POSTGRES_DSN"
 ```
+
+Export and import use the same tagged JSON codec as storage, so supported
+datetime, ObjectId, bytes, and Binary values round-trip. `bytearray` is accepted
+and imports back as `bytes`. Inspection, collection listing, and migration omit
+TinyDB's internal `_default` table. Export preserves embedded-document field
+order, including document-valued `_id` values. Replace-mode imports and
+migrations preflight the complete write with the destination's indexes before
+deleting existing documents, and restore those documents if deletion or the
+final insertion fails.
 
 
 # Integration and stress testing
@@ -418,14 +438,24 @@ supported for unique indexes yet. Remote SQL uses native constraints for scalar
 races. It rejects array values under unique indexes because its native indexes
 cannot yet guarantee cross-process multikey uniqueness.
 
-Use one consistent scalar type for `_id` values. Full BSON-aware `_id`
-comparison is tracked in [#94](https://github.com/schapman1974/tinymongo/issues/94);
-cross-type comparison and sort order remain outside the current BSON slice.
+SQL, DuckDB, and Parquet storage uses typed physical `_id` keys for new rows.
+Existing databases with older stringified keys remain readable and mutable.
+BSON-equivalent IDs share one key (`1` and `1.0`, or native bytes and Binary
+subtype 0), while BSON-distinct values such as `True` and `1` or identical
+binary data with different subtypes remain separate.
 
-## ObjectId and datetime values
+Cursor sorting follows MongoDB's comparison order for the currently supported
+scalar families, including BinData, `ObjectId`, booleans, and datetimes.
+Broader BSON comparison across ranges, indexes, and future aggregation remains
+tracked in
+[#94](https://github.com/schapman1974/tinymongo/issues/94).
 
-`datetime` values round-trip through every backend. Install the optional BSON
-extra to use `bson.ObjectId` without making PyMongo a core dependency:
+## ObjectId, datetime, and binary values
+
+`datetime` and `bytes` values round-trip through every backend. `bytearray` is
+accepted and reads back as `bytes`. Install the optional BSON extra to use
+`bson.ObjectId` or non-generic `bson.Binary` subtypes without making PyMongo a
+core dependency:
 
 ```bash
 pip install "tinymongo[bson]"
@@ -433,19 +463,57 @@ pip install "tinymongo[bson]"
 
 ```python
 from datetime import datetime
-from bson import ObjectId
+from bson import Binary, ObjectId
 
 episode_id = ObjectId()
 episodes.insert_one(
-    {"_id": episode_id, "created_date": datetime.now(), "title": "Async Python"}
+    {
+        "_id": episode_id,
+        "created_date": datetime.now(),
+        "image": b"\x89PNG\r\n\x1a\n",
+        "asset_id": Binary(bytes(range(16)), subtype=4),
+        "title": "Async Python",
+    }
 )
 episode = episodes.find_one({"_id": episode_id})
 ```
 
 JSON-backed storage uses an explicit tagged representation and restores native
 values on read. Existing plain JSON files and string or integer IDs remain
-compatible. UUID, Decimal128, Binary, and regular-expression round trips remain
+compatible. Binary payloads are base64-encoded, which increases their stored
+size by roughly one third. Generic subtype `0` reads back as `bytes`; other
+subtypes preserve `bson.Binary.subtype`. The exact two-key mapping shape using
+`__tinymongo_type_v1__` and `value` is reserved for TinyMongo's persistence
+codec; new user mappings with that shape are escaped automatically. If an
+older database already contains that valid tag shape as ordinary data, whether
+written through an earlier API or edited manually, rename one of those keys
+before upgrading so it is not interpreted as the tagged value. UUID,
+Decimal128, and regular-expression round trips remain
 tracked in [#75](https://github.com/schapman1974/tinymongo/issues/75).
+Non-finite floats (`NaN`, positive infinity, and negative infinity) also use
+strict JSON-safe tags. Remote SQL keeps the encoded document as a normal,
+indexable object in its existing JSON/JSONB `data` column and stores a second
+copy in the nullable text `data_ordered` column to preserve embedded-document
+field order. Older rows without that copy remain readable through `data`;
+rewriting one populates its ordered copy.
+
+Sorts normalize naive datetimes as UTC and convert aware datetimes to UTC.
+BinData sorts by length, subtype, and then unsigned bytes, matching MongoDB.
+Numeric `NaN` sorts below every other numeric value, matching MongoDB.
+TinyMongo retains Python microseconds, so it can distinguish two datetimes that
+MongoDB would store in the same millisecond.
+When a sort encounters a genuinely unsupported value type, TinyMongo emits one
+`TinyMongoUnsupportedWarning` per field and type instead of silently returning
+insertion order.
+
+`insert_many()` accepts any iterable of document dictionaries and honors
+PyMongo's `ordered` option, which defaults to `True`. An ordered batch keeps the
+successful prefix and stops at the first duplicate-key error; an unordered
+batch inserts every valid document and reports all duplicate failures in a
+PyMongo-shaped `BulkWriteError`. Values are encoded before storage changes, so
+a client-side serialization failure leaves the entire TinyMongo input
+unwritten. This is a stronger whole-list guarantee than PyMongo provides for
+very large inputs, which it may split across multiple wire batches.
 
 TinyMongo includes PyMongo-shaped contract tests that run application code with
 `import pymongo` redirected to TinyMongo:
@@ -473,19 +541,22 @@ embedded-plus-MongoDB matrix in one session.
 
 CI publishes the JUnit results together with deterministic JSON and Markdown
 reports containing per-backend outcomes and a documented compatibility score.
-See [Compatibility reports](docs/COMPATIBILITY_REPORTS.md) to generate them
-locally and understand how passes, expected gaps, skips, and the MongoDB
-reference affect the score.
+See
+[Compatibility reports](https://github.com/schapman1974/tinymongo/blob/master/docs/COMPATIBILITY_REPORTS.md)
+to generate them locally and understand how passes, expected gaps, skips, and
+the MongoDB reference affect the score.
 
 The shared Talk-Python-derived contracts run through both TinyMongo API modes.
 To exercise the actual application without rewriting its PyMongo call sites,
-follow the [Talk Python acceptance run](docs/TALKPYTHON_ACCEPTANCE.md).
+follow the
+[Talk Python acceptance run](https://github.com/schapman1974/tinymongo/blob/master/docs/TALKPYTHON_ACCEPTANCE.md).
 
 PyMongo remains optional. It is needed for these comparisons,
-`tinymongo.patch()`, and `ObjectId` support, but it is not required for normal
-TinyMongo clients or `datetime` storage. When it is installed, TinyMongo error
-classes also inherit the matching `pymongo.errors` classes, so existing
-`PyMongoError` handlers continue to work.
+`tinymongo.patch()`, `ObjectId` support, and non-generic `Binary` subtypes, but
+it is not required for normal TinyMongo clients, `datetime` storage, or native
+subtype-0 byte values. When it is installed, TinyMongo error classes also
+inherit the matching `pymongo.errors` classes, so existing `PyMongoError`
+handlers continue to work.
 
 PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract
@@ -512,6 +583,10 @@ Operations whose semantics TinyMongo cannot honor raise
 streams, aggregation pipelines, bulk writes, database commands, non-default
 read/write concerns, and unsupported index specifications. Connection options
 that only describe an ignored network target remain harmless for drop-in use.
+`bypass_document_validation` is accepted as a compatibility no-op and never
+disables `_id` or unique-index enforcement. Where a compatibility method
+accepts a `session` keyword, `session=None` is allowed; non-`None` sessions and
+`start_session()` remain unsupported.
 
 ## MongoEngine
 
@@ -626,10 +701,10 @@ First install it with `pip install "tinymongo[serialization]"`.
 
 ## Custom serialized types
 
-`datetime` and optional `ObjectId` values are handled directly by TinyMongo;
-they do not need a custom serializer. For application-specific classes, subclass
-`TinyMongoClient` and provide a `tinydb-serialization` middleware as described
-in the TinyDB extension documentation. The legacy
+`datetime`, binary values, and optional `ObjectId` values are handled directly
+by TinyMongo; they do not need a custom serializer. For application-specific
+classes, subclass `TinyMongoClient` and provide a `tinydb-serialization`
+middleware as described in the TinyDB extension documentation. The legacy
 `tinymongo.serializers.DateTimeSerializer` remains available for existing
 custom-storage integrations, but new TinyMongo storage does not require it.
 

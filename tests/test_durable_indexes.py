@@ -9,6 +9,7 @@ import pytest
 
 import tinymongo
 from tinymongo.errors import (
+    BulkWriteError,
     DuplicateKeyError,
     OperationFailure,
     TinyMongoNotSupportedError,
@@ -186,7 +187,9 @@ def test_unique_index_rejects_existing_duplicates_without_adding_metadata(
     assert users.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
 
 
-def test_unique_insert_operations_fail_atomically(durable_index_backend):
+def test_unique_insert_operations_follow_single_and_bulk_semantics(
+    durable_index_backend,
+):
     client = durable_index_backend.open()
     users = client.app.users
     users.create_index("email", unique=True)
@@ -204,14 +207,14 @@ def test_unique_insert_operations_fail_atomically(durable_index_backend):
             {"_id": 1, "email": "replacement@example.com"},
             bypass_document_validation=True,
         )
-    with pytest.raises(DuplicateKeyError):
+    with pytest.raises(BulkWriteError) as existing_conflict:
         users.insert_many(
             [
                 {"_id": 4, "email": "grace@example.com"},
                 {"_id": 5, "email": "ada@example.com"},
             ]
         )
-    with pytest.raises(DuplicateKeyError):
+    with pytest.raises(BulkWriteError) as batch_conflict:
         users.insert_many(
             [
                 {"_id": 6, "email": "hopper@example.com"},
@@ -219,7 +222,13 @@ def test_unique_insert_operations_fail_atomically(durable_index_backend):
             ]
         )
 
-    assert list(users.find({})) == [{"_id": 1, "email": "ada@example.com"}]
+    assert existing_conflict.value.details["nInserted"] == 1
+    assert batch_conflict.value.details["nInserted"] == 1
+    assert list(users.find({})) == [
+        {"_id": 1, "email": "ada@example.com"},
+        {"_id": 4, "email": "grace@example.com"},
+        {"_id": 6, "email": "hopper@example.com"},
+    ]
 
 
 def test_unique_update_replace_and_upsert_fail_atomically(durable_index_backend):

@@ -6,15 +6,40 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin master
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::Release tags must point to a commit on origin/master"
+            exit 1
+          fi
+          successful_runs="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success&per_page=1" \
+              --jq '.total_count'
+          )"
+          if [ "$successful_runs" -lt 1 ]; then
+            echo "::error::The tagged commit does not have a successful CI workflow run"
+            exit 1
+          fi
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           check-latest: true
@@ -26,6 +51,56 @@ jobs:
 
       - name: Build package
         run: python -m build
+
+      - name: Verify release artifacts
+        env:
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import date
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          ref_type = os.environ["RELEASE_REF_TYPE"]
+          release_tag = os.environ["RELEASE_TAG"]
+          if ref_type != "tag":
+              raise SystemExit(
+                  "PyPI publishing must run from a release tag, including manual runs"
+              )
+          if release_tag != f"v{version}":
+              raise SystemExit(
+                  f"release tag {release_tag!r} does not match package version v{version}"
+              )
+
+          changelog = Path("CHANGELOG.md").read_text()
+          prefix = f"## [{version}] - "
+          headings = [line for line in changelog.splitlines() if line.startswith(prefix)]
+          if len(headings) != 1 or headings[0].endswith("Unreleased"):
+              raise SystemExit(
+                  f"CHANGELOG.md must have one dated release heading for {version}"
+              )
+          try:
+              date.fromisoformat(headings[0][len(prefix):].strip())
+          except ValueError as exc:
+              raise SystemExit(
+                  f"CHANGELOG.md release heading for {version} needs an ISO date"
+              ) from exc
+
+          readme = Path("README.md").read_text()
+          stale_release_phrases = (
+              f"forthcoming {version}",
+              f"Until {version} is published",
+              "after that release is published",
+          )
+          if any(phrase in readme for phrase in stale_release_phrases):
+              raise SystemExit(
+                  f"README.md still describes {version} as unpublished"
+              )
+          PY
+          python -m twine check --strict dist/*
 
       - name: Publish package to PyPI
         env:

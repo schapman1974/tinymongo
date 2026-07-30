@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [1.2.1] - Unreleased
 
 ### Added
 - Process-local `memory` backend for isolated tests and temporary data, with
@@ -31,6 +31,9 @@
   pagination, cloning, closing, and `to_list()`.
 - Tagged `datetime` and optional `ObjectId` round trips across all storage
   backends, with `bson` and `pymongo` optional dependency groups.
+- Tagged `Binary`, `bytes`, and `bytearray` persistence across all storage
+  backends, preserving nonzero BSON subtypes and supporting binary queries.
+- A shared BSON scalar registry used by persistence and cursor sorting.
 
 ### Changed
 - The second positional argument to `find()` is now the PyMongo-compatible
@@ -45,10 +48,19 @@
 - PostgreSQL and MariaDB/MySQL unique indexes reject array-valued keys because
   their native scalar constraints cannot safely guarantee multikey uniqueness
   across processes.
+- `insert_many()` now honors ordered and unordered partial-failure behavior and
+  accepts document iterables while raising a PyMongo-shaped `BulkWriteError`
+  for duplicate writes.
+- SQL, DuckDB, and Parquet backends now use BSON-aware typed physical `_id`
+  keys for new rows while retaining read, replace, and delete compatibility
+  with legacy stringified keys.
+- Collection attributes and subscriptions now select dotted child collections,
+  with private attribute access guarded like PyMongo in both APIs.
 
 ### Fixed
-- `bypass_document_validation=True` no longer bypasses the built-in unique
-  `_id` constraint.
+- `bypass_document_validation` remains a compatibility no-op: TinyMongo has no
+  user-configurable validator layer, and the flag cannot bypass built-in `_id`
+  or declared unique-index constraints.
 - Durable index catalogs now use unambiguous collection/index identities, and
   local write locks cover the complete uniqueness preflight and write.
 - File-backed deletes and find-and-modify operations now hold their collection
@@ -67,6 +79,36 @@
   process-global client replacement.
 - TinyMongo exceptions inherit matching PyMongo exception classes when PyMongo
   is installed, while retaining dependency-free fallbacks.
+- Datetime, ObjectId, and BinData cursor sorts now follow MongoDB ordering;
+  numeric `NaN` values have deterministic MongoDB ordering, and unsupported
+  sort values emit a bounded diagnostic instead of failing silently.
+- Generic subtype-0 `Binary`, `bytes`, and `bytearray` now share MongoDB
+  equality semantics in direct queries, the `$in`, `$nin`, and `$all` query
+  operators, and `_id` duplicate detection, while nonzero binary subtypes
+  remain distinct.
+- Non-finite floats use strict JSON-safe persistence tags. Remote SQL retains
+  its normal, indexable JSON/JSONB `data` object and adds a nullable
+  `data_ordered` text copy to preserve embedded-document field order. Older
+  rows remain readable and gain the ordered copy when rewritten; automatic
+  schema upgrades leave existing native JSON indexes in place.
+- Explicit null `_id` values are preserved, and exact recursive `_id` identity
+  prevents scalar/container aliases and codec-normalized tuple/list duplicates.
+- Remote SQL duplicate races are reread and replanned so ordered and unordered
+  batches retain their documented partial-write behavior; database commit
+  failures now propagate instead of being reported as successful writes.
+- Top-level `$unset` now persists the exact TinyDB post-image instead of
+  allowing removed keys to merge back into the document.
+- CLI export/import now round-trips supported BSON values without reordering
+  embedded-document fields, and API and CLI collection listings, inspection,
+  and migration hide TinyDB's internal `_default` table. Replace imports and
+  migrations preflight the complete destination write and restore prior
+  documents if a destructive delete or final insertion fails.
+- CLI database discovery and migration summaries now honor object-storage URIs
+  and remote SQL DSNs supplied only through environment variables.
+- Clients reject unknown backend names during construction, report every
+  accepted alias, and consistently reject metadata/listing operations after
+  close. Remote SQL and object-storage clients no longer create an unused
+  local placeholder directory.
 
 ## [1.2.0] - 2026-07-11
 

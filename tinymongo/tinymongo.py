@@ -5,14 +5,17 @@
 from __future__ import absolute_import
 
 import copy
+from collections.abc import Iterable, Mapping, MutableMapping
 from functools import reduce, wraps
 import logging
 import os
 import shutil
+import warnings
 from uuid import uuid4
 
 from tinydb import Query, TinyDB, where  # type: ignore[attr-defined]
 from .bson_codec import bson_available
+from .bson_types import bson_identity_key, bson_scalar_sort_key, bson_values_equal
 from .storage_backends import (
     clear_memory_database,
     clear_memory_namespace,
@@ -29,6 +32,7 @@ from .storage_backends import (
 # from .errors import DuplicateKeyError
 from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
 from .errors import (
+    BulkWriteError,
     DuplicateKeyError,
     InvalidOperation,
     OperationFailure,
@@ -37,6 +41,7 @@ from .errors import (
 from .indexes import (
     INDEX_CATALOG_TABLE,
     IndexSpec,
+    TinyMongoUnsupportedWarning,
     emit_index_plan_warnings,
     index_catalog_id,
     parse_index_spec,
@@ -44,7 +49,12 @@ from .indexes import (
     validate_unique_documents,
 )
 from .projection import normalize_projection, project_document
-from .table_backends import matches_filter, requires_python_filter
+from .table_backends import (
+    _filter_references_id,
+    _value_matches,
+    matches_filter,
+    requires_python_filter,
+)
 
 basestring = str
 
@@ -71,10 +81,154 @@ _MISSING = object()
 def _get_nested(doc, path, default=_MISSING):
     current = doc
     for key in path.split("."):
-        if not isinstance(current, dict) or key not in current:
+        if not isinstance(current, Mapping) or key not in current:
             return default
         current = current[key]
     return current
+
+
+def _bulk_write_details(n_inserted, write_errors):
+    """Return the result document exposed by PyMongo's ``BulkWriteError``."""
+    return {
+        "writeErrors": write_errors,
+        "writeConcernErrors": [],
+        "nInserted": n_inserted,
+        "nUpserted": 0,
+        "nMatched": 0,
+        "nModified": 0,
+        "nRemoved": 0,
+        "upserted": [],
+    }
+
+
+def _duplicate_write_error(collection, index, document, spec=None, error=None):
+    """Describe one duplicate insert using PyMongo's bulk error shape."""
+    field = "_id" if spec is None else spec.field
+    index_name = "_id_" if spec is None else spec.name
+    value = _get_nested(document, field)
+    if value is _MISSING:
+        value = None
+    message = (
+        "E11000 duplicate key error collection: {0} index: {1} "
+        "dup key: {{ {2}: {3!r} }}"
+    ).format(collection.full_name, index_name, field, value)
+    if error is not None and str(error):
+        message = "{0}: {1}".format(message, error)
+    return {
+        "index": index,
+        "code": 11000,
+        "errmsg": message,
+        "keyPattern": {field: 1 if spec is None else spec.direction},
+        "keyValue": {field: value},
+        "op": document,
+    }
+
+
+def _first_unique_conflict(existing_documents, document, specs):
+    """Return the first unique index violated by ``document``, if any."""
+    for spec in specs:
+        if not spec.unique:
+            continue
+        try:
+            validate_unique_documents(existing_documents + [document], [spec])
+        except DuplicateKeyError as error:
+            return spec, error
+    return None, None
+
+
+def _plan_insert_many(collection, documents, existing_documents, specs, ordered):
+    """Split a batch into inserts and duplicate-key write errors."""
+    existing_ids = [document["_id"] for document in existing_documents]
+    accepted = []
+    write_errors = []
+
+    for index, document in enumerate(documents):
+        duplicate_error = None
+        if any(bson_values_equal(document["_id"], value) for value in existing_ids):
+            duplicate_error = _duplicate_write_error(collection, index, document)
+        else:
+            spec, error = _first_unique_conflict(existing_documents, document, specs)
+            if spec is not None:
+                duplicate_error = _duplicate_write_error(
+                    collection,
+                    index,
+                    document,
+                    spec=spec,
+                    error=error,
+                )
+
+        if duplicate_error is not None:
+            write_errors.append(duplicate_error)
+            if ordered:
+                break
+        else:
+            accepted.append(document)
+            existing_documents.append(document)
+            existing_ids.append(document["_id"])
+
+    return accepted, write_errors
+
+
+def _execute_engine_insert_many(
+    collection,
+    documents,
+    ordered,
+    bypass_document_validation,
+):
+    """Plan and execute a table-backend batch, retrying native races."""
+
+    engine = collection.parent.engine
+    last_error = None
+    accepted = []
+    write_errors = []
+
+    # Remote SQL constraints are the final cross-process authority. If another
+    # writer commits after our preflight, the native insert fails atomically;
+    # re-read and re-plan so the public error still identifies the original
+    # operation and preserves ordered/unordered semantics.
+    for _attempt in range(3):
+        existing_documents = engine.find(collection.tablename, {})
+        accepted, write_errors = _plan_insert_many(
+            collection,
+            documents,
+            existing_documents,
+            engine.get_index_specs(collection.tablename),
+            ordered,
+        )
+        if not accepted:
+            return [], accepted, write_errors
+        try:
+            results = engine.insert_many(
+                collection.tablename,
+                accepted,
+                bypass_document_validation=bypass_document_validation is True,
+            )
+        except DuplicateKeyError as error:
+            last_error = error
+            continue
+        return list(results), accepted, write_errors
+
+    # A native constraint continued to reject the batch without exposing a
+    # newly committed conflicting row. Preserve the batch exception contract
+    # with the earliest operation that reached the backend.
+    conflict_document = accepted[0]
+    conflict_index = next(
+        index
+        for index, document in enumerate(documents)
+        if document is conflict_document
+    )
+    write_errors.append(
+        _duplicate_write_error(
+            collection,
+            conflict_index,
+            conflict_document,
+            error=last_error,
+        )
+    )
+    write_errors.sort(key=lambda item: item["index"])
+    if ordered:
+        write_errors = write_errors[:1]
+    return [], [], write_errors
 
 
 def _set_nested(doc, path, value):
@@ -153,6 +307,35 @@ def _apply_update_document(item, update_doc):
     return updated
 
 
+def _tinydb_replace_document(replacement):
+    """Return a TinyDB transform that writes an exact document post-image."""
+
+    def replace(document):
+        document.clear()
+        document.update(copy.deepcopy(replacement))
+
+    return replace
+
+
+def _tinydb_id_condition(value):
+    """Return a TinyDB condition with BSON-aware ``_id`` equality."""
+
+    return where("_id").test(bson_values_equal, value)
+
+
+def _direct_id_equality(filter_doc):
+    """Return the operand for a direct exact ``_id`` query, if present."""
+
+    if not isinstance(filter_doc, dict) or set(filter_doc) != {"_id"}:
+        return _MISSING
+    expected = filter_doc["_id"]
+    if isinstance(expected, dict) and any(str(key).startswith("$") for key in expected):
+        if set(expected) != {"$eq"}:
+            return _MISSING
+        return expected["$eq"]
+    return expected
+
+
 def _validate_update_document(update_doc):
     if (
         not isinstance(update_doc, dict)
@@ -191,6 +374,12 @@ def _simple_equality_filter(_filter):
     if field.startswith("$") or isinstance(value, (dict, list)):
         return None
     return field, value
+
+
+def _cached_value_matches(actual, expected, _cache_identity):
+    """Match a TinyDB value while keeping BSON-distinct query-cache keys."""
+
+    return _value_matches(actual, expected)
 
 
 def _looks_like_network_target(host, port=None):
@@ -262,20 +451,37 @@ class TinyMongoClient(object):
         """Initialize container folder and choose a storage backend."""
         self._foldername = foldername
         self._backend = backend or "tinydb"
+        # Reject unknown names at construction instead of waiting for the first
+        # database access, when the configuration error is harder to diagnose.
+        get_storage_class(self._backend)
+        backend_name = str(self._backend).lower()
         self._memory_namespace = None
         self._shared_memory = False
-        if str(self._backend).lower() == "memory":
+        if backend_name == "memory":
             self._memory_namespace, self._shared_memory = _memory_namespace(foldername)
             self._foldername = self._memory_namespace
         self._threads = kwargs.get("threads")
-        self._storage_uri = kwargs.get("storage_uri") or os.environ.get(
-            "TINYMONGO_STORAGE_URI"
-        )
+        storage_uri = kwargs.get("storage_uri")
+        if backend_name in ("parquet", "parquetv2"):
+            if storage_uri is None:
+                storage_uri = os.environ.get("TINYMONGO_STORAGE_URI")
+            self._storage_uri = storage_uri or None
+        else:
+            self._storage_uri = None
         self._duckdb_config = kwargs.get("duckdb_config")
-        self._dsn = kwargs.get("dsn") or self._dsn_from_env(self._backend)
+        dsn = kwargs.get("dsn")
+        if is_remote_sql_backend(backend_name):
+            if dsn is None:
+                dsn = self._dsn_from_env(backend_name)
+            self._dsn = dsn or None
+        else:
+            self._dsn = None
         self._databases = {}
         self._closed = False
-        if self._memory_namespace is None:
+        storage_is_nonlocal = is_remote_sql_backend(backend_name) or bool(
+            self._storage_uri and backend_name in ("parquet", "parquetv2")
+        )
+        if self._memory_namespace is None and not storage_is_nonlocal:
             try:
                 os.makedirs(foldername, exist_ok=True)
             except OSError as x:
@@ -323,8 +529,7 @@ class TinyMongoClient(object):
         return os.path.join(self._foldername, key + storage_extension(self._backend))
 
     def _get_db(self, key):
-        if self._closed:
-            raise InvalidOperation("Cannot use a closed TinyMongoClient")
+        self._ensure_open()
         if key in self._databases:
             return self._databases[key]
         path = self._get_db_path(key)
@@ -347,6 +552,12 @@ class TinyMongoClient(object):
         self._databases[key] = database
         return database
 
+    def _ensure_open(self):
+        """Reject operations that would use a client after it was closed."""
+
+        if self._closed:
+            raise InvalidOperation("Cannot use a closed TinyMongoClient")
+
     def close(self):
         """Close databases opened by this client."""
         if self._closed:
@@ -366,6 +577,7 @@ class TinyMongoClient(object):
 
     def server_info(self):
         """Return local TinyMongo metadata in the shape of PyMongo's call."""
+        self._ensure_open()
         return {
             "version": "tinymongo",
             "storage": self._backend,
@@ -377,6 +589,7 @@ class TinyMongoClient(object):
 
     def capabilities(self):
         """Describe behavior that the configured backend can honor."""
+        self._ensure_open()
         backend = str(self._backend or "tinydb").lower()
         remote = is_remote_sql_backend(backend)
         object_storage = bool(self._storage_uri and backend in ("parquet", "parquetv2"))
@@ -417,6 +630,7 @@ class TinyMongoClient(object):
 
     def list_database_names(self):
         """Return database names found in the configured local storage folder."""
+        self._ensure_open()
         if self._memory_namespace is not None:
             return list_memory_databases(self._memory_namespace)
         extension = storage_extension(self._backend)
@@ -597,6 +811,10 @@ class TinyMongoDatabase(object):
 
     def __getattr__(self, name):
         """Gets a new or existing collection"""
+        if name.startswith("_"):
+            raise AttributeError(
+                "{} object has no attribute {}".format(type(self).__name__, name)
+            )
         return TinyMongoCollection(name, self)
 
     def __getitem__(self, name):
@@ -629,11 +847,15 @@ class TinyMongoDatabase(object):
             names = self.engine.list_collections()
         else:
             names = list(self.tinydb.tables())
-        return [name for name in names if not name.startswith("__tinymongo_")]
+        return [
+            name
+            for name in names
+            if name != "_default" and not name.startswith("__tinymongo_")
+        ]
 
     def list_collection_names(self):
         """Compatibility alias for modern PyMongo."""
-        return [name for name in self.collection_names() if name != "_default"]
+        return self.collection_names()
 
     def close(self):
         """Close this database's storage resources."""
@@ -722,16 +944,45 @@ class TinyMongoCollection(object):
         )
 
     def __getattr__(self, name):
-        """
-        If attr is not found return self
-        :param name:
-        :return:
-        """
-        # if self.table is None:
-        #     self.tablename += u"." + name
-        if self.table is None:
-            self.build_table()
-        return self
+        """Return a dotted child collection selected by attribute."""
+        if name.startswith("_"):
+            full_name = "{0}.{1}".format(self.tablename, name)
+            raise AttributeError(
+                "{0} has no attribute {1!r}. To access the {2} collection, "
+                "use database[{2!r}].".format(
+                    type(self).__name__,
+                    name,
+                    full_name,
+                )
+            )
+        return self[name]
+
+    def __getitem__(self, name):
+        """Return a dotted child collection selected by subscription."""
+        return TinyMongoCollection(
+            "{0}.{1}".format(self.tablename, name),
+            self.parent,
+        )
+
+    def __call__(self, *args, **kwargs):
+        """Explain method typos that resolved to a child collection."""
+        if "." not in self.tablename:
+            raise TypeError(
+                "'{0}' object is not callable. If you meant to call the "
+                "'{1}' method on a 'TinyMongoDatabase' object it is failing "
+                "because no such method exists.".format(
+                    type(self).__name__,
+                    self.tablename,
+                )
+            )
+        raise TypeError(
+            "'{0}' object is not callable. If you meant to call the '{1}' "
+            "method on a '{0}' object it is failing because no such method "
+            "exists.".format(
+                type(self).__name__,
+                self.tablename.rsplit(".", 1)[-1],
+            )
+        )
 
     def build_table(self):
         """
@@ -933,10 +1184,16 @@ class TinyMongoCollection(object):
             seen = set()
             for item in values:
                 try:
-                    if item in seen:
+                    identity = bson_identity_key(item)
+                    cache_key = (
+                        ("__tinymongo_bson_identity__", identity)
+                        if identity is not None
+                        else item
+                    )
+                    if cache_key in seen:
                         continue
-                    seen.add(item)
-                    index.setdefault(item, []).append(doc)
+                    seen.add(cache_key)
+                    index.setdefault(cache_key, []).append(doc)
                 except TypeError:
                     continue
         self._index_cache[key] = index
@@ -1065,8 +1322,8 @@ class TinyMongoCollection(object):
         if self.parent.engine is not None:
             if not isinstance(doc, dict):
                 raise ValueError('"doc" must be a dict')
-            if "_id" in doc and doc["_id"] is not None:
-                _id = doc["_id"] = doc["_id"]
+            if "_id" in doc:
+                _id = doc["_id"]
             else:
                 _id = doc["_id"] = generate_id()
             self.parent.engine.validate_unique_post_image(
@@ -1089,10 +1346,10 @@ class TinyMongoCollection(object):
             if not isinstance(doc, dict):
                 raise ValueError('"doc" must be a dict')
 
-            # Respect explicit falsy ids (0, False) — only generate when _id
-            # is missing or None.
-            if "_id" in doc and doc["_id"] is not None:
-                _id = doc["_id"] = doc["_id"]
+            # PyMongo generates an ID only when the field is absent. Explicit
+            # values such as 0, False, and None remain user-controlled IDs.
+            if "_id" in doc:
+                _id = doc["_id"]
             else:
                 _id = doc["_id"] = generate_id()
 
@@ -1113,75 +1370,90 @@ class TinyMongoCollection(object):
             self._release_collection_lock(rlock, portalocker_lock)
 
     @_engine_write_locked
-    def insert_many(self, docs, *args, **kwargs):
+    def insert_many(
+        self,
+        docs,
+        ordered=True,
+        bypass_document_validation=None,
+        session=None,
+        comment=None,
+    ):
         """
-        Inserts several documents into the collection
-        :param docs: a list of documents
+        Insert several documents with PyMongo-style partial failure semantics.
+
+        Duplicate-key failures stop an ordered batch at the first failed
+        operation. Unordered batches continue with every valid operation. Any
+        client-side serialization failure is detected before storage is
+        changed. This whole-list preflight is a stronger TinyMongo guarantee;
+        PyMongo may split a very large input across multiple wire batches.
+
+        :param docs: an iterable of documents
         :return: InsertManyResult
         """
-        _reject_session(kwargs)
-        if self.parent.engine is not None:
-            if not isinstance(docs, list):
-                raise ValueError('"insert_many" requires a list input')
-            _ids = []
-            for doc in docs:
-                if "_id" in doc and doc["_id"] is not None:
-                    _id = doc["_id"] = doc["_id"]
-                else:
-                    _id = doc["_id"] = generate_id()
-                _ids.append(_id)
-            self.parent.engine.validate_unique_post_image(
-                self.tablename,
-                self.parent.engine.find(self.tablename, {}) + docs,
-            )
-            results = self.parent.engine.insert_many(
-                self.tablename,
+        _reject_session({"session": session})
+        if not isinstance(docs, Iterable) or isinstance(
+            docs, (Mapping, str, bytes, bytearray)
+        ):
+            raise TypeError("documents must be a non-empty iterable")
+        docs = list(docs)
+        if not docs:
+            raise TypeError("documents must be a non-empty list")
+        if not isinstance(ordered, bool):
+            raise TypeError("ordered must be True or False")
+
+        _ids = []
+        for doc in docs:
+            if not isinstance(doc, MutableMapping):
+                raise TypeError("each document must be a mutable mapping")
+            if "_id" in doc:
+                _id = doc["_id"]
+            else:
+                _id = doc["_id"] = generate_id()
+            _ids.append(_id)
+
+        # Validate TinyMongo's one storage batch at the JSON boundary before
+        # changing storage. PyMongo can split very large inputs across multiple
+        # wire batches, so TinyMongo intentionally provides a stronger
+        # whole-list guarantee here.
+        from .bson_codec import dumps as encode_storage_payload
+
+        encode_storage_payload(docs, ensure_ascii=False)
+
+        engine = self.parent.engine
+        if engine is not None:
+            results, accepted, write_errors = _execute_engine_insert_many(
+                self,
                 docs,
-                bypass_document_validation=kwargs.get("bypass_document_validation")
-                is True,
+                ordered,
+                bypass_document_validation,
             )
-            return InsertManyResult(eids=results, inserted_ids=_ids)
+            if write_errors:
+                raise BulkWriteError(_bulk_write_details(len(accepted), write_errors))
+            return InsertManyResult(eids=results, inserted_ids=list(_ids))
 
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
             if self.table is None:
                 self.build_table()
             self._refresh_table()
-            if not isinstance(docs, list):
-                raise ValueError('"insert_many" requires a list input')
-
-            # Get all _id values once to reduce I/O. Document-validation bypass
-            # never bypasses MongoDB's built-in unique _id constraint.
-            existing = [doc["_id"] for doc in self.find({})]
-
-            _ids = list()
-            for doc in docs:
-
-                # Respect explicit falsy ids (0, False) — only generate when
-                # _id is missing or None.
-                if "_id" in doc and doc["_id"] is not None:
-                    _id = doc["_id"] = doc["_id"]
-                else:
-                    _id = doc["_id"] = generate_id()
-
-                if _id in existing:
-                    raise DuplicateKeyError(
-                        "_id:{0} already exists in collection:{1}".format(
-                            _id, self.tablename
-                        )
-                    )
-                existing.append(_id)
-
-                _ids.append(_id)
-
-            self._validate_unique_post_image(self.table.all() + docs)
-            results = self.table.insert_multiple(docs)
-            self._invalidate_indexes()
-
-            return InsertManyResult(
-                eids=[eid for eid in results],
-                inserted_ids=[inserted_id for inserted_id in _ids],
+            accepted, write_errors = _plan_insert_many(
+                self,
+                docs,
+                self.table.all(),
+                list(self._index_specs.values()),
+                ordered,
             )
+
+            if accepted:
+                results = self.table.insert_multiple(accepted)
+                self._invalidate_indexes()
+            else:
+                results = []
+
+            if write_errors:
+                raise BulkWriteError(_bulk_write_details(len(accepted), write_errors))
+
+            return InsertManyResult(eids=list(results), inserted_ids=list(_ids))
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -1335,14 +1607,13 @@ class TinyMongoCollection(object):
                 # don't want to use the previous key if this is a secondary key
                 # (fixes multiple item query that includes $ codes)
                 if not isinstance(value, dict) and not isinstance(value, list):
-                    conditions = (
-                        ((Q(q, key) == value) | (Q(q, key).any([value])))
-                        if not conditions
-                        else (
-                            conditions
-                            & ((Q(q, key) == value) | (Q(q, key).any([value])))
-                        )
+                    cache_identity = bson_identity_key(value)
+                    equality = Q(q, key).test(
+                        _cached_value_matches,
+                        value,
+                        ("__tinymongo_bson_identity__", cache_identity),
                     )
+                    conditions = equality if not conditions else (conditions & equality)
                     prev_key = key
 
             logger.debug("c: {}".format(conditions))
@@ -1445,7 +1716,11 @@ class TinyMongoCollection(object):
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
                 [
-                    updated if item.get("_id") == matches[0].get("_id") else item
+                    (
+                        updated
+                        if bson_values_equal(item.get("_id"), matches[0].get("_id"))
+                        else item
+                    )
                     for item in self.parent.engine.find(self.tablename, {})
                 ],
             )
@@ -1466,7 +1741,17 @@ class TinyMongoCollection(object):
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
             self._refresh_table()
-            if requires_python_filter(query):
+            direct_id = _direct_id_equality(query)
+            if direct_id is not _MISSING:
+                item = next(
+                    (
+                        candidate
+                        for candidate in self.table.all()
+                        if bson_values_equal(candidate.get("_id"), direct_id)
+                    ),
+                    None,
+                )
+            elif _filter_references_id(query) or requires_python_filter(query):
                 item = next(
                     (
                         candidate
@@ -1497,11 +1782,18 @@ class TinyMongoCollection(object):
             modified = updated != item
             if modified:
                 post_image = [
-                    updated if current.get("_id") == item.get("_id") else current
+                    (
+                        updated
+                        if bson_values_equal(current.get("_id"), item.get("_id"))
+                        else current
+                    )
                     for current in self.table.all()
                 ]
                 self._validate_unique_post_image(post_image)
-                self.table.update(updated, where("_id") == item["_id"])
+                self.table.update(
+                    _tinydb_replace_document(updated),
+                    _tinydb_id_condition(item["_id"]),
+                )
                 self._invalidate_indexes()
 
             return UpdateResult(
@@ -1555,7 +1847,10 @@ class TinyMongoCollection(object):
                         (
                             updated
                             for original, updated in updates
-                            if original.get("_id") == item.get("_id")
+                            if bson_values_equal(
+                                original.get("_id"),
+                                item.get("_id"),
+                            )
                         ),
                         item,
                     )
@@ -1577,7 +1872,14 @@ class TinyMongoCollection(object):
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
             self._refresh_table()
-            if requires_python_filter(query):
+            direct_id = _direct_id_equality(query)
+            if direct_id is not _MISSING:
+                items = [
+                    candidate
+                    for candidate in self.table.all()
+                    if bson_values_equal(candidate.get("_id"), direct_id)
+                ]
+            elif _filter_references_id(query) or requires_python_filter(query):
                 items = [
                     candidate
                     for candidate in self.table.all()
@@ -1604,7 +1906,10 @@ class TinyMongoCollection(object):
                         (
                             updated
                             for original, updated in updates
-                            if original.get("_id") == item.get("_id")
+                            if bson_values_equal(
+                                original.get("_id"),
+                                item.get("_id"),
+                            )
                         ),
                         item,
                     )
@@ -1617,7 +1922,10 @@ class TinyMongoCollection(object):
                 if updated != item:
                     modified_count += 1
                     result.extend(
-                        self.table.update(updated, where("_id") == item["_id"])
+                        self.table.update(
+                            _tinydb_replace_document(updated),
+                            _tinydb_id_condition(item["_id"]),
+                        )
                     )
             if modified_count:
                 self._invalidate_indexes()
@@ -1661,7 +1969,11 @@ class TinyMongoCollection(object):
                 self.parent.engine.validate_unique_post_image(
                     self.tablename,
                     [
-                        updated if current.get("_id") == item.get("_id") else current
+                        (
+                            updated
+                            if bson_values_equal(current.get("_id"), item.get("_id"))
+                            else current
+                        )
                         for current in self.parent.engine.find(self.tablename, {})
                     ],
                 )
@@ -1678,7 +1990,17 @@ class TinyMongoCollection(object):
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
             self._refresh_table()
-            if requires_python_filter(query):
+            direct_id = _direct_id_equality(query)
+            if direct_id is not _MISSING:
+                item = next(
+                    (
+                        candidate
+                        for candidate in self.table.all()
+                        if bson_values_equal(candidate.get("_id"), direct_id)
+                    ),
+                    None,
+                )
+            elif _filter_references_id(query) or requires_python_filter(query):
                 item = next(
                     (
                         candidate
@@ -1710,11 +2032,15 @@ class TinyMongoCollection(object):
             modified = updated != item
             if modified:
                 post_image = [
-                    updated if current.get("_id") == item.get("_id") else current
+                    (
+                        updated
+                        if bson_values_equal(current.get("_id"), item.get("_id"))
+                        else current
+                    )
                     for current in self.table.all()
                 ]
                 self._validate_unique_post_image(post_image)
-                self.table.remove(where("_id") == item["_id"])
+                self.table.remove(_tinydb_id_condition(item["_id"]))
                 self.table.insert(updated)
                 self._invalidate_indexes()
                 result = [item["_id"]]
@@ -1857,13 +2183,35 @@ class TinyMongoCollection(object):
             if _filter is None:
                 result = self.table.all()
             else:
+                direct_id = _direct_id_equality(_filter)
+                if direct_id is not _MISSING:
+                    result = [
+                        document
+                        for document in self.table.all()
+                        if bson_values_equal(document.get("_id"), direct_id)
+                    ]
+                    return TinyMongoCursor(
+                        result,
+                        sort=sort,
+                        skip=skip,
+                        limit=limit,
+                        collection=self,
+                        projection=projection,
+                        query=_filter,
+                    )
                 simple = _simple_equality_filter(_filter)
                 if simple is not None:
                     key, value = simple
                     index = self._get_index(key)
                     if index is not None:
+                        identity = bson_identity_key(value)
+                        cache_key = (
+                            ("__tinymongo_bson_identity__", identity)
+                            if identity is not None
+                            else value
+                        )
                         return TinyMongoCursor(
-                            list(index.get(value, [])),
+                            list(index.get(cache_key, [])),
                             sort=sort,
                             skip=skip,
                             limit=limit,
@@ -1871,7 +2219,7 @@ class TinyMongoCollection(object):
                             projection=projection,
                             query=_filter,
                         )
-                if requires_python_filter(_filter):
+                if _filter_references_id(_filter) or requires_python_filter(_filter):
                     result = [
                         document
                         for document in self.table.all()
@@ -1962,7 +2310,7 @@ class TinyMongoCollection(object):
                 return DeleteResult(raw_result=[])
             self._set_storage_merge_writes(False)
             try:
-                result = self.table.remove(where("_id") == item["_id"])
+                result = self.table.remove(_tinydb_id_condition(item["_id"]))
                 self._invalidate_indexes()
             finally:
                 self._set_storage_merge_writes(True)
@@ -1990,7 +2338,8 @@ class TinyMongoCollection(object):
             self._set_storage_merge_writes(False)
             try:
                 result = [
-                    self.table.remove(where("_id") == item["_id"]) for item in items
+                    self.table.remove(_tinydb_id_condition(item["_id"]))
+                    for item in items
                 ]
                 self._invalidate_indexes()
 
@@ -2028,6 +2377,7 @@ class TinyMongoCursor(object):
         self._skip = 0
         self._limit = 0
         self._closed = False
+        self._unsupported_sort_warnings = set()
         self.cursorpos = -1
         self.currentrec = None
 
@@ -2076,7 +2426,23 @@ class TinyMongoCursor(object):
         self.cursorpos = -1
         self.currentrec = self.cursordat[-1] if self.cursordat else None
 
-    def _order(self, value, is_reverse=None):
+    def _warn_unsupported_sort_value(self, field, value):
+        """Warn once when a sort field contains an unsupported value type."""
+        warning_key = (field, type(value))
+        if warning_key in self._unsupported_sort_warnings:
+            return
+        self._unsupported_sort_warnings.add(warning_key)
+        warnings.warn(
+            "Sorting field '{0}' encountered unsupported value type '{1}'; "
+            "values of this type compare as null.".format(
+                field,
+                type(value).__name__,
+            ),
+            TinyMongoUnsupportedWarning,
+            stacklevel=4,
+        )
+
+    def _order(self, value, is_reverse=None, sort_field=None):
         """Parsing data to a sortable form
         By giving each data type an ID(int), and assemble with the value
         into a sortable tuple.
@@ -2088,7 +2454,7 @@ class TinyMongoCursor(object):
             """
             result = list()
             for key in dict_doc:
-                data = self._order(dict_doc[key])
+                data = self._order(dict_doc[key], sort_field=sort_field)
                 res = (data[0], key, data[1])
                 result.append(res)
             return tuple(result)
@@ -2097,30 +2463,10 @@ class TinyMongoCursor(object):
             """list will iter members to compare"""
             result = list()
             for member in list_doc:
-                result.append(self._order(member))
+                result.append(self._order(member, sort_field=sort_field))
             return result
 
-        # (TODO) include more data type
-        if value is None or not isinstance(
-            # value, (dict, list, basestring, bool, float, int)
-            value,
-            (dict, list, str, bool, float, int),
-        ):
-            # not support/sortable value type
-            value = (0, None)
-
-        elif isinstance(value, bool):
-            value = (5, value)
-
-        elif isinstance(value, (int, float)):
-            value = (1, value)
-
-        # elif isinstance(value, basestring):
-        elif isinstance(value, str):
-
-            value = (2, value)
-
-        elif isinstance(value, dict):
+        if isinstance(value, dict):
             value = (3, _dict_parser(value))
 
         elif isinstance(value, list):  # pragma: no branch - type chain is exhaustive
@@ -2138,6 +2484,15 @@ class TinyMongoCursor(object):
                 # if the smallest or largest member is a list
                 # then compaer with it's sub-member in list index order
                 value = (4, tuple(value))
+
+        else:
+            scalar_key = bson_scalar_sort_key(value)
+            if scalar_key is None:
+                if sort_field is not None:
+                    self._warn_unsupported_sort_value(sort_field, value)
+                value = (0, None)
+            else:
+                value = scalar_key
 
         return value
 
@@ -2242,7 +2597,7 @@ class TinyMongoCursor(object):
                     # treat no match as None
                     data = None
 
-                value = self._order(data, is_reverse)
+                value = self._order(data, is_reverse, pair[0])
 
                 # read previous section
                 pre_sect = pre_sect_stack[index] if pre_sect_stack else 0

@@ -5,10 +5,12 @@ from uuid import uuid4
 import pytest
 
 import tinymongo as tm
-from tinymongo import bson_codec
+from tinymongo import bson_codec, bson_types
 
 
-ObjectId = pytest.importorskip("bson").ObjectId
+bson = pytest.importorskip("bson")
+ObjectId = bson.ObjectId
+Binary = bson.Binary
 
 
 def _extended_document():
@@ -95,7 +97,9 @@ def test_codec_preserves_malformed_escaped_mapping_tags(payload):
     assert bson_codec.decode_value(tagged) == tagged
 
 
-@pytest.mark.parametrize("kind", ["datetime", "objectid", "mapping", "future-type"])
+@pytest.mark.parametrize(
+    "kind", ["datetime", "objectid", "binary", "mapping", "future-type"]
+)
 def test_codec_escapes_user_mappings_that_look_like_internal_tags(kind):
     tagged = {
         "__tinymongo_type_v1__": kind,
@@ -131,6 +135,170 @@ def test_object_id_decode_explains_optional_dependency(monkeypatch):
         bson_codec.decode_value(encoded)
 
 
+@pytest.mark.parametrize("value", [b"\x00\xffabc", bytearray(b"\x00\xffabc")])
+def test_codec_round_trips_native_binary_values_as_bytes(value):
+    encoded = bson_codec.encode_value(value)
+
+    assert encoded == {
+        "__tinymongo_type_v1__": "binary",
+        "value": {"base64": "AP9hYmM=", "subtype": 0},
+    }
+    restored = bson_codec.decode_value(encoded)
+    assert restored == bytes(value)
+    assert type(restored) is bytes
+
+
+@pytest.mark.parametrize("subtype", [0, 3, 4, 128])
+def test_codec_round_trips_bson_binary_subtypes(subtype):
+    payload = bytes(range(16)) if subtype == 4 else b"\x01payload"
+    value = Binary(payload, subtype=subtype)
+
+    encoded = bson_codec.encode_value(value)
+    restored = bson_codec.decode_value(encoded)
+
+    assert encoded["value"]["subtype"] == subtype
+    assert bytes(restored) == bytes(value)
+    if subtype == 0:
+        assert type(restored) is bytes
+    else:
+        assert isinstance(restored, Binary)
+        assert restored.subtype == subtype
+
+
+def test_binary_subclass_is_encoded_before_native_bytes():
+    encoded = bson_codec.encode_value(Binary(bytes(range(16)), subtype=4))
+
+    assert encoded["value"] == {
+        "base64": "AAECAwQFBgcICQoLDA0ODw==",
+        "subtype": 4,
+    }
+
+
+def test_generic_binary_decodes_without_optional_bson(monkeypatch):
+    encoded = {
+        "__tinymongo_type_v1__": "binary",
+        "value": {"base64": "AAE=", "subtype": 0},
+    }
+    monkeypatch.setattr(bson_codec, "_Binary", None)
+
+    assert bson_codec.decode_value(encoded) == b"\x00\x01"
+
+
+def test_nonzero_binary_subtype_explains_optional_dependency(monkeypatch):
+    encoded = {
+        "__tinymongo_type_v1__": "binary",
+        "value": {"base64": "AAE=", "subtype": 4},
+    }
+    monkeypatch.setattr(bson_codec, "_Binary", None)
+
+    with pytest.raises(
+        ImportError,
+        match=r"Binary values with a non-zero subtype.*tinymongo\[bson\]",
+    ):
+        bson_codec.decode_value(encoded)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-a-mapping",
+        {"base64": "AAE="},
+        {"base64": 123, "subtype": 0},
+        {"base64": "not base64!", "subtype": 0},
+        {"base64": "AAE=", "subtype": True},
+        {"base64": "AAE=", "subtype": 256},
+    ],
+)
+def test_codec_preserves_malformed_binary_tags(payload):
+    tagged = {
+        "__tinymongo_type_v1__": "binary",
+        "value": payload,
+    }
+
+    assert bson_codec.decode_value(tagged) == tagged
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        b"raw",
+        bytearray(b"mutable"),
+        Binary(bytes(range(16)), subtype=4),
+        {"nested": [b"raw"]},
+    ],
+)
+def test_binary_values_require_python_filter_comparison(value):
+    assert bson_codec.contains_extended_value(value) is True
+
+
+@pytest.mark.parametrize(
+    ("value", "payload"),
+    [
+        (float("nan"), "nan"),
+        (float("inf"), "infinity"),
+        (float("-inf"), "-infinity"),
+    ],
+)
+def test_nonfinite_floats_use_strict_json_tags(value, payload):
+    encoded = bson_codec.encode_value(value)
+    serialized = bson_codec.dumps({"value": value})
+    restored = bson_codec.loads(serialized)["value"]
+
+    assert encoded == {
+        "__tinymongo_type_v1__": "float",
+        "value": payload,
+    }
+    assert "NaN" not in serialized
+    assert "Infinity" not in serialized
+    assert bson_codec.contains_extended_value(value)
+    if payload == "nan":
+        assert restored != restored
+    else:
+        assert restored == value
+
+
+def test_malformed_nonfinite_float_tag_is_preserved():
+    tagged = {
+        "__tinymongo_type_v1__": "float",
+        "value": "not-a-float",
+    }
+
+    assert bson_codec.decode_value(tagged) == tagged
+
+
+def test_bson_type_registry_uses_mongodb_scalar_order_and_subclass_precedence():
+    assert bson_types.bson_scalar_sort_key(None) == (0, None)
+    assert bson_types.bson_scalar_sort_key(1) == (1, (1, 1))
+    assert bson_types.bson_scalar_sort_key("text") == (2, "text")
+    assert bson_types.bson_scalar_sort_key(Binary(b"x", subtype=128)) == (
+        5,
+        (1, 128, b"x"),
+    )
+    assert bson_types.bson_scalar_sort_key(b"x") == (5, (1, 0, b"x"))
+    assert bson_types.bson_scalar_sort_key(ObjectId("000000000000000000000001")) == (
+        6,
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+    )
+    assert bson_types.bson_type_spec(True).name == "boolean"
+    assert bson_types.bson_type_spec(1).name == "number"
+
+
+def test_bson_type_registry_normalizes_naive_and_aware_dates_to_utc():
+    naive = datetime(2026, 7, 20, 12, 30)
+    aware = datetime(
+        2026,
+        7,
+        20,
+        8,
+        30,
+        tzinfo=timezone(timedelta(hours=-4)),
+    )
+
+    assert bson_types.bson_scalar_sort_key(naive) == bson_types.bson_scalar_sort_key(
+        aware
+    )
+
+
 @pytest.mark.parametrize("backend", ["memory", "tinydb", "sqlite", "duckdb", "parquet"])
 def test_extended_values_round_trip_through_public_backends(tmp_path, backend):
     if backend in ("duckdb", "parquet"):
@@ -152,6 +320,48 @@ def test_extended_values_round_trip_through_public_backends(tmp_path, backend):
 
         assert restored == document
         assert reader.app.events.find_one({"created": document["created"]}) == document
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "tinydb", "sqlite", "duckdb", "parquet"])
+def test_binary_values_round_trip_through_public_backends(tmp_path, backend):
+    if backend in ("duckdb", "parquet"):
+        pytest.importorskip("duckdb")
+    if backend == "parquet":
+        pytest.importorskip("pyarrow")
+
+    binary_id = b"binary-id"
+    uuid_binary = Binary(bytes(range(16)), subtype=4)
+    blob = b"\x89PNG\r\n\x1a\n" + (b"x" * 100_000)
+    if backend == "memory":
+        location = "memory://binary-codec-{0}".format(uuid4().hex)
+    else:
+        location = str(tmp_path / backend)
+
+    writer = tm.TinyMongoClient(location, backend=backend)
+    writer.app.assets.insert_one(
+        {
+            "_id": binary_id,
+            "blob": blob,
+            "mutable": bytearray(b"abc"),
+            "nested": {"tokens": [uuid_binary]},
+        }
+    )
+    writer.close()
+
+    reader = tm.TinyMongoClient(location, backend=backend)
+    try:
+        restored = reader.app.assets.find_one({"nested.tokens": uuid_binary})
+
+        assert restored["_id"] == binary_id
+        assert type(restored["_id"]) is bytes
+        assert restored["blob"] == blob
+        assert restored["mutable"] == b"abc"
+        assert type(restored["mutable"]) is bytes
+        assert isinstance(restored["nested"]["tokens"][0], Binary)
+        assert restored["nested"]["tokens"][0].subtype == 4
+        assert bytes(restored["nested"]["tokens"][0]) == bytes(uuid_binary)
     finally:
         reader.close()
 

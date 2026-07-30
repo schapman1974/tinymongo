@@ -14,7 +14,7 @@ from tinymongo import cli
 from tinymongo import tinymongo as core
 from tinymongo import parquet_storage as ps
 from tinymongo import storage_backends as sb
-from tinymongo.errors import DuplicateKeyError, OperationFailure
+from tinymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
 from tinymongo.results import (
     DeleteResult,
     InsertManyResult,
@@ -569,11 +569,11 @@ def test_collection_error_and_compatibility_edges(tmp_path):
     client = tm.TinyMongoClient(str(tmp_path / "db"))
     collection = client.db.collection
     assert repr(collection) == "collection"
-    assert collection.anything is collection
+    assert collection.anything.tablename == "collection.anything"
 
     with pytest.raises(ValueError):
         collection.insert_one(["not", "a", "dict"])
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         collection.insert_many({"not": "a list"})
     with pytest.raises(AttributeError):
         getattr(client, "_private")
@@ -586,7 +586,7 @@ def test_collection_error_and_compatibility_edges(tmp_path):
         collection.insert_one({"_id": 0}, bypass_document_validation=True)
     with pytest.raises(DuplicateKeyError):
         collection.insert_one({"_id": 0})
-    with pytest.raises(DuplicateKeyError):
+    with pytest.raises(BulkWriteError):
         collection.insert_many([{"_id": "dupe"}, {"_id": "dupe"}])
     assert collection.insert_many([{"name": "generated-many"}]).inserted_ids[0]
 
@@ -720,7 +720,7 @@ def test_collection_write_and_no_match_edges(tmp_path):
     assert c.drop() is True
     c.insert_many([{"_id": 1}, {"_id": 2}], bypass_document_validation=True)
     assert c.delete_many({}).deleted_count == 3
-    assert "_default" in db.collection_names()
+    assert "_default" not in db.collection_names()
 
 
 def test_update_operator_error_edges(tmp_path):
@@ -781,7 +781,7 @@ def test_database_refresh_ignores_close_errors(tmp_path):
 
     db.tinydb = BadTinyDB()
     db._refresh_table()
-    assert "_default" in db.collection_names()
+    assert "_default" not in db.collection_names()
 
 
 def test_parquet_storage_uri_client_paths_and_listing(tmp_path, monkeypatch):
@@ -845,6 +845,78 @@ def test_parquet_storage_uri_env_var(tmp_path, monkeypatch):
     assert client.app._path == "gs://bucket/root/app.parquet"
 
 
+def test_nonlocal_clients_skip_placeholder_folders_and_validate_eagerly(
+    tmp_path,
+    monkeypatch,
+):
+    remote_path = tmp_path / "unused-remote"
+    tm.TinyMongoClient(
+        str(remote_path),
+        backend="postgres",
+        dsn="postgresql://configured",
+    )
+    assert not remote_path.exists()
+
+    object_path = tmp_path / "unused-object"
+    tm.TinyMongoClient(
+        str(object_path),
+        backend="parquet",
+        storage_uri="s3://bucket/root",
+    )
+    assert not object_path.exists()
+
+    with pytest.raises(ValueError) as error:
+        tm.TinyMongoClient(str(tmp_path / "invalid"), backend="not-a-backend")
+    assert "json" in str(error.value)
+    assert "postgresql" in str(error.value)
+    assert "mysql" in str(error.value)
+
+    monkeypatch.setenv("TINYMONGO_STORAGE_URI", "s3://unrelated/root")
+    local_path = tmp_path / "local-json"
+    local = tm.TinyMongoClient(str(local_path))
+    local.app.items.insert_one({"_id": 1})
+    assert local.server_info()["storageUri"] is None
+    assert local._dsn_from_env("tinydb") is None
+    assert local.drop_database("app") is None
+    assert local.list_database_names() == []
+    assert not (local_path / "app.json").exists()
+
+    local_parquet_path = tmp_path / "local-parquet"
+    local_parquet = tm.TinyMongoClient(
+        str(local_parquet_path),
+        backend="parquet",
+        storage_uri="",
+    )
+    assert local_parquet._storage_uri is None
+    assert local_parquet_path.is_dir()
+
+    monkeypatch.setenv("TINYMONGO_POSTGRES_DSN", "postgresql://environment")
+    remote_without_dsn = tm.TinyMongoClient(
+        str(tmp_path / "remote-without-dsn"),
+        backend="postgres",
+        dsn="",
+    )
+    assert remote_without_dsn.server_info()["dsnConfigured"] is False
+
+
+def test_closed_client_rejects_metadata_and_listing_operations():
+    client = tm.TinyMongoClient(backend="memory")
+    client.close()
+
+    operations = (
+        client.server_info,
+        client.capabilities,
+        lambda: client.supports("projections"),
+        client.list_database_names,
+        client.list_databases,
+        client.database_names,
+        lambda: client.drop_database("missing"),
+    )
+    for operation in operations:
+        with pytest.raises(InvalidOperation, match="closed TinyMongoClient"):
+            operation()
+
+
 def test_mysql_dsn_env_var(tmp_path, monkeypatch):
     monkeypatch.setenv("TINYMONGO_MYSQL_DSN", "mysql://user:pass@localhost/db")
 
@@ -863,9 +935,10 @@ def test_cursor_sort_order_branches():
         ]
     )
 
-    assert cursor.sort("value", 1).count() == 4
+    with pytest.warns(tm.TinyMongoUnsupportedWarning):
+        assert cursor.sort("value", 1).count() == 4
     assert cursor.sort("value").count() == 4
-    assert cursor._order(True) == (5, True)
+    assert cursor._order(True) == (7, True)
     assert cursor._order([1, "a"], None)[0] == 4
     assert cursor.sort([("value", 1), ("_id", -1)]).count() == 4
     assert (

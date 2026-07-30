@@ -1,11 +1,15 @@
+import ast
+import copy
 import hashlib
 import importlib
 import json
+import math
 import os
 import re
 import sqlite3
 import tempfile
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
 from functools import wraps
 from urllib.parse import parse_qs, unquote, urlparse
@@ -14,6 +18,7 @@ from typing import Optional
 from .bson_codec import contains_extended_value
 from .bson_codec import dumps as bson_json_dumps
 from .bson_codec import loads as bson_json_loads
+from .bson_types import bson_identity_key, bson_values_equal
 from .errors import (
     DuplicateKeyError,
     OperationFailure,
@@ -33,6 +38,195 @@ from .parquet_storage import _acquire_rlock, _local_rlocks, portalocker
 
 _MISSING = object()
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
+_PHYSICAL_ID_PREFIX = "__tinymongo_id_v2__:"
+
+
+def _canonical_id_value(value):
+    """Build a stable serialization of the registry's BSON identity key."""
+    identity = bson_identity_key(value)
+    if identity is not None:
+        family, key = identity
+        if family == "number":
+            if isinstance(key, float):
+                if math.isinf(key):
+                    key = "-infinity" if key < 0 else "infinity"
+                else:
+                    key = list(key.as_integer_ratio())
+            elif isinstance(key, int):
+                key = [key, 1]
+        return [
+            "registered-scalar",
+            json.loads(
+                bson_json_dumps(
+                    [family, key],
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+            ),
+        ]
+
+    # MongoDB does not permit arrays as `_id` values, and TinyMongo only
+    # historically accepted containers as a local extension. Preserve that
+    # behavior with recursive typed keys while keeping registered scalars
+    # governed exclusively by the BSON registry above.
+    if isinstance(value, Mapping):
+        return [
+            "object",
+            [[str(key), _canonical_id_value(item)] for key, item in value.items()],
+        ]
+    if isinstance(value, (list, tuple)):
+        return ["array", [_canonical_id_value(item) for item in value]]
+
+    # Preserve deterministic identity for any codec-supported scalar outside
+    # the current BSON registry.
+    encoded = json.loads(
+        bson_json_dumps(
+            value,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    )
+    return ["encoded-scalar", encoded]
+
+
+def _physical_id_key(value):
+    """Return the compact typed key stored in SQL and Parquet `_id` columns."""
+    canonical = json.dumps(
+        _canonical_id_value(value),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return _PHYSICAL_ID_PREFIX + hashlib.sha256(canonical).hexdigest()
+
+
+def _physical_id_candidates(value):
+    """Return the v2 key followed by compatible legacy stringified keys."""
+
+    current = _physical_id_key(value)
+    legacy = [str(value)]
+    if not isinstance(value, bool) and isinstance(value, int):
+        try:
+            float_value = float(value)
+        except OverflowError:
+            pass
+        else:
+            if float_value == value:
+                legacy.append(str(float_value))
+                if value == 0:
+                    legacy.append(str(-0.0))
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        legacy.append(str(int(value)))
+
+    return tuple(dict.fromkeys([current] + legacy))
+
+
+def _requires_legacy_id_scan(value):
+    """Return whether equivalent legacy IDs can have unpredictable strings."""
+
+    if isinstance(value, (Mapping, list, tuple)):
+        return True
+    identity = bson_identity_key(value)
+    return identity is not None and identity[0] == "datetime"
+
+
+def _validate_physical_ids(existing_documents, new_documents):
+    """Reject BSON-equivalent `_id` values before reaching native storage."""
+    seen = {
+        _physical_id_key(document["_id"])
+        for document in existing_documents
+        if "_id" in document
+    }
+    for document in new_documents:
+        key = _physical_id_key(document["_id"])
+        if key in seen:
+            raise DuplicateKeyError("_id:{0} already exists".format(document["_id"]))
+        seen.add(key)
+
+
+def _legacy_id_values_equal(left, right):
+    """Compare legacy container IDs without relying on mapping field order."""
+
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return len(left) == len(right) and all(
+            key in right and _legacy_id_values_equal(value, right[key])
+            for key, value in left.items()
+        )
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _legacy_id_values_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return bson_values_equal(left, right)
+
+
+def _restore_legacy_document_id(row_id, document, requested_id=_MISSING):
+    """Recover the original order of a legacy container ID from its row key."""
+
+    if (
+        not isinstance(row_id, str)
+        or row_id.startswith(_PHYSICAL_ID_PREFIX)
+        or not isinstance(document, dict)
+        or "_id" not in document
+    ):
+        return document
+
+    if requested_id is not _MISSING and str(requested_id) == row_id:
+        candidate = requested_id
+    else:
+        try:
+            candidate = ast.literal_eval(row_id)
+        except (SyntaxError, ValueError):
+            return document
+
+    if (
+        not isinstance(candidate, (Mapping, list, tuple))
+        or str(candidate) != row_id
+        or not _legacy_id_values_equal(candidate, document["_id"])
+    ):
+        return document
+
+    restored = dict(document)
+    restored["_id"] = copy.deepcopy(candidate)
+    return restored
+
+
+def _matching_physical_row_id(rows, value, decode_row=None):
+    """Resolve a current or legacy physical row key by its decoded BSON ID."""
+    expected = _physical_id_key(value)
+    for row in rows:
+        row_id = row[0]
+        try:
+            document = (
+                decode_row(row) if decode_row is not None else _json_loads(row[1])
+            )
+            if _physical_id_key(document["_id"]) == expected:
+                return row_id
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _local_matching_physical_row_id(conn, quoted_table, value):
+    candidates = _physical_id_candidates(value)
+    rows = conn.execute(
+        "SELECT _id, data FROM {0} WHERE _id IN ({1})".format(
+            quoted_table,
+            ", ".join("?" for _ in candidates),
+        ),
+        candidates,
+    ).fetchall()
+    stored_id = _matching_physical_row_id(rows, value)
+    if stored_id is not None:
+        return stored_id
+
+    if not _requires_legacy_id_scan(value):
+        return None
+
+    # Container IDs and equivalent datetime representations can have legacy
+    # strings that cannot be enumerated. Restrict the compatibility scan to
+    # those uncommon values so ordinary missing-ID lookups remain indexed.
+    rows = conn.execute("SELECT _id, data FROM {0}".format(quoted_table)).fetchall()
+    return _matching_physical_row_id(rows, value)
 
 
 def _write_locked(method):
@@ -176,10 +370,31 @@ def _get_nested(doc, path, default=_MISSING):
     return current
 
 
+def _values_equal(actual, expected):
+    """Compare values recursively with BSON scalar equality semantics."""
+
+    if isinstance(actual, (list, tuple)) and isinstance(expected, (list, tuple)):
+        return len(actual) == len(expected) and all(
+            _values_equal(left, right) for left, right in zip(actual, expected)
+        )
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        actual_items = list(actual.items())
+        expected_items = list(expected.items())
+        return len(actual_items) == len(expected_items) and all(
+            actual_key == expected_key and _values_equal(actual_value, expected_value)
+            for (actual_key, actual_value), (expected_key, expected_value) in zip(
+                actual_items, expected_items
+            )
+        )
+    return bson_values_equal(actual, expected)
+
+
 def _value_matches(actual, expected):
     if isinstance(actual, list):
-        return actual == expected or expected in actual
-    return actual == expected
+        return _values_equal(actual, expected) or any(
+            _values_equal(item, expected) for item in actual
+        )
+    return _values_equal(actual, expected)
 
 
 def _sqlite_unique_token(data, field):
@@ -257,12 +472,13 @@ def _regex_matches(actual, pattern, options=""):
     )
 
 
-def _field_matches(actual, expected):
+def _field_matches(actual, expected, exact=False):
     exists = actual is not _MISSING
+    equality = _values_equal if exact else _value_matches
     if not isinstance(expected, dict) or not any(
         str(key).startswith("$") for key in expected
     ):
-        return exists and _value_matches(actual, expected)
+        return exists and equality(actual, expected)
 
     options = expected.get("$options", "")
     for operator, operand in expected.items():
@@ -293,19 +509,19 @@ def _field_matches(actual, expected):
             ):
                 return False
         elif operator == "$ne":
-            if exists and _value_matches(actual, operand):
+            if exists and equality(actual, operand):
                 return False
         elif operator == "$in":
             values = operand if isinstance(operand, list) else [operand]
-            if not exists or not any(_value_matches(actual, item) for item in values):
+            if not exists or not any(equality(actual, item) for item in values):
                 return False
         elif operator == "$nin":
             values = operand if isinstance(operand, list) else [operand]
-            if exists and any(_value_matches(actual, item) for item in values):
+            if exists and any(equality(actual, item) for item in values):
                 return False
         elif operator == "$all":
             if not isinstance(actual, list) or not all(
-                item in actual for item in operand
+                any(_values_equal(item, value) for value in actual) for item in operand
             ):
                 return False
         elif operator == "$regex":
@@ -313,10 +529,10 @@ def _field_matches(actual, expected):
                 return False
         elif operator == "$not":
             nested = operand if isinstance(operand, dict) else {"$eq": operand}
-            if exists and _field_matches(actual, nested):
+            if exists and _field_matches(actual, nested, exact=exact):
                 return False
         elif operator == "$eq":
-            if not exists or not _value_matches(actual, operand):
+            if not exists or not equality(actual, operand):
                 return False
         else:
             return False
@@ -341,9 +557,79 @@ def matches_filter(doc, filter_doc):
                 return False
         else:
             actual = _get_nested(doc, key)
-            if not _field_matches(actual, expected):
+            if not _field_matches(actual, expected, exact=key == "_id"):
                 return False
     return True
+
+
+def _filter_references_id(filter_doc):
+    if not isinstance(filter_doc, dict):
+        return False
+    if "_id" in filter_doc:
+        return True
+    return any(
+        _filter_references_id(item)
+        for operator in ("$and", "$or", "$nor")
+        for item in (
+            filter_doc.get(operator, [])
+            if isinstance(filter_doc.get(operator, []), list)
+            else []
+        )
+    )
+
+
+def _id_condition_requires_legacy_scan(condition):
+    if not isinstance(condition, dict):
+        return _requires_legacy_id_scan(condition)
+    if not any(str(key).startswith("$") for key in condition):
+        return _requires_legacy_id_scan(condition)
+    for operator, operand in condition.items():
+        if operator == "$eq" and _requires_legacy_id_scan(operand):
+            return True
+        if operator == "$in":
+            values = operand if isinstance(operand, list) else [operand]
+            if any(_requires_legacy_id_scan(value) for value in values):
+                return True
+    return False
+
+
+def _filter_requires_legacy_id_scan(filter_doc):
+    if not isinstance(filter_doc, dict):
+        return False
+    if "_id" in filter_doc and _id_condition_requires_legacy_scan(filter_doc["_id"]):
+        return True
+    return any(
+        _filter_requires_legacy_id_scan(item)
+        for operator in ("$and", "$or", "$nor")
+        for item in (
+            filter_doc.get(operator, [])
+            if isinstance(filter_doc.get(operator, []), list)
+            else []
+        )
+    )
+
+
+def _postfilter_id_candidates(documents, filter_doc, fallback):
+    """Verify typed/legacy ID candidates and recover legacy numeric matches."""
+
+    if not _filter_references_id(filter_doc):
+        return documents
+
+    matches = [
+        document for document in documents if matches_filter(document, filter_doc)
+    ]
+    direct_equality = (
+        isinstance(filter_doc, dict)
+        and set(filter_doc) == {"_id"}
+        and not isinstance(filter_doc["_id"], dict)
+    )
+    if direct_equality and matches:
+        return matches
+    if _filter_requires_legacy_id_scan(filter_doc):
+        return [
+            document for document in fallback() if matches_filter(document, filter_doc)
+        ]
+    return matches
 
 
 def requires_python_filter(filter_doc):
@@ -354,6 +640,12 @@ def requires_python_filter(filter_doc):
         return True
     for field, expected in filter_doc.items():
         if field in ("$and", "$or", "$nor"):
+            # Physical `_id` candidates intentionally include legacy string
+            # aliases. They are a safe superset for positive predicates, but
+            # negating that SQL superset can discard BSON-distinct legacy rows
+            # before the exact Python postfilter gets a chance to recover them.
+            if field == "$nor" and _filter_references_id({field: expected}):
+                return True
             if any(requires_python_filter(item) for item in expected):
                 return True
         else:
@@ -444,23 +736,39 @@ class SQLCompiler(object):
                 clauses = []
                 params = []
                 for operator, operand in value.items():
-                    if operator in ("$eq", "$ne"):
+                    if operator == "$eq":
+                        candidates = _physical_id_candidates(operand)
                         clauses.append(
-                            "_id {0} ?".format("!=" if operator == "$ne" else "=")
+                            "(" + " OR ".join("_id = ?" for _ in candidates) + ")"
                         )
-                        params.append(str(operand))
+                        params.extend(candidates)
+                    elif operator == "$ne":
+                        # The current typed key is sufficient for a superset.
+                        # A legacy string key may also belong to a BSON-distinct
+                        # value, so filtering it here could create false negatives.
+                        clauses.append("_id != ?")
+                        params.append(_physical_id_key(operand))
                     elif operator == "$in":
                         values = operand if isinstance(operand, list) else [operand]
+                        candidates = [
+                            candidate
+                            for item in values
+                            for candidate in _physical_id_candidates(item)
+                        ]
                         clauses.append(
-                            "_id IN (" + ", ".join("?" for _ in values) + ")"
+                            "_id IN (" + ", ".join("?" for _ in candidates) + ")"
                         )
-                        params.extend(str(item) for item in values)
+                        params.extend(candidates)
                     else:
                         raise ValueError(
                             "Unsupported _id SQL operator: {0}".format(operator)
                         )
                 return "(" + " AND ".join(clauses) + ")", params
-            return "_id = ?", [str(value)]
+            candidates = _physical_id_candidates(value)
+            return (
+                "(" + " OR ".join("_id = ?" for _ in candidates) + ")",
+                list(candidates),
+            )
 
         if isinstance(value, dict):
             clauses = []
@@ -739,7 +1047,7 @@ class SQLiteTableBackend(TableBackend):
                 conn.execute("DROP TABLE tinydb")
                 conn.commit()
                 return
-            data = json.loads(row[0])
+            data = _json_loads(row[0])
             for collection, docs in data.items():
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS {0} (_id TEXT PRIMARY KEY, data TEXT NOT NULL)".format(
@@ -747,7 +1055,7 @@ class SQLiteTableBackend(TableBackend):
                     )
                 )
                 rows = [
-                    (str(doc.get("_id", eid)), _json_dumps(doc))
+                    (_physical_id_key(doc.get("_id", eid)), _json_dumps(doc))
                     for eid, doc in (docs or {}).items()
                     if isinstance(doc, dict)
                 ]
@@ -812,7 +1120,8 @@ class SQLiteTableBackend(TableBackend):
         self.create_collection(collection)
         existing_docs = self.find(collection, {})
         self.validate_unique_post_image(collection, existing_docs + docs)
-        rows = [(str(doc["_id"]), _json_dumps(doc)) for doc in docs]
+        _validate_physical_ids(existing_docs, docs)
+        rows = [(_physical_id_key(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
             sql = "INSERT INTO {0} (_id, data) VALUES (?, ?)".format(
@@ -845,7 +1154,12 @@ class SQLiteTableBackend(TableBackend):
                 rows = conn.execute(sql, params).fetchall()
             finally:
                 conn.close()
-            return [_json_loads(row[0]) for row in rows]
+            documents = [_json_loads(row[0]) for row in rows]
+            return _postfilter_id_candidates(
+                documents,
+                filter_doc,
+                lambda: self._all_docs_unfiltered(collection),
+            )
         except Exception:
             return [
                 doc
@@ -899,21 +1213,29 @@ class SQLiteTableBackend(TableBackend):
     @_write_locked
     def replace_one(self, collection, doc_id, replacement):
         self.create_collection(collection)
+        target_id = _physical_id_key(doc_id)
         self.validate_unique_post_image(
             collection,
             [
-                replacement if doc.get("_id") == doc_id else doc
+                replacement if _physical_id_key(doc.get("_id")) == target_id else doc
                 for doc in self.find(collection, {})
             ],
         )
         conn = self._connect()
         try:
             try:
+                stored_id = _local_matching_physical_row_id(
+                    conn,
+                    _quote_identifier(collection),
+                    doc_id,
+                )
+                if stored_id is None:
+                    return
                 conn.execute(
                     "UPDATE {0} SET data = ? WHERE _id = ?".format(
                         _quote_identifier(collection)
                     ),
-                    (_json_dumps(replacement), str(doc_id)),
+                    (_json_dumps(replacement), stored_id),
                 )
                 conn.commit()
             except sqlite3.IntegrityError as exc:
@@ -928,9 +1250,17 @@ class SQLiteTableBackend(TableBackend):
         self.create_collection(collection)
         conn = self._connect()
         try:
+            stored_ids = [
+                _local_matching_physical_row_id(
+                    conn,
+                    _quote_identifier(collection),
+                    doc_id,
+                )
+                for doc_id in ids
+            ]
             conn.executemany(
                 "DELETE FROM {0} WHERE _id = ?".format(_quote_identifier(collection)),
-                [(str(doc_id),) for doc_id in ids],
+                [(stored_id,) for stored_id in stored_ids if stored_id is not None],
             )
             conn.commit()
         finally:
@@ -1109,7 +1439,7 @@ class DuckDBTableBackend(TableBackend):
             except Exception:  # pragma: no cover - corrupt legacy fallback
                 row = None
             if row and row[0]:  # pragma: no branch
-                data = json.loads(row[0])
+                data = _json_loads(row[0])
                 for collection, docs in data.items():
                     conn.execute(
                         "CREATE TABLE IF NOT EXISTS {0} (_id VARCHAR PRIMARY KEY, data VARCHAR NOT NULL)".format(
@@ -1117,7 +1447,7 @@ class DuckDBTableBackend(TableBackend):
                         )
                     )
                     rows = [
-                        (str(doc.get("_id", eid)), _json_dumps(doc))
+                        (_physical_id_key(doc.get("_id", eid)), _json_dumps(doc))
                         for eid, doc in (docs or {}).items()
                         if isinstance(doc, dict)
                     ]
@@ -1179,7 +1509,8 @@ class DuckDBTableBackend(TableBackend):
         self.create_collection(collection)
         existing_docs = self.find(collection, {})
         self.validate_unique_post_image(collection, existing_docs + docs)
-        rows = [(str(doc["_id"]), _json_dumps(doc)) for doc in docs]
+        _validate_physical_ids(existing_docs, docs)
+        rows = [(_physical_id_key(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
             conn.executemany(
@@ -1213,7 +1544,12 @@ class DuckDBTableBackend(TableBackend):
                 rows = conn.execute(sql, params).fetchall()
             finally:
                 conn.close()
-            return [_json_loads(row[0]) for row in rows]
+            documents = [_json_loads(row[0]) for row in rows]
+            return _postfilter_id_candidates(
+                documents,
+                filter_doc,
+                lambda: self._all_docs_unfiltered(collection),
+            )
         except Exception:
             return [
                 doc
@@ -1235,20 +1571,28 @@ class DuckDBTableBackend(TableBackend):
     @_write_locked
     def replace_one(self, collection, doc_id, replacement):
         self.create_collection(collection)
+        target_id = _physical_id_key(doc_id)
         self.validate_unique_post_image(
             collection,
             [
-                replacement if doc.get("_id") == doc_id else doc
+                replacement if _physical_id_key(doc.get("_id")) == target_id else doc
                 for doc in self.find(collection, {})
             ],
         )
         conn = self._connect()
         try:
+            stored_id = _local_matching_physical_row_id(
+                conn,
+                _quote_identifier(collection),
+                doc_id,
+            )
+            if stored_id is None:
+                return
             conn.execute(
                 "UPDATE {0} SET data = ? WHERE _id = ?".format(
                     _quote_identifier(collection)
                 ),
-                (_json_dumps(replacement), str(doc_id)),
+                (_json_dumps(replacement), stored_id),
             )
         finally:
             conn.close()
@@ -1260,9 +1604,17 @@ class DuckDBTableBackend(TableBackend):
         self.create_collection(collection)
         conn = self._connect()
         try:
+            stored_ids = [
+                _local_matching_physical_row_id(
+                    conn,
+                    _quote_identifier(collection),
+                    doc_id,
+                )
+                for doc_id in ids
+            ]
             conn.executemany(
                 "DELETE FROM {0} WHERE _id = ?".format(_quote_identifier(collection)),
-                [(str(doc_id),) for doc_id in ids],
+                [(stored_id,) for stored_id in stored_ids if stored_id is not None],
             )
         finally:
             conn.close()
@@ -1492,10 +1844,11 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             rows = self._read_all_rows(collection)
             existing_docs = [_json_loads(row[1]) for row in rows]
             self.validate_unique_post_image(collection, existing_docs + docs)
+            _validate_physical_ids(existing_docs, docs)
             existing = {row[0] for row in rows}
             new_rows = []
             for doc in docs:
-                doc_id = str(doc["_id"])
+                doc_id = _physical_id_key(doc["_id"])
                 if doc_id in existing:
                     raise DuplicateKeyError("_id:{0} already exists".format(doc["_id"]))
                 new_rows.append((doc_id, _json_dumps(doc)))
@@ -1523,7 +1876,14 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
                 ).fetchall()
             finally:
                 conn.close()
-            return [_json_loads(row[0]) for row in rows]
+            documents = [_json_loads(row[0]) for row in rows]
+            return _postfilter_id_candidates(
+                documents,
+                filter_doc,
+                lambda: [
+                    _json_loads(row[1]) for row in self._read_all_rows(collection)
+                ],
+            )
         except Exception:
             return [
                 _json_loads(row[1])
@@ -1534,24 +1894,27 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
     def replace_one(self, collection, doc_id, replacement):
         with self._write_lock():
             current_rows = self._read_all_rows(collection)
+            stored_id = _matching_physical_row_id(current_rows, doc_id)
             self.validate_unique_post_image(
                 collection,
                 [
-                    replacement if row_id == str(doc_id) else _json_loads(data)
+                    replacement if row_id == stored_id else _json_loads(data)
                     for row_id, data in current_rows
                 ],
             )
             rows = [
-                (row_id, _json_dumps(replacement) if row_id == str(doc_id) else data)
+                (row_id, _json_dumps(replacement) if row_id == stored_id else data)
                 for row_id, data in current_rows
             ]
             self._write_rows(collection, rows)
 
     def delete_ids(self, collection, ids):
         with self._write_lock():
-            id_set = {str(doc_id) for doc_id in ids}
+            id_set = {_physical_id_key(doc_id) for doc_id in ids}
             rows = [
-                row for row in self._read_all_rows(collection) if row[0] not in id_set
+                row
+                for row in self._read_all_rows(collection)
+                if _physical_id_key(_json_loads(row[1])["_id"]) not in id_set
             ]
             self._write_rows(collection, rows)
 
@@ -1605,6 +1968,7 @@ class RemoteSQLTableBackend(TableBackend):
 
     placeholder = "%s"
     json_type = "TEXT"
+    ordered_data_type = "TEXT"
     metadata_table = "__tinymongo_collections"
     index_catalog_table = "__tinymongo_indexes"
 
@@ -1618,6 +1982,7 @@ class RemoteSQLTableBackend(TableBackend):
     ):
         if not dsn:
             raise ValueError("{0} backend requires a DSN".format(self.dialect))
+        self._ordered_data_collections = set()
         super(RemoteSQLTableBackend, self).__init__(
             path,
             threads=threads,
@@ -1665,10 +2030,7 @@ class RemoteSQLTableBackend(TableBackend):
             raise
 
     def _commit(self, conn):
-        try:
-            conn.commit()
-        except Exception:
-            pass
+        conn.commit()
 
     def _close_cursor(self, cursor):
         try:
@@ -1803,17 +2165,35 @@ class RemoteSQLTableBackend(TableBackend):
     def create_collection(self, collection):
         conn = self._connect()
         try:
+            table = self._quote(self._table_name(collection))
             self._execute(
                 conn,
                 "CREATE TABLE IF NOT EXISTS {0} "
-                "(_id VARCHAR(255) PRIMARY KEY, data {1} NOT NULL)".format(
-                    self._quote(self._table_name(collection)), self.json_type
+                "(_id VARCHAR(255) PRIMARY KEY, data {1} NOT NULL, "
+                "data_ordered {2} NULL)".format(
+                    table,
+                    self.json_type,
+                    self.ordered_data_type,
                 ),
             )
+            needs_ordered_data = collection not in self._ordered_data_collections
+            if needs_ordered_data:
+                self._ensure_ordered_data_column(conn, collection, table)
             self._record_collection(conn, collection)
             self._commit(conn)
+            if needs_ordered_data:
+                self._ordered_data_collections.add(collection)
         finally:
             conn.close()
+
+    def _ensure_ordered_data_column(self, conn, collection, table):
+        """Upgrade a legacy remote table without disturbing its JSON indexes."""
+
+        self._execute(
+            conn,
+            "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS "
+            "data_ordered {1} NULL".format(table, self.ordered_data_type),
+        )
 
     def drop_collection(self, collection):
         existed = collection in self.list_collections()
@@ -1841,6 +2221,7 @@ class RemoteSQLTableBackend(TableBackend):
                 (self.database, collection),
             )
             self._commit(conn)
+            self._ordered_data_collections.discard(collection)
             return existed
         finally:
             conn.close()
@@ -1849,7 +2230,8 @@ class RemoteSQLTableBackend(TableBackend):
         self.create_collection(collection)
         current = self._all_docs_unfiltered(collection)
         self.validate_unique_post_image(collection, current + docs)
-        rows = [(str(doc["_id"]), _json_dumps(doc)) for doc in docs]
+        _validate_physical_ids(current, docs)
+        rows = [(_physical_id_key(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
             self._insert_rows(conn, collection, rows, bypass_document_validation)
@@ -1868,11 +2250,25 @@ class RemoteSQLTableBackend(TableBackend):
     def _data_placeholder(self):
         return self.placeholder
 
+    def _decode_data_value(self, data, ordered_data=None):
+        """Read ordered text when present and legacy JSON otherwise."""
+
+        document = _json_loads(ordered_data if ordered_data is not None else data)
+        # Tolerate the short-lived wrapped representation used by pre-release
+        # development builds as well as released legacy object rows.
+        if isinstance(document, str):
+            document = _json_loads(document)
+        return document
+
     def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):
         self.create_collection(collection)
         if not filter_doc:
             return self._all_docs_unfiltered(collection)
-        if isinstance(filter_doc, dict) and set(filter_doc.keys()) == {"_id"}:
+        if (
+            isinstance(filter_doc, dict)
+            and set(filter_doc.keys()) == {"_id"}
+            and not isinstance(filter_doc["_id"], dict)
+        ):
             doc = self._find_by_id(collection, filter_doc["_id"])
             return [doc] if doc else []
         return [
@@ -1882,20 +2278,70 @@ class RemoteSQLTableBackend(TableBackend):
         ]
 
     def _find_by_id(self, collection, doc_id):
+        _stored_id, document = self._stored_row_by_id(collection, doc_id)
+        return document
+
+    def _stored_row_by_id(self, collection, doc_id):
         conn = self._connect()
         try:
+            expected = _physical_id_key(doc_id)
+            for candidate in _physical_id_candidates(doc_id):
+                cursor = self._execute(
+                    conn,
+                    "SELECT data_ordered, data FROM {0} WHERE _id = {1}".format(
+                        self._quote(self._table_name(collection)), self.placeholder
+                    ),
+                    (candidate,),
+                )
+                try:
+                    row = cursor.fetchone()
+                finally:
+                    self._close_cursor(cursor)
+                if row is None:
+                    continue
+                document = self._decode_data_value(
+                    row[-1],
+                    ordered_data=row[0] if len(row) > 1 else None,
+                )
+                document = _restore_legacy_document_id(
+                    candidate,
+                    document,
+                    requested_id=doc_id,
+                )
+                if _physical_id_key(document["_id"]) == expected:
+                    return candidate, document
+
+            if not _requires_legacy_id_scan(doc_id):
+                return None, None
+
+            # See the local fallback: container IDs and equivalent datetime
+            # representations can have legacy strings that cannot be enumerated.
             cursor = self._execute(
                 conn,
-                "SELECT data FROM {0} WHERE _id = {1}".format(
-                    self._quote(self._table_name(collection)), self.placeholder
+                "SELECT _id, data_ordered, data FROM {0}".format(
+                    self._quote(self._table_name(collection))
                 ),
-                (str(doc_id),),
             )
             try:
-                row = cursor.fetchone()
-                return _json_loads(row[0]) if row else None
+                rows = cursor.fetchall()
             finally:
                 self._close_cursor(cursor)
+            for row in rows:
+                document = self._decode_data_value(
+                    row[-1],
+                    ordered_data=row[1] if len(row) > 2 else None,
+                )
+                document = _restore_legacy_document_id(
+                    row[0],
+                    document,
+                    requested_id=doc_id,
+                )
+                try:
+                    if _physical_id_key(document["_id"]) == expected:
+                        return row[0], document
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return None, None
         finally:
             conn.close()
 
@@ -1904,12 +2350,21 @@ class RemoteSQLTableBackend(TableBackend):
         try:
             cursor = self._execute(
                 conn,
-                "SELECT data FROM {0}".format(
+                "SELECT _id, data_ordered, data FROM {0}".format(
                     self._quote(self._table_name(collection))
                 ),
             )
             try:
-                return [_json_loads(row[0]) for row in cursor.fetchall()]
+                return [
+                    _restore_legacy_document_id(
+                        row[0],
+                        self._decode_data_value(
+                            row[-1],
+                            ordered_data=row[1] if len(row) > 2 else None,
+                        ),
+                    )
+                    for row in cursor.fetchall()
+                ]
             finally:
                 self._close_cursor(cursor)
         finally:
@@ -1917,24 +2372,33 @@ class RemoteSQLTableBackend(TableBackend):
 
     def replace_one(self, collection, doc_id, replacement):
         self.create_collection(collection)
+        target_id = _physical_id_key(doc_id)
         self.validate_unique_post_image(
             collection,
             [
-                replacement if str(doc.get("_id")) == str(doc_id) else doc
+                replacement if _physical_id_key(doc.get("_id")) == target_id else doc
                 for doc in self._all_docs_unfiltered(collection)
             ],
         )
+        stored_id, _document = self._stored_row_by_id(collection, doc_id)
+        if stored_id is None:
+            return
         conn = self._connect()
         try:
             try:
                 self._execute(
                     conn,
-                    "UPDATE {0} SET data = {1} WHERE _id = {2}".format(
+                    "UPDATE {0} SET data = {1}, data_ordered = {2} "
+                    "WHERE _id = {2}".format(
                         self._quote(self._table_name(collection)),
                         self._data_placeholder(),
                         self.placeholder,
                     ),
-                    (_json_dumps(replacement), str(doc_id)),
+                    (
+                        _json_dumps(replacement),
+                        _json_dumps(replacement),
+                        stored_id,
+                    ),
                 )
                 self._commit(conn)
             except Exception as exc:
@@ -1948,6 +2412,7 @@ class RemoteSQLTableBackend(TableBackend):
         if not ids:
             return
         self.create_collection(collection)
+        stored_ids = [self._stored_row_by_id(collection, doc_id)[0] for doc_id in ids]
         conn = self._connect()
         try:
             self._executemany(
@@ -1955,7 +2420,7 @@ class RemoteSQLTableBackend(TableBackend):
                 "DELETE FROM {0} WHERE _id = {1}".format(
                     self._quote(self._table_name(collection)), self.placeholder
                 ),
-                [(str(doc_id),) for doc_id in ids],
+                [(stored_id,) for stored_id in stored_ids if stored_id is not None],
             )
             self._commit(conn)
         finally:
@@ -2084,17 +2549,24 @@ class PostgresTableBackend(RemoteSQLTableBackend):
         )
 
     def _insert_rows(self, conn, collection, rows, bypass_document_validation):
-        sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {2})".format(
+        sql = (
+            "INSERT INTO {0} (_id, data, data_ordered) " "VALUES ({1}, {2}, {1})"
+        ).format(
             self._quote(self._table_name(collection)),
             self.placeholder,
             self._data_placeholder(),
         )
-        self._executemany(conn, sql, rows)
+        self._executemany(
+            conn,
+            sql,
+            [(doc_id, data, data) for doc_id, data in rows],
+        )
 
 
 class MySQLTableBackend(RemoteSQLTableBackend):
     dialect = "mysql"
     json_type = "JSON"
+    ordered_data_type = "LONGTEXT"
 
     def __init__(self, path, threads=None, duckdb_config=None, database=None, dsn=None):
         pymysql = _import_optional_driver(
@@ -2131,6 +2603,35 @@ class MySQLTableBackend(RemoteSQLTableBackend):
 
     def _generated_index_column(self, collection, spec):
         return self._physical_index_name(collection, spec).replace("_idx_", "_key_")
+
+    def _ensure_ordered_data_column(self, conn, collection, table):
+        # MySQL 8 does not accept ADD COLUMN IF NOT EXISTS. Querying the active
+        # schema also avoids needless ALTER TABLE operations for new tables.
+        cursor = self._execute(
+            conn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = {0} "
+            "AND column_name = 'data_ordered' LIMIT 1".format(self.placeholder),
+            (self._table_name(collection),),
+        )
+        try:
+            exists = cursor.fetchone() is not None
+        finally:
+            self._close_cursor(cursor)
+        if exists:
+            return
+
+        try:
+            self._execute(
+                conn,
+                "ALTER TABLE {0} ADD COLUMN data_ordered {1} NULL".format(
+                    table, self.ordered_data_type
+                ),
+            )
+        except Exception as exc:
+            code = exc.args[0] if getattr(exc, "args", ()) else None
+            if code != 1060 and "duplicate column" not in str(exc).lower():
+                raise
 
     def _create_native_index(self, conn, collection, spec):
         json_path = "$" + "".join(
@@ -2197,7 +2698,11 @@ class MySQLTableBackend(RemoteSQLTableBackend):
         )
 
     def _insert_rows(self, conn, collection, rows, bypass_document_validation):
-        sql = "INSERT INTO {0} (_id, data) VALUES ({1}, {1})".format(
-            self._quote(self._table_name(collection)), self.placeholder
+        sql = (
+            "INSERT INTO {0} (_id, data, data_ordered) " "VALUES ({1}, {1}, {1})"
+        ).format(self._quote(self._table_name(collection)), self.placeholder)
+        self._executemany(
+            conn,
+            sql,
+            [(doc_id, data, data) for doc_id, data in rows],
         )
-        self._executemany(conn, sql, rows)

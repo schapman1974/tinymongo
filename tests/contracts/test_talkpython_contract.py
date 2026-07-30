@@ -1,6 +1,6 @@
 """High-signal compatibility contracts derived from the Talk Python application."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -333,6 +333,215 @@ def test_object_id_and_datetime_round_trip_and_range_query(contract_target):
     assert document["created_date"] == created_date
     assert isinstance(document["created_date"], datetime)
     assert _ids(in_range) == [episode_id]
+
+
+def test_binary_round_trip_query_and_mongodb_sort_order(contract_target):
+    bson = pytest.importorskip("bson")
+    collection = contract_target.collection
+    uuid_binary = bson.Binary(bytes(range(16)), subtype=4)
+    sort_values = [
+        ("short-custom", bson.Binary(b"\xff", subtype=128)),
+        ("two-generic", b"\xff\xff"),
+        ("two-custom-low", bson.Binary(b"\x00\x00", subtype=128)),
+        ("two-custom-high", bson.Binary(b"\xff\x00", subtype=128)),
+        ("three-generic", b"\x00\x00\x00"),
+    ]
+    collection.insert_many(
+        [
+            {
+                "_id": label,
+                "label": label,
+                "value": value,
+                "nested": {"token": uuid_binary},
+            }
+            for label, value in reversed(sort_values)
+        ]
+    )
+
+    by_binary = list(collection.find({}).sort("value", 1))
+    matched = collection.find_one({"nested.token": uuid_binary})
+
+    assert [document["label"] for document in by_binary] == [
+        label for label, _value in sort_values
+    ]
+    assert matched is not None
+    assert isinstance(matched["value"], (bytes, bson.Binary))
+    assert isinstance(matched["nested"]["token"], bson.Binary)
+    assert matched["nested"]["token"].subtype == 4
+    assert bytes(matched["nested"]["token"]) == bytes(uuid_binary)
+
+
+def test_generic_binary_equality_matches_native_bytes_and_query_operators(
+    contract_target,
+):
+    bson = pytest.importorskip("bson")
+    collection = contract_target.collection
+    generic = bson.Binary(b"talk-python", subtype=0)
+    collection.insert_many(
+        [
+            {
+                "_id": "binary-object",
+                "value": generic,
+                "values": [generic, "other"],
+            },
+            {
+                "_id": "native-bytes",
+                "value": b"python-bytes",
+                "values": [b"python-bytes"],
+            },
+        ]
+    )
+
+    assert collection.find_one({"value": b"talk-python"})["_id"] == "binary-object"
+    assert collection.find_one({"value": generic})["_id"] == "binary-object"
+    if contract_target.name != "mongodb":
+        # TinyMongo accepts bytearray as a convenience and canonicalizes it to
+        # BSON's generic binary subtype. PyMongo rejects bytearray at encoding.
+        assert (
+            collection.find_one({"value": bytearray(b"talk-python")})["_id"]
+            == "binary-object"
+        )
+    assert (
+        collection.find_one({"value": bson.Binary(b"python-bytes", subtype=0)})["_id"]
+        == "native-bytes"
+    )
+    assert collection.find_one({"values": generic})["_id"] == "binary-object"
+    assert collection.find_one({"values": {"$in": [generic]}})["_id"] == "binary-object"
+    assert (
+        collection.find_one({"values": {"$all": [b"talk-python"]}})["_id"]
+        == "binary-object"
+    )
+    assert sorted(_ids(collection.find({"value": {"$nin": [b"talk-python"]}}))) == [
+        "native-bytes"
+    ]
+
+
+def test_binary_ids_use_bson_equality_without_losing_subtype(contract_target):
+    bson = pytest.importorskip("bson")
+    pymongo_errors = pytest.importorskip("pymongo.errors")
+    collection = contract_target.collection
+    raw = bytes(range(16))
+    generic_id = bson.Binary(raw, subtype=0)
+    uuid_id = bson.Binary(raw, subtype=4)
+
+    collection.insert_one({"_id": generic_id, "kind": "generic"})
+
+    assert collection.find_one({"_id": raw})["kind"] == "generic"
+    with pytest.raises(pymongo_errors.DuplicateKeyError):
+        collection.insert_one({"_id": raw, "kind": "duplicate"})
+
+    collection.insert_one({"_id": uuid_id, "kind": "uuid"})
+    assert collection.find_one({"_id": uuid_id})["kind"] == "uuid"
+    assert sorted(document["kind"] for document in collection.find({})) == [
+        "generic",
+        "uuid",
+    ]
+    collection.update_one({"_id": uuid_id}, {"$set": {"updated": True}})
+    assert collection.find_one({"_id": raw}).get("updated") is None
+    assert collection.find_one({"_id": uuid_id})["updated"] is True
+    collection.delete_one({"_id": raw})
+    assert collection.find_one({"_id": raw}) is None
+    assert collection.find_one({"_id": uuid_id}) is not None
+
+
+def test_boolean_and_numeric_ids_are_bson_distinct(contract_target):
+    pymongo_errors = pytest.importorskip("pymongo.errors")
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": 1, "kind": "number"},
+            {"_id": True, "kind": "boolean"},
+        ]
+    )
+
+    assert collection.find_one({"_id": 1})["kind"] == "number"
+    assert collection.find_one({"_id": True})["kind"] == "boolean"
+    assert collection.find_one({"_id": 1.0})["kind"] == "number"
+    with pytest.raises(pymongo_errors.DuplicateKeyError):
+        collection.insert_one({"_id": 1.0, "kind": "duplicate-number"})
+    collection.update_one({"_id": True}, {"$set": {"updated": True}})
+    assert collection.find_one({"_id": 1}).get("updated") is None
+    assert collection.find_one({"_id": True})["updated"] is True
+    collection.delete_one({"_id": 1.0})
+    assert collection.find_one({"_id": 1}) is None
+    assert collection.find_one({"_id": True}) is not None
+
+
+def test_mixed_timezone_datetimes_sort_by_utc_instant(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {
+                "_id": "late",
+                "published": datetime(2026, 1, 1, 3, tzinfo=timezone.utc),
+            },
+            {
+                "_id": "early",
+                "published": datetime(
+                    2025,
+                    12,
+                    31,
+                    21,
+                    tzinfo=timezone(timedelta(hours=-3)),
+                ),
+            },
+            {"_id": "middle", "published": datetime(2026, 1, 1, 1)},
+        ]
+    )
+
+    assert _ids(collection.find({}).sort("published", 1)) == [
+        "early",
+        "middle",
+        "late",
+    ]
+    assert _ids(collection.find({}).sort("published", -1)) == [
+        "late",
+        "middle",
+        "early",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("ordered", "expected_ids", "expected_inserted"),
+    [
+        (True, [1], 1),
+        (False, [1, 2], 2),
+    ],
+)
+def test_insert_many_reports_compatible_partial_failures(
+    contract_target,
+    ordered,
+    expected_ids,
+    expected_inserted,
+):
+    pymongo_errors = pytest.importorskip("pymongo.errors")
+    collection = contract_target.collection
+    documents = [
+        {"_id": 1, "label": "first"},
+        {"_id": 1, "label": "duplicate"},
+        {"_id": 2, "label": "last"},
+    ]
+
+    with pytest.raises(pymongo_errors.BulkWriteError) as caught:
+        collection.insert_many(documents, ordered=ordered)
+
+    details = caught.value.details
+    assert _ids(collection.find({}).sort("_id", 1)) == expected_ids
+    assert details["nInserted"] == expected_inserted
+    assert details["writeConcernErrors"] == []
+    assert [(error["index"], error["code"]) for error in details["writeErrors"]] == [
+        (1, 11000)
+    ]
+
+
+def test_insert_many_accepts_a_document_generator(contract_target):
+    collection = contract_target.collection
+    documents = ({"_id": number, "label": str(number)} for number in range(3))
+
+    result = collection.insert_many(documents)
+
+    assert result.inserted_ids == [0, 1, 2]
+    assert _ids(collection.find({}).sort("_id", 1)) == [0, 1, 2]
 
 
 def test_duplicate_errors_are_catchable_as_pymongo_errors(contract_target):

@@ -25,6 +25,88 @@ Prerequisite backend work:
 - [x] [#74: Field projections](https://github.com/schapman1974/tinymongo/issues/74)
 - [x] [#76: Durable indexes and unique constraints](https://github.com/schapman1974/tinymongo/issues/76)
 
+### Mike Kennedy's Talk Python and agent-guide follow-up
+
+This checklist combines Mike Kennedy's
+[Talk Python acceptance blockers](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5112320332)
+with the follow-up audit of his
+[TinyMongo agent reference](https://github.com/mikeckennedy/python-package-guides-for-agents/blob/main/package-guides/tinymongo_reference.md):
+
+- [x] Redirect the real Talk Python data layer through TinyMongo's asynchronous
+  client on SQLite, initialize all 16 collections, and reduce the observed
+  failures to backend-independent reproductions.
+- [x] Complete the Talk Python slice of
+  [#94: MongoDB BSON comparison and sort order](https://github.com/schapman1974/tinymongo/issues/94)
+  for `datetime`, `ObjectId`, and BinData values in both directions, including
+  mixed naive/aware datetimes and compound sorts.
+- [x] Preserve binary payloads from `Binary`, `bytes`, and `bytearray` through
+  storage and queries, including the BSON subtype and nested or large values;
+  normalize `bytearray` to `bytes` on read as part of
+  [#75](https://github.com/schapman1974/tinymongo/issues/75).
+- [x] Apply BSON-aware equality to direct queries, the `$in`, `$nin`, and `$all`
+  query operators, and `_id` identity: native bytes equal generic Binary
+  subtype 0, nonzero subtypes remain distinct, booleans remain distinct from
+  numbers, and equivalent numeric representations share one key.
+- [x] Use typed physical `_id` keys on SQL, DuckDB, and Parquet backends without
+  breaking reads, replacements, or deletes for existing stringified keys.
+- [x] Preserve embedded-document field order and strict-JSON non-finite floats
+  in remote SQL rows while continuing to read legacy rows without an ordered
+  copy.
+- [x] Emit one useful diagnostic per unsupported sort type and field instead of
+  silently returning insertion order.
+- [x] Capture the batch rejection Mike observed when unsupported Binary made
+  one document unserializable, and verify the real PyMongo reference behavior.
+- [x] [#140: Match `insert_many()` ordered and partial-failure semantics](https://github.com/schapman1974/tinymongo/issues/140):
+  accept document iterables; ordered inserts preserve the successful prefix
+  and stop at the first error; unordered inserts continue valid documents and
+  report every duplicate-key write failure in a `BulkWriteError`. TinyMongo
+  deliberately preflights its complete local batch, so client-side encoding
+  failures remain all-or-nothing even though PyMongo may split very large
+  inputs across wire batches.
+- [x] Preserve exact TinyDB update post-images so top-level `$unset` really
+  removes a field while nested and missing-field cases retain their expected
+  behavior.
+- [x] Make CLI export/import BSON-aware, safely preflight complete
+  replace/migration writes, and keep TinyDB's internal `_default` table out of
+  API and CLI collection listings, inspection, and migration.
+- [x] Match PyMongo's dotted child-collection behavior and private-attribute
+  guard for synchronous and asynchronous handles.
+- [x] Apply the agent-guide audit to runtime configuration: honor
+  environment-only object-storage/remote SQL settings in CLI discovery and
+  migration reports, avoid unused nonlocal-storage directories, reject invalid
+  backends eagerly with the complete alias list, and guard client metadata and
+  listing methods after close.
+- [ ] After this work merges, update Mike's agent guide against the merge SHA
+  or the `v1.2.1` tag. Until 1.2.1 is published, label it as the forthcoming
+  1.2.1 release, use the Git install command, and do not describe the expanded
+  API as available from PyPI.
+  Correct its list-only `insert_many()` signature
+  and defaults, `BulkWriteError` details, blanket session-rejection claim,
+  conditional `AsyncMongoClient` patch/import caveat, numeric-equivalence
+  versus boolean identity rules, explicit null `_id` handling, `_default`
+  collection filtering, current error/result shapes, and `bytearray`
+  normalization. Also distinguish PyMongo from a core dependency: it is an
+  optional runtime dependency for ObjectId and nonzero Binary values, patching,
+  and conditional exception inheritance. Correct the remaining constructor,
+  sync-laziness, validation, sort, locking, environment-variable,
+  capabilities-detection, portable-error-catching, index-migration wording,
+  and the contradictory async `db.name` collection example identified by the
+  guide audit.
+- [ ] Under [#77](https://github.com/schapman1974/tinymongo/issues/77), reject
+  unsupported query operators with `TinyMongoNotSupportedError` instead of
+  silently returning no matches; then implement the application-prioritized
+  `$size`, `$elemMatch`, `$type`, and `$mod` slices.
+- [ ] Under [#94](https://github.com/schapman1974/tinymongo/issues/94), replace
+  raw Python range comparisons with BSON-aware comparison contracts and reuse
+  BSON identity rules in `$pull`, `$addToSet`, and `distinct()`.
+- [ ] Extend unique-index tokens to supported BSON values through
+  [#75](https://github.com/schapman1974/tinymongo/issues/75) and
+  [#76](https://github.com/schapman1974/tinymongo/issues/76).
+- [ ] Rerun Mike's two focused reproductions, resume the real Talk Python
+  acceptance run, and publish the MongoDB, memory, and SQLite baseline through
+  [#72](https://github.com/schapman1974/tinymongo/issues/72) and
+  [#136](https://github.com/schapman1974/tinymongo/issues/136).
+
 Application-compatibility work:
 
 - [ ] [#136: Full non-blocking PyMongo async API parity](https://github.com/schapman1974/tinymongo/issues/136)
@@ -36,8 +118,8 @@ Application-compatibility work:
     record any remaining differences.
 - [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
 - [ ] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
-  - [x] Milestone 1 ObjectId and datetime storage/query support.
-  - [ ] Add UUID, Decimal128, Binary, and regular-expression round trips.
+  - [x] Milestone 1 ObjectId, datetime, and Binary storage/query support.
+  - [ ] Add UUID, Decimal128, and regular-expression round trips.
 - [ ] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
   - [x] Talk Python query slice: scalar-to-array equality, combined `$nin`,
     `$not`, `$regex`, case-insensitive `$options`, and missing fields.

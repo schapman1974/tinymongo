@@ -14,6 +14,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .errors import InvalidOperation, TinyMongoNotSupportedError
+from .storage_backends import get_storage_class
 from .tinymongo import (
     _CompatibilityConcern,
     MongoClient,
@@ -87,9 +88,19 @@ class _AsyncClientBase:
     """Shared implementation for the native and PyMongo-shaped clients."""
 
     _sync_client_class: Any = TinyMongoClient
+    _backend_position: Optional[int] = 1
 
     def __init__(self, *args: Any, **kwargs: Any):
         sync_client_class = self._sync_client_class
+        if "backend" in kwargs:
+            backend = kwargs["backend"]
+        elif self._backend_position is not None and len(args) > self._backend_position:
+            backend = args[self._backend_position]
+        else:
+            backend = "tinydb"
+        # Validate without constructing the synchronous client, which keeps
+        # database selection and all storage work lazy and off the event loop.
+        get_storage_class(backend or "tinydb")
         self._state = _AsyncClientState(lambda: sync_client_class(*args, **kwargs))
 
     def __getitem__(self, name: str) -> "AsyncTinyMongoDatabase":
@@ -182,6 +193,7 @@ class AsyncMongoClient(_AsyncClientBase):
     """PyMongo-shaped asynchronous client backed by local TinyMongo storage."""
 
     _sync_client_class = MongoClient
+    _backend_position = None
 
 
 class AsyncTinyMongoDatabase:
@@ -283,6 +295,50 @@ class AsyncTinyMongoCollection:
 
     def __repr__(self) -> str:
         return self.name
+
+    def __getattr__(self, name: str) -> "AsyncTinyMongoCollection":
+        """Return a dotted child collection selected by attribute."""
+
+        if name.startswith("_"):
+            full_name = "{}.{}".format(self.name, name)
+            raise AttributeError(
+                "{0} has no attribute {1!r}. To access the {2} collection, "
+                "use database[{2!r}].".format(
+                    type(self).__name__,
+                    name,
+                    full_name,
+                )
+            )
+        return self[name]
+
+    def __getitem__(self, name: str) -> "AsyncTinyMongoCollection":
+        """Return a dotted child collection selected by subscription."""
+
+        return AsyncTinyMongoCollection(
+            self.database,
+            "{}.{}".format(self.name, name),
+        )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Explain method typos that resolved to a child collection."""
+
+        if "." not in self.name:
+            raise TypeError(
+                "'{0}' object is not callable. If you meant to call the "
+                "'{1}' method on an 'AsyncTinyMongoDatabase' object it is "
+                "failing because no such method exists.".format(
+                    type(self).__name__,
+                    self.name,
+                )
+            )
+        raise TypeError(
+            "'{0}' object is not callable. If you meant to call the '{1}' "
+            "method on a '{0}' object it is failing because no such method "
+            "exists.".format(
+                type(self).__name__,
+                self.name.rsplit(".", 1)[-1],
+            )
+        )
 
     async def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         def operation(client: TinyMongoClient) -> Any:

@@ -1,0 +1,320 @@
+"""Focused invariants for the shared BSON type registry and JSON codec."""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
+from uuid import uuid4
+
+import pytest
+
+import tinymongo
+from tinymongo import bson_codec, bson_types
+from tinymongo.errors import BulkWriteError
+
+
+def test_core_datetime_and_binary_values_do_not_require_pymongo():
+    moment = datetime(2026, 7, 29, 12, 30)
+    document = {
+        "created": moment,
+        "raw": b"\x00\x01\xff",
+        "buffer": bytearray(b"mutable"),
+    }
+
+    restored = bson_codec.loads(bson_codec.dumps(document))
+
+    assert restored == {
+        "created": moment,
+        "raw": b"\x00\x01\xff",
+        "buffer": b"mutable",
+    }
+
+
+def test_core_memory_crud_sort_and_batch_work_without_pymongo():
+    client = tinymongo.TinyMongoClient(
+        "memory://core-bson-registry-{0}".format(uuid4().hex),
+        backend="memory",
+    )
+    collection = client.app.events
+    earlier = datetime(2026, 7, 29, 11, 30)
+    later = datetime(2026, 7, 29, 12, 30)
+
+    result = collection.insert_many(
+        (
+            {"_id": "later", "created": later, "payload": b"b"},
+            {"_id": "earlier", "created": earlier, "payload": bytearray(b"a")},
+        )
+    )
+
+    assert result.inserted_ids == ["later", "earlier"]
+    assert collection.find_one({"payload": b"a"})["_id"] == "earlier"
+    assert [document["_id"] for document in collection.find({}).sort("created", 1)] == [
+        "earlier",
+        "later",
+    ]
+    with pytest.raises(BulkWriteError) as caught:
+        collection.insert_many(
+            [{"_id": "later"}, {"_id": "new"}],
+            ordered=False,
+        )
+    assert caught.value.details["nInserted"] == 1
+    assert collection.find_one({"_id": "new"}) is not None
+    client.close()
+
+
+def test_registry_is_the_encoding_metadata_source():
+    bson = pytest.importorskip("bson")
+    uuid_binary = bson.Binary(bytes(range(16)), subtype=4)
+    values = [
+        (datetime(2026, 7, 29, 12, 30), "datetime"),
+        (bson.ObjectId("000000000000000000000001"), "objectid"),
+        (b"native", "binary"),
+        (bytearray(b"mutable"), "binary"),
+        (uuid_binary, "binary"),
+    ]
+
+    for value, expected_tag in values:
+        spec = bson_types.bson_type_spec(value)
+        encoded = bson_codec.encode_value(value)
+
+        assert spec is not None
+        assert spec.storage_tag == expected_tag
+        assert spec.requires_python_comparison is True
+        assert encoded["__tinymongo_type_v1__"] == spec.storage_tag
+        assert bson_codec.contains_extended_value(value) is True
+
+
+def test_binary_and_numeric_identity_keys_follow_bson_equality():
+    bson = pytest.importorskip("bson")
+    generic_binary = bson.Binary(b"same", subtype=0)
+    uuid_binary = bson.Binary(bytes(range(16)), subtype=4)
+
+    assert bson_types.bson_identity_key(generic_binary) == bson_types.bson_identity_key(
+        b"same"
+    )
+    assert bson_types.bson_identity_key(bytearray(b"same")) == (
+        "binary",
+        (0, b"same"),
+    )
+    assert bson_types.bson_values_equal(generic_binary, b"same") is True
+    assert bson_types.bson_values_equal(uuid_binary, bytes(uuid_binary)) is False
+    assert bson_types.bson_identity_key(1) == bson_types.bson_identity_key(1.0)
+    assert bson_types.bson_values_equal(1, 1.0) is True
+    assert bson_types.bson_values_equal(True, 1) is False
+    assert bson_types.bson_identity_key(float("nan")) == bson_types.bson_identity_key(
+        float("nan")
+    )
+
+
+def test_numeric_sort_places_nan_below_all_other_numbers():
+    values = [
+        ("one", 1.0),
+        ("nan", float("nan")),
+        ("negative", -1.0),
+        ("negative-infinity", float("-inf")),
+        ("zero", 0.0),
+        ("infinity", float("inf")),
+    ]
+
+    assert [
+        label
+        for label, _value in sorted(
+            values,
+            key=lambda item: bson_types.bson_scalar_sort_key(item[1]),
+        )
+    ] == [
+        "nan",
+        "negative-infinity",
+        "negative",
+        "zero",
+        "one",
+        "infinity",
+    ]
+
+
+def test_recursive_bson_equality_preserves_nested_scalar_types():
+    assert bson_types.bson_values_equal(
+        {"items": [1, {"active": True}]},
+        {"items": [1.0, {"active": True}]},
+    )
+    assert not bson_types.bson_values_equal(
+        {"items": [1, {"active": True}]},
+        {"items": [1.0, {"active": 1}]},
+    )
+    assert not bson_types.bson_values_equal({"value": True}, {"value": 1})
+    assert not bson_types.bson_values_equal({"value": 1}, 1)
+    assert bson_types.bson_values_equal({1}, {1})
+    assert not bson_types.bson_values_equal({1}, {2})
+    assert not bson_types.bson_values_equal(
+        {"first": 1, "second": 2},
+        {"second": 2, "first": 1},
+    )
+    assert not bson_types.bson_values_equal({"value": 1}, ["value", 1])
+
+    unsupported = object()
+    assert bson_types.bson_values_equal(unsupported, unsupported)
+    assert not bson_types.bson_values_equal(unsupported, object())
+
+
+def test_datetime_identity_normalizes_to_signed_utc_milliseconds():
+    first = datetime(
+        2026,
+        7,
+        29,
+        8,
+        30,
+        0,
+        123001,
+        tzinfo=timezone(timedelta(hours=-4)),
+    )
+    same_millisecond = datetime(
+        2026,
+        7,
+        29,
+        12,
+        30,
+        0,
+        123999,
+        tzinfo=timezone.utc,
+    )
+    next_millisecond = same_millisecond.replace(microsecond=124000)
+    before_epoch = datetime(1969, 12, 31, 23, 59, 59, 999999)
+
+    assert bson_types.bson_identity_key(first) == bson_types.bson_identity_key(
+        same_millisecond
+    )
+    assert bson_types.bson_values_equal(first, same_millisecond) is True
+    assert bson_types.bson_values_equal(first, next_millisecond) is False
+    assert bson_types.bson_identity_key(before_epoch) == ("datetime", -1)
+
+
+@pytest.mark.parametrize(
+    "tagged",
+    [
+        {"__tinymongo_type_v1__": "datetime", "value": "not-a-date"},
+        {"__tinymongo_type_v1__": "datetime", "value": 123},
+        {"__tinymongo_type_v1__": "objectid", "value": "too-short"},
+        {"__tinymongo_type_v1__": "objectid", "value": "z" * 24},
+        {"__tinymongo_type_v1__": "objectid", "value": "00 " * 8},
+        {"__tinymongo_type_v1__": "objectid", "value": 123},
+        {
+            "__tinymongo_type_v1__": "future-type",
+            "value": {
+                "__tinymongo_type_v1__": "datetime",
+                "value": "2026-07-29T12:30:00",
+            },
+        },
+    ],
+)
+def test_malformed_and_unknown_tags_are_preserved_exactly(tagged):
+    assert bson_codec.decode_value(tagged) == tagged
+
+
+def test_valid_datetime_and_object_id_tags_still_decode():
+    bson = pytest.importorskip("bson")
+    moment = datetime(
+        2026,
+        7,
+        29,
+        8,
+        30,
+        tzinfo=timezone(timedelta(hours=-4)),
+    )
+    object_id = bson.ObjectId("000000000000000000000001")
+
+    assert (
+        bson_codec.decode_value(
+            {"__tinymongo_type_v1__": "datetime", "value": moment.isoformat()}
+        )
+        == moment
+    )
+    assert (
+        bson_codec.decode_value(
+            {"__tinymongo_type_v1__": "objectid", "value": str(object_id)}
+        )
+        == object_id
+    )
+
+
+def test_fresh_process_without_pymongo_keeps_core_codec_available():
+    # Import bson first, then block pymongo. This models an environment where a
+    # top-level bson distribution exists but PyMongo's complete implementation
+    # is unavailable; the registry must not report partial BSON capability.
+    script = textwrap.dedent(
+        """
+        import builtins
+        from datetime import datetime
+
+        real_import = builtins.__import__
+
+        try:
+            import bson
+        except ImportError:
+            bson = None
+
+        def without_pymongo(name, *args, **kwargs):
+            if name == "pymongo" or name.startswith("pymongo."):
+                raise ModuleNotFoundError(
+                    "No module named 'pymongo'", name="pymongo"
+                )
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = without_pymongo
+
+        from tinymongo import bson_codec, bson_types
+
+        assert bson_types.bson_capabilities() == {
+            "objectid": False,
+            "binary": False,
+        }
+        assert bson_codec.bson_available() is False
+        assert bson_codec.object_id_available() is False
+        assert bson_codec.binary_available() is False
+        assert bson_codec.loads(bson_codec.dumps(b"core")) == b"core"
+
+        moment = datetime(2026, 7, 29, 12, 30)
+        assert bson_codec.loads(bson_codec.dumps(moment)) == moment
+
+        generic = {
+            "__tinymongo_type_v1__": "binary",
+            "value": {"base64": "Y29yZQ==", "subtype": 0},
+        }
+        assert bson_codec.decode_value(generic) == b"core"
+
+        non_generic = {
+            "__tinymongo_type_v1__": "binary",
+            "value": {
+                "base64": "AAECAwQFBgcICQoLDA0ODw==",
+                "subtype": 4,
+            },
+        }
+        try:
+            bson_codec.decode_value(non_generic)
+        except ImportError as error:
+            assert "tinymongo[bson]" in str(error)
+        else:
+            raise AssertionError("non-zero Binary subtype decoded without PyMongo")
+
+        object_id = {
+            "__tinymongo_type_v1__": "objectid",
+            "value": "000000000000000000000001",
+        }
+        try:
+            bson_codec.decode_value(object_id)
+        except ImportError as error:
+            assert "tinymongo[bson]" in str(error)
+        else:
+            raise AssertionError("ObjectId decoded without PyMongo")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr

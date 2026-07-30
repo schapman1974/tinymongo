@@ -3,11 +3,14 @@
 from __future__ import absolute_import
 
 import argparse
-import json
+import copy
 import os
 import sys
+from uuid import uuid4
 
-from .storage_backends import storage_extension
+from .bson_codec import dumps as bson_json_dumps
+from .bson_codec import loads as bson_json_loads
+from .storage_backends import is_remote_sql_backend, storage_extension
 from .tinymongo import TinyMongoClient
 
 
@@ -25,14 +28,53 @@ SUPPORTED_BACKENDS = (
 )
 
 
+def _effective_storage_uri(backend, storage_uri=None):
+    if str(backend).lower() not in ("parquet", "parquetv2"):
+        return None
+    if storage_uri is not None:
+        return storage_uri
+    return os.environ.get("TINYMONGO_STORAGE_URI")
+
+
+def _effective_dsn(backend, dsn=None):
+    backend = str(backend).lower()
+    if backend in ("postgres", "postgresql"):
+        names = (
+            "TINYMONGO_POSTGRES_DSN",
+            "TINYMONGO_POSTGRESQL_DSN",
+            "DATABASE_URL",
+        )
+    elif backend in ("mysql", "mariadb"):
+        names = (
+            "TINYMONGO_MYSQL_DSN",
+            "TINYMONGO_MARIADB_DSN",
+            "MYSQL_URL",
+            "MARIADB_URL",
+        )
+    else:
+        return None
+    if dsn is not None:
+        return dsn
+    return next((os.environ[name] for name in names if os.environ.get(name)), None)
+
+
 def _client(path, backend, storage_uri=None, dsn=None):
-    return TinyMongoClient(path, backend=backend, storage_uri=storage_uri, dsn=dsn)
+    return TinyMongoClient(
+        path,
+        backend=backend,
+        storage_uri=_effective_storage_uri(backend, storage_uri),
+        dsn=_effective_dsn(backend, dsn),
+    )
 
 
 def _db_names(path, backend, storage_uri=None, dsn=None):
-    if storage_uri or dsn:
+    effective_storage_uri = _effective_storage_uri(backend, storage_uri)
+    if is_remote_sql_backend(backend) or effective_storage_uri:
         return _client(
-            path, backend, storage_uri=storage_uri, dsn=dsn
+            path,
+            backend,
+            storage_uri=effective_storage_uri,
+            dsn=_effective_dsn(backend, dsn),
         ).list_database_names()
     ext = storage_extension(backend)
     if not os.path.isdir(path):
@@ -47,34 +89,92 @@ def _db_names(path, backend, storage_uri=None, dsn=None):
 
 def _load_json(path):
     if path == "-":
-        return json.load(sys.stdin)
+        return bson_json_loads(sys.stdin.read())
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        return bson_json_loads(handle.read())
 
 
-def _dump_json(data, path):
+def _dump_json(data, path, sort_keys=True):
+    payload = bson_json_dumps(data, indent=2, sort_keys=sort_keys)
     if path == "-":
-        json.dump(data, sys.stdout, indent=2, sort_keys=True)
-        sys.stdout.write("\n")
+        sys.stdout.write(payload + "\n")
         return
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+        handle.write(payload + "\n")
+
+
+def _collection_names(database):
+    """Return user collections without TinyDB's internal default table."""
+
+    modern_listing = getattr(database, "list_collection_names", None)
+    if callable(modern_listing):
+        names = modern_listing()
+    else:
+        names = database.collection_names()
+    return [name for name in names if name != "_default"]
+
+
+def _copy_indexes(source, target):
+    """Recreate a collection's effective indexes on a staging collection."""
+
+    for metadata in source.list_indexes():
+        if metadata["name"] == "_id_":
+            continue
+        options = {"name": metadata["name"]}
+        if metadata.get("unique"):
+            options["unique"] = True
+        target.create_index(copy.deepcopy(metadata["key"]), **options)
+
+
+def _replace_collection(database, collection_name, docs):
+    """Preflight a complete replacement before changing the destination."""
+
+    # Keep validation isolated from the target client (and from CLI client
+    # factories that callers may patch for remote connection setup).
+    from .tinymongo import TinyMongoClient as PreflightClient
+
+    collection = database[collection_name]
+    with PreflightClient(backend="memory") as preflight_client:
+        stage = preflight_client.preflight[
+            "__tinymongo_stage_{0}".format(uuid4().hex[:12])
+        ]
+        _copy_indexes(collection, stage)
+        if docs:
+            stage.insert_many(copy.deepcopy(docs))
+
+    previous = list(collection.find({}))
+    try:
+        collection.delete_many({})
+        if docs:
+            collection.insert_many(docs)
+    except Exception as replacement_error:
+        # Staging eliminates deterministic codec, ID, and index failures. This
+        # rollback is the final guard for an environmental or concurrent error
+        # between preflight and the destination write.
+        try:
+            collection.delete_many({})
+            if previous:
+                collection.insert_many(previous)
+        except Exception as rollback_error:
+            raise RuntimeError(
+                "Collection replacement failed and the previous data could not "
+                "be restored: {0}".format(replacement_error)
+            ) from rollback_error
+        raise
 
 
 def cmd_inspect(args):
-    client = _client(
-        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
-    )
+    storage_uri = _effective_storage_uri(args.backend, args.storage_uri)
+    client = _client(args.path, args.backend, storage_uri=storage_uri, dsn=args.dsn)
     payload = {"path": args.path, "backend": args.backend, "databases": []}
-    if args.storage_uri:
-        payload["storage_uri"] = args.storage_uri
+    if storage_uri:
+        payload["storage_uri"] = storage_uri
     for db_name in _db_names(
-        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+        args.path, args.backend, storage_uri=storage_uri, dsn=args.dsn
     ):
         db = client[db_name]
         collections = []
-        for collection_name in sorted(db.collection_names()):
+        for collection_name in sorted(_collection_names(db)):
             count = db[collection_name].count()
             collections.append({"name": collection_name, "count": count})
         payload["databases"].append({"name": db_name, "collections": collections})
@@ -94,7 +194,7 @@ def cmd_list_collections(args):
     client = _client(
         args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
     )
-    for name in sorted(client[args.database].collection_names()):
+    for name in sorted(_collection_names(client[args.database])):
         print(name)
     return 0
 
@@ -104,7 +204,9 @@ def cmd_export(args):
         args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
     )
     docs = list(client[args.database][args.collection].find({}))
-    _dump_json(docs, args.output)
+    # Embedded-document field order is part of BSON equality and can also be
+    # part of a document-valued _id. Never recursively sort exported data.
+    _dump_json(docs, args.output, sort_keys=False)
     return 0
 
 
@@ -119,21 +221,32 @@ def cmd_import(args):
     client = _client(
         args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
     )
-    collection = client[args.database][args.collection]
+    database = client[args.database]
+    collection = database[args.collection]
     if args.mode == "replace":
-        collection.delete_many({})
-    if docs:
+        _replace_collection(database, args.collection, docs)
+    elif docs:
         collection.insert_many(docs)
     print("imported {0} documents".format(len(docs)))
     return 0
 
 
 def cmd_migrate(args):
+    source_uri = _effective_storage_uri(args.from_backend, args.source_uri)
+    target_uri = _effective_storage_uri(args.to_backend, args.target_uri)
+    source_dsn = _effective_dsn(args.from_backend, args.source_dsn)
+    target_dsn = _effective_dsn(args.to_backend, args.target_dsn)
     source_client = _client(
-        args.source, args.from_backend, storage_uri=args.source_uri, dsn=args.source_dsn
+        args.source,
+        args.from_backend,
+        storage_uri=source_uri,
+        dsn=source_dsn,
     )
     target_client = _client(
-        args.target, args.to_backend, storage_uri=args.target_uri, dsn=args.target_dsn
+        args.target,
+        args.to_backend,
+        storage_uri=target_uri,
+        dsn=target_dsn,
     )
 
     database_names = (
@@ -142,20 +255,17 @@ def cmd_migrate(args):
         else _db_names(
             args.source,
             args.from_backend,
-            storage_uri=args.source_uri,
-            dsn=args.source_dsn,
+            storage_uri=source_uri,
+            dsn=source_dsn,
         )
     )
     migrated = []
     for db_name in database_names:
         source_db = source_client[db_name]
         target_db = target_client[db_name]
-        for collection_name in sorted(source_db.collection_names()):
+        for collection_name in sorted(_collection_names(source_db)):
             docs = list(source_db[collection_name].find({}))
-            target_collection = target_db[collection_name]
-            target_collection.delete_many({})
-            if docs:
-                target_collection.insert_many(docs)
+            _replace_collection(target_db, collection_name, docs)
             migrated.append(
                 {"database": db_name, "collection": collection_name, "count": len(docs)}
             )
@@ -166,10 +276,10 @@ def cmd_migrate(args):
             "target": args.target,
             "from_backend": args.from_backend,
             "to_backend": args.to_backend,
-            "source_uri": args.source_uri,
-            "target_uri": args.target_uri,
-            "source_dsn_configured": bool(args.source_dsn),
-            "target_dsn_configured": bool(args.target_dsn),
+            "source_uri": source_uri,
+            "target_uri": target_uri,
+            "source_dsn_configured": bool(source_dsn),
+            "target_dsn_configured": bool(target_dsn),
             "migrated": migrated,
         },
         args.output,

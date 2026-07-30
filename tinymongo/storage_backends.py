@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .bson_codec import clone as clone_document
 from .bson_codec import dumps as json_dumps
 from .bson_codec import loads as json_loads
+from .bson_types import bson_values_equal
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
 
@@ -21,6 +22,20 @@ duckdb: Any = _duckdb
 
 
 OBJECT_STORAGE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
+SUPPORTED_BACKEND_NAMES = (
+    "memory",
+    "tinydb",
+    "json",
+    "parquet",
+    "parquetv2",
+    "sqlite",
+    "duckdb",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mariadb",
+)
+_MISSING_ID = object()
 
 
 _memory_registry: dict[str, dict[str, Any]] = {}
@@ -158,12 +173,20 @@ class AtomicJSONStorage(Storage):
                 next_eid = 1
 
             for value in incoming_table.values():
-                doc_id = value.get("_id") if isinstance(value, dict) else None
+                doc_id = (
+                    value["_id"]
+                    if isinstance(value, dict) and "_id" in value
+                    else _MISSING_ID
+                )
                 existing_eid = next(
-                    (eid for existing_id, eid in ids_and_eids if existing_id == doc_id),
+                    (
+                        eid
+                        for existing_id, eid in ids_and_eids
+                        if bson_values_equal(existing_id, doc_id)
+                    ),
                     None,
                 )
-                if doc_id is not None and existing_eid is not None:
+                if doc_id is not _MISSING_ID and existing_eid is not None:
                     existing_table[existing_eid] = value
                 else:
                     existing_table[str(next_eid)] = value
@@ -375,8 +398,9 @@ def get_storage_class(name):
         return DuckDBStorage
 
     raise ValueError(
-        "Unsupported backend '{0}'. Supported backends: memory, tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
-            name
+        "Unsupported backend '{0}'. Supported backends: {1}.".format(
+            name,
+            ", ".join(SUPPORTED_BACKEND_NAMES),
         )
     )
 
@@ -396,8 +420,9 @@ def storage_extension(name):
     if backend in ("postgres", "postgresql", "mysql", "mariadb"):
         return ""
     raise ValueError(
-        "Unsupported backend '{0}'. Supported backends: memory, tinydb, parquet, parquetv2, sqlite, duckdb, postgres, mariadb.".format(
-            name
+        "Unsupported backend '{0}'. Supported backends: {1}.".format(
+            name,
+            ", ".join(SUPPORTED_BACKEND_NAMES),
         )
     )
 

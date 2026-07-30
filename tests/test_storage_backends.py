@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 import tinymongo as tm
 from tinymongo.storage_backends import DuckDBStorage, SQLiteStorage
@@ -44,7 +46,7 @@ def test_sqlite_backend_uses_collection_tables(tmp_path):
 
     assert {"users", "events"}.issubset(tables)
     assert "tinydb" not in tables
-    assert rows[0][0] == "1"
+    assert rows[0][0].startswith("__tinymongo_id_v2__:")
     assert '"name":"Ada"' in rows[0][1]
 
 
@@ -87,7 +89,7 @@ def test_duckdb_backend_uses_collection_tables(tmp_path):
 
     assert {"users", "events"}.issubset(tables)
     assert "tinydb" not in tables
-    assert rows[0][0] == "1"
+    assert rows[0][0].startswith("__tinymongo_id_v2__:")
     assert '"name":"Ada"' in rows[0][1]
 
 
@@ -116,6 +118,48 @@ def test_duckdb_backend_migrates_legacy_blob_file(tmp_path):
     assert client.legacy.users.count_documents({}) == 2
     assert client.legacy.users.find_one({"name": "Grace"})["_id"] == 2
     assert "tinydb" not in client.legacy.collection_names()
+
+
+@pytest.mark.parametrize(
+    ("backend", "storage_class", "extension"),
+    [
+        ("sqlite", SQLiteStorage, "sqlite"),
+        ("duckdb", DuckDBStorage, "duckdb"),
+    ],
+)
+def test_legacy_blob_migration_restores_tagged_bson_values(
+    tmp_path,
+    backend,
+    storage_class,
+    extension,
+):
+    if backend == "duckdb":
+        pytest.importorskip("duckdb")
+    bson = pytest.importorskip("bson")
+
+    database_id = bson.ObjectId("000000000000000000000001")
+    created = datetime(2026, 7, 29, 12, 30)
+    binary = bson.Binary(bytes(range(16)), subtype=4)
+    document = {
+        "_id": database_id,
+        "created": created,
+        "binary": binary,
+    }
+    db_file = tmp_path / "db" / "legacy.{0}".format(extension)
+    storage_class(str(db_file)).write({"events": {"1": document}})
+
+    client = tm.TinyMongoClient(str(tmp_path / "db"), backend=backend)
+    try:
+        restored = client.legacy.events.find_one({"_id": database_id})
+
+        assert restored == {
+            "_id": database_id,
+            "created": created,
+            "binary": binary,
+        }
+        assert "tinydb" not in client.legacy.collection_names()
+    finally:
+        client.close()
 
 
 def test_duckdb_backend_multiple_writes(tmp_path):

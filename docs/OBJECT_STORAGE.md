@@ -1,6 +1,6 @@
 # Parquet Object Storage
 
-This feature is experimental in `1.1.2`.
+This feature remains experimental in `1.2.1`.
 
 TinyMongo's `parquet` and `parquetv2` backends can place collection Parquet
 files under an object-storage URI. DuckDB performs the remote file reads and
@@ -24,12 +24,16 @@ multi-writer update/delete semantics.
 from tinymongo import TinyMongoClient
 
 client = TinyMongoClient(
-    "/tmp/tinymongo-cache",
+    "/unused-local-path",
     backend="parquet",
     storage_uri="s3://my-bucket/tinymongo",
 )
 client.app.users.insert_one({"_id": "ada", "name": "Ada"})
 ```
+
+With `storage_uri` configured, the API folder argument is optional and ignored;
+the CLI path argument remains a required placeholder. It is not a cache or
+fallback location, and TinyMongo does not create it.
 
 The same value can be provided with an environment variable:
 
@@ -48,21 +52,23 @@ s3://my-bucket/tinymongo/app.parquet/events.parquet
 ## CLI Usage
 
 ```bash
-tinymongo inspect ./local-cache \
+tinymongo inspect ./unused \
   --backend parquet \
   --storage-uri s3://my-bucket/tinymongo
 
-tinymongo export ./local-cache app users \
+tinymongo export ./unused app users \
   --backend parquet \
   --storage-uri s3://my-bucket/tinymongo \
   -o users.json
 
-tinymongo migrate ./tinydb ./local-cache \
+tinymongo migrate ./tinydb ./unused \
   --to-backend parquet \
   --target-uri s3://my-bucket/tinymongo
 ```
 
-For remote-to-remote migrations, use `--source-uri` and `--target-uri`.
+For remote-to-remote migrations, use `--source-uri` and `--target-uri`. CLI
+commands also honor `TINYMONGO_STORAGE_URI`; an explicit URI flag takes
+precedence.
 
 ## Supported URI Families
 
