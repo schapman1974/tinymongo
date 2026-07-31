@@ -79,6 +79,12 @@ class _AsyncCollectionAdapter:
     def find(self, *args, **kwargs):
         return _AsyncCursorAdapter(self._collection.find(*args, **kwargs), self._runner)
 
+    def aggregate(self, *args, **kwargs):
+        cursor = self._collection.aggregate(*args, **kwargs)
+        if inspect.isawaitable(cursor):
+            cursor = self._runner.run(cursor)
+        return _AsyncCursorAdapter(cursor, self._runner)
+
     def __getattr__(self, name):
         attribute = getattr(self._collection, name)
         if not callable(attribute):

@@ -455,8 +455,19 @@ class AsyncTinyMongoCollection:
     async def drop(self, *args: Any, **kwargs: Any) -> Any:
         return await self._call("drop", *args, **kwargs)
 
-    async def aggregate(self, *args: Any, **kwargs: Any) -> Any:
-        return await self._call("aggregate", *args, **kwargs)
+    async def aggregate(self, *args: Any, **kwargs: Any) -> "AsyncTinyMongoCursor":
+        """Run aggregation off-thread and return an async command cursor."""
+
+        collection_handle = self
+
+        def operation(client: TinyMongoClient) -> "AsyncTinyMongoCursor":
+            collection = client[collection_handle.database.name][collection_handle.name]
+            documents = collection.aggregate(*args, **kwargs).to_list()
+            # Cursor construction deep-copies its seed, so keep that work in
+            # the worker with storage and pipeline execution.
+            return AsyncTinyMongoCursor(documents=documents)
+
+        return await self.database.client._state.call(operation)
 
     async def bulk_write(self, *args: Any, **kwargs: Any) -> Any:
         return await self._call("bulk_write", *args, **kwargs)
@@ -631,12 +642,31 @@ class AsyncTinyMongoCursor:
     def alive(self) -> bool:
         if self._closed:
             return False
+        if self._documents is None and self._seed_documents is not None:
+            start = min(self._skip, len(self._seed_documents))
+            end = (
+                len(self._seed_documents)
+                if self._limit == 0
+                else min(start + self._limit, len(self._seed_documents))
+            )
+            return self._position < end - start
         if self._documents is None:
             return True
         return self._position < len(self._documents)
 
     def __aiter__(self) -> "AsyncTinyMongoCursor":
         return self
+
+    async def __aenter__(self) -> "AsyncTinyMongoCursor":
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[type],
+        exc_value: Optional[BaseException],
+        traceback: Any,
+    ) -> None:
+        await self.close()
 
     async def __anext__(self) -> Dict[str, Any]:
         documents = await self._ensure_loaded()

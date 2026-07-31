@@ -130,10 +130,14 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
 
     assert capabilities["backend"] == backend
     assert capabilities["persistent"] is True
-    assert capabilities["aggregation"] is False
+    assert capabilities["aggregation"] == {
+        "stages": ("$match", "$group"),
+        "accumulators": ("$max", "$min", "$sum"),
+        "expressions": (),
+    }
     assert capabilities["sessions"] is False
     assert client.supports("multiprocess_writes") is True
-    assert client.supports("aggregation") is False
+    assert client.supports("aggregation") is True
 
 
 def test_object_storage_capabilities_are_conservative(tmp_path):
@@ -159,13 +163,15 @@ def test_unsupported_features_fail_loudly(tmp_path):
         client.watch,
         database.command,
         database.watch,
-        collection.aggregate,
         collection.bulk_write,
         collection.watch,
     ]
     for call in unsupported_calls:
         with pytest.raises(TinyMongoNotSupportedError):
             call([])
+
+    with pytest.raises(TinyMongoNotSupportedError, match=r"\$lookup"):
+        collection.aggregate([{"$lookup": {}}])
 
     with pytest.raises(TinyMongoNotSupportedError, match="single-field"):
         collection.create_index([("email", 1), ("name", 1)])

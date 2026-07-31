@@ -220,8 +220,9 @@ def test_database_helpers_and_unsupported_calls():
 
             with pytest.raises(TinyMongoNotSupportedError):
                 await database.command("ping")
-            with pytest.raises(TinyMongoNotSupportedError):
-                await collection.aggregate([])
+            cursor = await collection.aggregate([])
+            assert isinstance(cursor, AsyncTinyMongoCursor)
+            assert await cursor.to_list() == []
 
     run(scenario())
 
