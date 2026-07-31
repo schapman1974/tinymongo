@@ -20,9 +20,11 @@ from .bson_codec import bson_available
 from .bson_types import (
     bson_identity_key,
     bson_scalar_sort_key,
+    bson_value_sort_key,
     bson_values_equal,
     object_id_type,
 )
+from .aggregation import AggregationEngine, aggregation_capabilities
 from .storage_backends import (
     clear_memory_database,
     clear_memory_namespace,
@@ -914,7 +916,7 @@ class TinyMongoClient(object):
             in ("sqlite", "postgres", "postgresql", "mysql", "mariadb"),
             "projections": True,
             "bulk_writes": False,
-            "aggregation": False,
+            "aggregation": aggregation_capabilities(),
             "sessions": False,
             "transactions": False,
             "change_streams": False,
@@ -1258,10 +1260,25 @@ class TinyMongoCollection(object):
                 )
         return self
 
-    def aggregate(self, *args, **kwargs):
-        raise TinyMongoNotSupportedError(
-            "Aggregation pipelines are not supported by TinyMongo"
-        )
+    def aggregate(self, pipeline, session=None, **kwargs):
+        """Run TinyMongo's supported aggregation subset over this collection."""
+
+        _reject_session({"session": session})
+        options = list(kwargs)
+        if options:
+            raise TinyMongoNotSupportedError(
+                "Aggregation option {0} is not supported by TinyMongo".format(
+                    options[0]
+                )
+            )
+        engine = AggregationEngine()
+        prepared = engine.prepare(pipeline)
+        if prepared and prepared[0][0] == "$match":
+            documents = self.find(prepared[0][2])
+            prepared = prepared[1:]
+        else:
+            documents = self.find({})
+        return TinyMongoCursor(engine.run_prepared(documents, prepared))
 
     def bulk_write(self, *args, **kwargs):
         raise TinyMongoNotSupportedError("Bulk writes are not supported by TinyMongo")
@@ -2791,53 +2808,22 @@ class TinyMongoCursor(object):
         into a sortable tuple.
         """
 
-        def _dict_parser(dict_doc):
-            """dict ordered by:
-            valueType_N -> key_N -> value_N
-            """
-            result = list()
-            for key in dict_doc:
-                data = self._order(dict_doc[key], sort_field=sort_field)
-                res = (data[0], key, data[1])
-                result.append(res)
-            return tuple(result)
+        if isinstance(value, list) and is_reverse is not None:
+            members = (
+                [self._order(member, sort_field=sort_field) for member in value]
+                if value
+                else [(-1, ())]
+            )
+            # MongoDB compares an array sort field by its smallest element for
+            # ascending order and its largest element for descending order.
+            return max(members) if is_reverse else min(members)
 
-        def _list_parser(list_doc):
-            """list will iter members to compare"""
-            result = list()
-            for member in list_doc:
-                result.append(self._order(member, sort_field=sort_field))
-            return result
-
-        if isinstance(value, dict):
-            value = (3, _dict_parser(value))
-
-        elif isinstance(value, list):  # pragma: no branch - type chain is exhaustive
-            if len(value) == 0:
-                # [] less then None
-                value = [(-1, [])]
-            else:
-                value = _list_parser(value)
-
-            if is_reverse is not None:
-                # list will firstly compare with other doc by it's smallest
-                # or largest member
-                value = max(value) if is_reverse else min(value)
-            else:
-                # if the smallest or largest member is a list
-                # then compaer with it's sub-member in list index order
-                value = (4, tuple(value))
-
-        else:
-            scalar_key = bson_scalar_sort_key(value)
-            if scalar_key is None:
-                if sort_field is not None:
-                    self._warn_unsupported_sort_value(sort_field, value)
-                value = (0, None)
-            else:
-                value = scalar_key
-
-        return value
+        value_key = bson_value_sort_key(value)
+        if value_key is None:
+            if sort_field is not None:
+                self._warn_unsupported_sort_value(sort_field, value)
+            return 0, None
+        return value_key
 
     def sort(self, key_or_list, direction=None):
         """
@@ -3091,6 +3077,12 @@ class TinyMongoCursor(object):
         if self._closed:
             return iter(())
         return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def __next__(self):
         """

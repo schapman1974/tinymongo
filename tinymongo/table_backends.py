@@ -39,6 +39,24 @@ from .parquet_storage import _acquire_rlock, _local_rlocks, portalocker
 _MISSING = object()
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
 _PHYSICAL_ID_PREFIX = "__tinymongo_id_v2__:"
+_LOGICAL_FILTER_OPERATORS = frozenset(("$and", "$or", "$nor"))
+_FIELD_FILTER_OPERATORS = frozenset(
+    (
+        "$all",
+        "$eq",
+        "$exists",
+        "$gt",
+        "$gte",
+        "$in",
+        "$lt",
+        "$lte",
+        "$ne",
+        "$nin",
+        "$not",
+        "$options",
+        "$regex",
+    )
+)
 
 
 def _canonical_id_value(value):
@@ -564,6 +582,60 @@ def matches_filter(doc, filter_doc):
             if not _field_matches(actual, expected, exact=key == "_id"):
                 return False
     return True
+
+
+def _validate_field_filter_operators(expression):
+    """Validate one field's operator document, including nested ``$not``."""
+
+    for operator, operand in expression.items():
+        if operator not in _FIELD_FILTER_OPERATORS:
+            if isinstance(operator, str) and operator.startswith("$"):
+                raise TinyMongoNotSupportedError(
+                    "Query operator {0} is not supported by TinyMongo".format(operator)
+                )
+            raise OperationFailure(
+                "Field query documents cannot mix operators and literal fields"
+            )
+        if operator in ("$all", "$in", "$nin") and not isinstance(
+            operand, (list, tuple)
+        ):
+            raise OperationFailure("{0} requires an array".format(operator))
+        if operator == "$options" and "$regex" not in expression:
+            raise OperationFailure("$options requires $regex in the same query")
+        if (
+            operator == "$not"
+            and isinstance(operand, Mapping)
+            and any(str(key).startswith("$") for key in operand)
+        ):
+            _validate_field_filter_operators(operand)
+
+
+def validate_filter_operators(filter_doc):
+    """Reject operators the shared Python matcher cannot evaluate safely."""
+
+    if not isinstance(filter_doc, Mapping):
+        raise OperationFailure("Filter must be a query document")
+
+    for key, expected in filter_doc.items():
+        if not isinstance(key, str):
+            raise OperationFailure("Filter field names must be strings")
+        if key in _LOGICAL_FILTER_OPERATORS:
+            if not isinstance(expected, (list, tuple)) or not expected:
+                raise OperationFailure(
+                    "{0} requires a non-empty array of query documents".format(key)
+                )
+            for specification in expected:
+                validate_filter_operators(specification)
+            continue
+        if key.startswith("$"):
+            raise TinyMongoNotSupportedError(
+                "Query operator {0} is not supported by TinyMongo".format(key)
+            )
+
+        if isinstance(expected, Mapping) and any(
+            str(operator).startswith("$") for operator in expected
+        ):
+            _validate_field_filter_operators(expected)
 
 
 def _filter_references_id(filter_doc):

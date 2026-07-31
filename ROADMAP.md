@@ -173,9 +173,18 @@ Exit criteria:
 [View milestone](https://github.com/schapman1974/tinymongo/milestone/2)
 
 - [ ] [#82: Shared aggregation pipeline engine](https://github.com/schapman1974/tinymongo/issues/82)
+  - [x] Land the first shared sync/async engine slice with pipeline validation,
+    compatible cursors, structured capability reporting, and clear unsupported
+    feature errors.
 - [ ] [#96: Basic aggregation stages](https://github.com/schapman1974/tinymongo/issues/96)
+  - [x] Implement `$match` through the existing query matcher.
+  - [ ] Add the remaining basic stages.
 - [ ] [#97: Aggregation projection stages](https://github.com/schapman1974/tinymongo/issues/97)
+  - [ ] Add the application-required `$project`, `$size`, and `$ifNull` slice.
 - [ ] [#91: Grouping and accumulators](https://github.com/schapman1974/tinymongo/issues/91)
+  - [x] Support field-path and `None` group keys with `$min`, `$max`, and
+    `$sum`.
+  - [ ] Complete the remaining accumulator scope.
 
 Exit criteria:
 
@@ -344,6 +353,10 @@ Exit criteria:
    - [x] Complete the real application run with Mike and record every difference.
    - [ ] Rerun the three follow-up cases and publish the dimensioned baseline.
 5. [ ] Build aggregation core after the real-application acceptance path works.
+   - [x] Deliver the shared `$match` plus `$group`/`$min`/`$max`/`$sum` slice
+     across synchronous and asynchronous APIs.
+   - [ ] Add the measured `$project`/`$size`/`$ifNull` slice and complete the
+     second-application acceptance rerun.
 6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
    compatibility gaps.
 7. [ ] Implement GridFS on stable BSON, index, and cursor foundations.

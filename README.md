@@ -64,9 +64,9 @@ rows = list(users.find({}).sort("score", pymongo.DESCENDING))
 ```
 
 This is intended for the supported TinyMongo subset of PyMongo operations, not
-for server features such as authentication, replica sets, aggregation pipelines,
-sessions, or network connections. MongoDB URIs, host names, ports, and common
-connection kwargs are accepted and ignored so existing code can be tried locally.
+for server features such as authentication, replica sets, sessions, or network
+connections. MongoDB URIs, host names, ports, and common connection kwargs are
+accepted and ignored so existing code can be tried locally.
 Set `TINYMONGO_HOME` or pass `tinymongo_folder=` to choose where TinyMongo stores
 files. See `examples/pymongo_dropin.py` for a runnable example.
 
@@ -476,9 +476,45 @@ binary data with different subtypes remain separate.
 
 Cursor sorting follows MongoDB's comparison order for the currently supported
 scalar families, including BinData, `ObjectId`, booleans, and datetimes.
-Broader BSON comparison across ranges, indexes, and future aggregation remains
-tracked in
+The same recursive BSON order is used by aggregation `$min` and `$max`.
+Broader BSON comparison across query ranges and indexes remains tracked in
 [#94](https://github.com/schapman1974/tinymongo/issues/94).
+
+## Aggregation core subset
+
+`Collection.aggregate()` supports the production-driven core of `$match` and
+`$group`. `$match` uses the same query operators as `find()`. `$group` accepts a
+field-path or `None` `_id` and the `$min`, `$max`, and `$sum` accumulators:
+
+```python
+activity = events.aggregate(
+    [
+        {"$match": {"user_id": user_id}},
+        {
+            "$group": {
+                "_id": "$course_id",
+                "last_activity": {"$max": "$created_date"},
+                "plays": {"$sum": 1},
+            }
+        },
+    ]
+)
+rows = activity.to_list()
+```
+
+In the async API, await `aggregate()` to obtain an async cursor, then use
+`async for` or `await cursor.to_list()`. Dotted field paths are supported.
+`$min` and `$max` ignore null and missing inputs unless every input is null or
+missing, in which case they return null. `$sum` ignores missing and nonnumeric
+values, and an empty input produces no groups, including for `_id: None`.
+TinyMongo keeps first-seen group order for repeatable local results, but—as
+with MongoDB—`$group` output order is not a public guarantee.
+
+Other stages, accumulators, expressions, and aggregation options raise
+`TinyMongoNotSupportedError` with the unsupported feature named. The structured
+`client.capabilities()["aggregation"]` value lists the exact supported stages,
+accumulators, and expressions; `client.supports("aggregation")` reports whether
+any aggregation subset is available.
 
 ## ObjectId, datetime, and binary values
 
@@ -627,9 +663,10 @@ visible.
 
 Operations whose semantics TinyMongo cannot honor raise
 `TinyMongoNotSupportedError`. This includes sessions, transactions, change
-streams, aggregation pipelines, bulk writes, database commands, non-default
-read/write concerns, and unsupported index specifications. Connection options
-that only describe an ignored network target remain harmless for drop-in use.
+streams, aggregation features outside the documented core subset, bulk writes,
+database commands, non-default read/write concerns, and unsupported index
+specifications. Connection options that only describe an ignored network target
+remain harmless for drop-in use.
 `bypass_document_validation` is accepted as a compatibility no-op and never
 disables `_id` or unique-index enforcement. Where a compatibility method
 accepts a `session` keyword, `session=None` is allowed; non-`None` sessions and
@@ -659,8 +696,9 @@ class Person(me.Document):
 ```
 
 The tested subset covers document creation, repeated saves, queries, updates,
-deletes, counts, and collection drops. Advanced aggregation, sessions, and
-MongoDB server features remain outside TinyMongo's compatibility scope.
+deletes, counts, and collection drops. Aggregation beyond the documented core
+subset, sessions, and MongoDB server features remain outside TinyMongo's
+compatibility scope.
 
 
 # Examples

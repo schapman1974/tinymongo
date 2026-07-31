@@ -205,6 +205,39 @@ def bson_scalar_sort_key(value):
     return spec.sort_rank, spec.sort_key(value)
 
 
+def bson_value_sort_key(value):
+    """Return MongoDB-style ordering metadata for scalars and containers.
+
+    Cursor sorting and aggregation accumulators both need the same recursive
+    BSON comparison order.  ``None`` means the value is outside TinyMongo's
+    supported BSON families and cannot be compared safely.
+    """
+
+    if isinstance(value, Mapping):
+        parsed = []
+        for key, item in value.items():
+            item_key = bson_value_sort_key(item)
+            if item_key is None:
+                return None
+            parsed.append((item_key[0], key, item_key[1]))
+        return 3, tuple(parsed)
+
+    if isinstance(value, (list, tuple)):
+        if not value:
+            # Preserve TinyMongo's established ordering where an empty array
+            # sorts before null while arrays remain in the array type family.
+            return 4, ((-1, ()),)
+        parsed = []
+        for item in value:
+            item_key = bson_value_sort_key(item)
+            if item_key is None:
+                return None
+            parsed.append(item_key)
+        return 4, tuple(parsed)
+
+    return bson_scalar_sort_key(value)
+
+
 def bson_identity_key(value):
     """Return a hashable, BSON-type-aware scalar equality key.
 
@@ -218,6 +251,39 @@ def bson_identity_key(value):
     if spec is None:
         return None
     return spec.name, spec.identity_key(value)
+
+
+def bson_value_identity_key(value):
+    """Return a recursive, hashable key using MongoDB value equality rules.
+
+    Mapping field order remains significant, arrays retain member order, and
+    registered scalar families use :func:`bson_identity_key`. ``None`` means
+    the value cannot be represented safely by the current BSON registry.
+    """
+
+    scalar_key = bson_identity_key(value)
+    if scalar_key is not None:
+        return scalar_key
+
+    if isinstance(value, Mapping):
+        items = []
+        for key, item in value.items():
+            item_key = bson_value_identity_key(item)
+            if item_key is None:
+                return None
+            items.append((key, item_key))
+        return "object", tuple(items)
+
+    if isinstance(value, (list, tuple)):
+        items = []
+        for item in value:
+            item_key = bson_value_identity_key(item)
+            if item_key is None:
+                return None
+            items.append(item_key)
+        return "array", tuple(items)
+
+    return None
 
 
 def bson_values_equal(left, right):

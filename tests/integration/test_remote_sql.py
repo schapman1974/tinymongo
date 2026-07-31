@@ -102,6 +102,41 @@ def test_remote_sql_backend_round_trip(backend, env_name):
 
 
 @pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_aggregation_core(backend, env_name):
+    dsn, database, prefix = _remote_target(backend, env_name)
+    collection = prefix + "_aggregation"
+    client = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = client[database][collection]
+    try:
+        docs.insert_many(
+            [
+                {"_id": 1, "team": "alpha", "score": 2},
+                {"_id": 2, "team": "alpha", "score": 5},
+                {"_id": 3, "team": "beta", "score": 9},
+            ]
+        )
+
+        rows = docs.aggregate(
+            [
+                {"$match": {"score": {"$lte": 5}}},
+                {
+                    "$group": {
+                        "_id": "$team",
+                        "minimum": {"$min": "$score"},
+                        "maximum": {"$max": "$score"},
+                        "total": {"$sum": "$score"},
+                    }
+                },
+            ]
+        ).to_list()
+
+        assert rows == [{"_id": "alpha", "minimum": 2, "maximum": 5, "total": 7}]
+    finally:
+        docs.drop()
+        client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
 def test_remote_sql_insert_many_partial_failures(backend, env_name):
     dsn, database, prefix = _remote_target(backend, env_name)
     collection = prefix + "_insert_many"
