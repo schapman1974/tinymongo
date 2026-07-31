@@ -14,7 +14,12 @@ from tinymongo import cli
 from tinymongo import tinymongo as core
 from tinymongo import parquet_storage as ps
 from tinymongo import storage_backends as sb
-from tinymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
+from tinymongo.errors import (
+    BulkWriteError,
+    DuplicateKeyError,
+    OperationFailure,
+    TinyMongoNotSupportedError,
+)
 from tinymongo.results import (
     DeleteResult,
     InsertManyResult,
@@ -728,7 +733,7 @@ def test_update_operator_error_edges(tmp_path):
     c = client.db.collection
     c.insert_one({"_id": 1, "count": "one"})
 
-    with pytest.raises(ValueError, match="Unsupported update operator"):
+    with pytest.raises(TinyMongoNotSupportedError, match="Unsupported update operator"):
         c.update_one({"_id": 1}, {"$unknown": {"x": 1}})
     with pytest.raises(ValueError, match="update only works with \\$ operators"):
         c.update_one({"_id": 1}, {})
