@@ -1,0 +1,14 @@
+# Development tools and compiled packages verified on CPython 3.14t.
+# DuckDB and psycopg-binary are intentionally absent because neither publishes
+# a compatible free-threaded distribution. Runtime dependencies come from
+# tinymongo[free-threaded].
+pytest>=8.4
+coverage>=7.10
+pyarrow>=22
+pymongo>=4.15.2
+mongoengine>=0.29.1,<1
+black>=25,<26
+ruff>=0.15,<0.16
+mypy>=1.20,<2
+build>=1.3
+twine>=7
