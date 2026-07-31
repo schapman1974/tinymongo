@@ -24,6 +24,8 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Free Threading :: 2 - Beta",
   "Topic :: Database",
 ]
 
@@ -71,6 +73,14 @@ postgres = ["psycopg[binary]>=3.1"]
 mysql = ["PyMySQL>=1.1"]
 mariadb = ["PyMySQL>=1.1"]
 remote-sql = ["psycopg[binary]>=3.1", "PyMySQL>=1.1"]
+# PEP 508 has no free-threaded ABI marker. This profile uses pure Psycopg and
+# omits DuckDB/Parquet until those projects publish compatible distributions.
+free-threaded = [
+  "tinydb-serialization>=1.0.4,<2",
+  "pymongo>=4.15.2",
+  "psycopg>=3.3.4",
+  "PyMySQL>=1.1",
+]
 all = [
   "tinydb-serialization>=1.0.4,<2",
   "pymongo>=4.9",

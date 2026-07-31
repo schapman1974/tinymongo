@@ -12,7 +12,8 @@ Parquet, PostgreSQL, and MariaDB/MySQL backends.
 # Status
 
 TinyMongo supports Python 3.9 and newer and is tested in GitHub Actions on
-Python 3.9, 3.11, and 3.13.
+Python 3.9, 3.11, 3.13, and 3.14. CPython 3.14's free-threaded build is
+supported at the beta level for the backends described below.
 
 # Installation
 
@@ -232,6 +233,31 @@ dependency. It is selected at runtime for `ObjectId`, non-generic `Binary`
 subtypes, patching, and conditional PyMongo exception inheritance, and is also
 used by development compatibility tests. Install `tinymongo[bson]` for BSON
 values or `tinymongo[pymongo]` for patching and installed-version compatibility.
+
+## Free-threaded Python 3.14
+
+For CPython 3.14t, install the dependency profile that has been verified while
+the GIL is disabled:
+
+```bash
+python3.14t -m pip install "tinymongo[free-threaded]"
+```
+
+This profile covers the core API, memory, TinyDB/JSON, SQLite, BSON/PyMongo,
+MySQL/MariaDB, and PostgreSQL through pure Psycopg. Pure Psycopg requires the
+system `libpq` library. DuckDB and Parquet are not yet available in this
+profile because DuckDB does not publish a `cp314t` wheel; `psycopg-binary`
+likewise has no `cp314t` distribution. The required 3.14t CI lanes verify that
+the GIL remains disabled and exercise in-process concurrency, MongoDB
+contracts, remote SQL, and built-package installation. Contributors using
+3.14t should install `requirements-free-threaded.txt` instead of
+`requirements-dev.txt`.
+
+Free-threaded support does not make every object safe for simultaneous
+mutation. Shared client, database, and collection handles support independent
+operations, but applications should coordinate lifecycle calls such as
+`close()` and `drop_database()` and should not consume one cursor or iterator
+from multiple threads.
 
 | Backend | Dependency | Best fit | Notes |
 | --- | --- | --- | --- |

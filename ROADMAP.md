@@ -187,6 +187,17 @@ Exit criteria:
 
 [View milestone](https://github.com/schapman1974/tinymongo/milestone/4)
 
+### Python 3.14 runtime coverage
+
+- [x] Add required Python 3.14 unit, 100%-coverage, live MongoDB, remote SQL,
+  and built-package CI lanes.
+- [x] Add beta-level CPython 3.14t coverage with the GIL disabled for core,
+  concurrency, BSON/PyMongo, live MongoDB, pure-Psycopg PostgreSQL,
+  MariaDB/MySQL, and package installation.
+- [ ] Add DuckDB and Parquet to the 3.14t lane when DuckDB publishes a
+  compatible free-threaded distribution; switch PostgreSQL back to the binary
+  Psycopg profile there when `psycopg-binary` publishes one.
+
 - [ ] [#79: Backend benchmarks and compatibility reports](https://github.com/schapman1974/tinymongo/issues/79)
 - [ ] [#55: ODM integration](https://github.com/schapman1974/tinymongo/issues/55)
 - [ ] [#81: MongoDB document and key validation](https://github.com/schapman1974/tinymongo/issues/81)

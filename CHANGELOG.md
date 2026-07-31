@@ -3,6 +3,9 @@
 ## [1.2.1] - Unreleased
 
 ### Added
+- Required CPython 3.14 CI coverage and beta-level CPython 3.14t coverage with
+  GIL-disabled unit, concurrency, live-database, and package-install checks,
+  plus a dedicated free-threaded dependency profile.
 - Process-local `memory` backend for isolated tests and temporary data, with
   explicit same-process sharing through named `memory://NAME` namespaces.
 - The memory backend now participates in the shared MongoDB compatibility
@@ -58,6 +61,10 @@
   with private attribute access guarded like PyMongo in both APIs.
 
 ### Fixed
+- Concurrent first access now creates one cached database handle per client,
+  compatibility concern documents are no longer shared between instances, and
+  lazy table creation for retained collection handles occurs under the write
+  lock.
 - `bypass_document_validation` remains a compatibility no-op: TinyMongo has no
   user-configurable validator layer, and the flag cannot bypass built-in `_id`
   or declared unique-index constraints.

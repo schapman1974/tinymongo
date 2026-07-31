@@ -10,6 +10,7 @@ from functools import reduce, wraps
 import logging
 import os
 import shutil
+import threading
 import warnings
 from uuid import uuid4
 
@@ -66,7 +67,8 @@ DESCENDING = -1
 
 
 class _CompatibilityConcern(object):
-    document: dict = {}
+    def __init__(self):
+        self.document = {}
 
 
 def Q(query, key):
@@ -477,6 +479,7 @@ class TinyMongoClient(object):
         else:
             self._dsn = None
         self._databases = {}
+        self._databases_lock = threading.RLock()
         self._closed = False
         storage_is_nonlocal = is_remote_sql_backend(backend_name) or bool(
             self._storage_uri and backend_name in ("parquet", "parquetv2")
@@ -529,28 +532,29 @@ class TinyMongoClient(object):
         return os.path.join(self._foldername, key + storage_extension(self._backend))
 
     def _get_db(self, key):
-        self._ensure_open()
-        if key in self._databases:
-            return self._databases[key]
-        path = self._get_db_path(key)
-        if is_table_backend(self._backend):
-            engine_class = get_table_backend(self._backend)
-            database = TinyMongoDatabase(
-                key,
-                path,
-                self._storage,
-                engine=engine_class(
+        with self._databases_lock:
+            self._ensure_open()
+            if key in self._databases:
+                return self._databases[key]
+            path = self._get_db_path(key)
+            if is_table_backend(self._backend):
+                engine_class = get_table_backend(self._backend)
+                database = TinyMongoDatabase(
+                    key,
                     path,
-                    threads=self._threads,
-                    duckdb_config=self._duckdb_config,
-                    database=key,
-                    dsn=self._dsn,
-                ),
-            )
-        else:
-            database = TinyMongoDatabase(key, path, self._storage)
-        self._databases[key] = database
-        return database
+                    self._storage,
+                    engine=engine_class(
+                        path,
+                        threads=self._threads,
+                        duckdb_config=self._duckdb_config,
+                        database=key,
+                        dsn=self._dsn,
+                    ),
+                )
+            else:
+                database = TinyMongoDatabase(key, path, self._storage)
+            self._databases[key] = database
+            return database
 
     def _ensure_open(self):
         """Reject operations that would use a client after it was closed."""
@@ -560,14 +564,15 @@ class TinyMongoClient(object):
 
     def close(self):
         """Close databases opened by this client."""
-        if self._closed:
-            return
-        for database in self._databases.values():
-            database.close()
-        self._databases.clear()
-        if self._memory_namespace is not None and not self._shared_memory:
-            clear_memory_namespace(self._memory_namespace)
-        self._closed = True
+        with self._databases_lock:
+            if self._closed:
+                return
+            for database in self._databases.values():
+                database.close()
+            self._databases.clear()
+            if self._memory_namespace is not None and not self._shared_memory:
+                clear_memory_namespace(self._memory_namespace)
+            self._closed = True
 
     def __enter__(self):
         return self
@@ -691,25 +696,27 @@ class TinyMongoClient(object):
         name = getattr(name_or_database, "database", name_or_database)
         if not isinstance(name, str):
             raise TypeError("database name must be a string or TinyMongoDatabase")
-        if name not in self.list_database_names() and name not in self._databases:
-            return None
+        with self._databases_lock:
+            self._ensure_open()
+            if name not in self.list_database_names() and name not in self._databases:
+                return None
 
-        database = self._databases.pop(name, None)
-        if database is None:
-            database = self[name]
-            self._databases.pop(name, None)
-        for collection_name in list(database.list_collection_names()):
-            database.drop_collection(collection_name)
-        database.close()
+            database = self._databases.pop(name, None)
+            if database is None:
+                database = self[name]
+                self._databases.pop(name, None)
+            for collection_name in list(database.list_collection_names()):
+                database.drop_collection(collection_name)
+            database.close()
 
-        path = self._get_db_path(name)
-        if self._memory_namespace is not None:
-            clear_memory_database(path)
-        elif not is_remote_sql_backend(self._backend) and not self._storage_uri:
-            if os.path.isfile(path):
-                os.remove(path)
-            elif os.path.isdir(path):
-                shutil.rmtree(path)
+            path = self._get_db_path(name)
+            if self._memory_namespace is not None:
+                clear_memory_database(path)
+            elif not is_remote_sql_backend(self._backend) and not self._storage_uri:
+                if os.path.isfile(path):
+                    os.remove(path)
+                elif os.path.isdir(path):
+                    shutil.rmtree(path)
         return None
 
     def database_names(self):
@@ -1735,11 +1742,10 @@ class TinyMongoCollection(object):
                 modified_count=int(modified),
             )
 
-        if self.table is None:
-            self.build_table()
-
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
+            if self.table is None:
+                self.build_table()
             self._refresh_table()
             direct_id = _direct_id_equality(query)
             if direct_id is not _MISSING:
@@ -1866,11 +1872,10 @@ class TinyMongoCollection(object):
                 modified_count=modified_count,
             )
 
-        if self.table is None:
-            self.build_table()
-
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
+            if self.table is None:
+                self.build_table()
             self._refresh_table()
             direct_id = _direct_id_equality(query)
             if direct_id is not _MISSING:
@@ -1984,11 +1989,10 @@ class TinyMongoCollection(object):
                 modified_count=int(modified),
             )
 
-        if self.table is None:
-            self.build_table()
-
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
+            if self.table is None:
+                self.build_table()
             self._refresh_table()
             direct_id = _direct_id_equality(query)
             if direct_id is not _MISSING:
