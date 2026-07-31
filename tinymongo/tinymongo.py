@@ -16,7 +16,12 @@ from uuid import uuid4
 
 from tinydb import Query, TinyDB, where  # type: ignore[attr-defined]
 from .bson_codec import bson_available
-from .bson_types import bson_identity_key, bson_scalar_sort_key, bson_values_equal
+from .bson_types import (
+    bson_identity_key,
+    bson_scalar_sort_key,
+    bson_values_equal,
+    object_id_type,
+)
 from .storage_backends import (
     clear_memory_database,
     clear_memory_namespace,
@@ -35,6 +40,7 @@ from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResu
 from .errors import (
     BulkWriteError,
     DuplicateKeyError,
+    InvalidDocument as InvalidDocument,
     InvalidOperation,
     OperationFailure,
     TinyMongoNotSupportedError,
@@ -78,6 +84,15 @@ def Q(query, key):
 
 
 _MISSING = object()
+
+
+def _generate_document_id():
+    """Return a PyMongo-shaped automatic ID when optional BSON is available."""
+
+    object_id_class = object_id_type()
+    if object_id_class is not None:
+        return object_id_class()
+    return generate_id()
 
 
 def _get_nested(doc, path, default=_MISSING):
@@ -365,7 +380,8 @@ def _document_for_upsert(query, update_doc):
             else:
                 continue  # pragma: no cover - continue has no trace event on Python 3.9
         _set_nested(document, key, copy.deepcopy(value))
-    document.setdefault("_id", generate_id())
+    if "_id" not in document:
+        document["_id"] = _generate_document_id()
     return _apply_update_document(document, update_doc)
 
 
@@ -918,6 +934,22 @@ class TinyMongoCollection(object):
         """Return the dotted database and collection name."""
         return "{0}.{1}".format(self.parent.name, self.tablename)
 
+    def _validate_storage_document(self, document, index=None):
+        """Reject unencodable values before a backend observes the write."""
+
+        from .bson_codec import dumps as encode_storage_payload
+
+        context = "collection {0!r}".format(self.full_name)
+        if index is not None:
+            context += ", document index {0}".format(index)
+        if "_id" in document:
+            context += ", document _id={0!r}".format(document["_id"])
+        encode_storage_payload(
+            document,
+            document_context=context,
+            ensure_ascii=False,
+        )
+
     @property
     def write_concern(self):
         return _CompatibilityConcern()
@@ -1326,13 +1358,18 @@ class TinyMongoCollection(object):
         :return: InsertOneResult
         """
         _reject_session(kwargs)
+        if not isinstance(doc, dict):
+            raise ValueError('"doc" must be a dict')
+
+        # PyMongo generates an ID only when the field is absent. Explicit
+        # values such as 0, False, and None remain user-controlled IDs.
+        if "_id" in doc:
+            _id = doc["_id"]
+        else:
+            _id = doc["_id"] = _generate_document_id()
+        self._validate_storage_document(doc)
+
         if self.parent.engine is not None:
-            if not isinstance(doc, dict):
-                raise ValueError('"doc" must be a dict')
-            if "_id" in doc:
-                _id = doc["_id"]
-            else:
-                _id = doc["_id"] = generate_id()
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
                 self.parent.engine.find(self.tablename, {}) + [doc],
@@ -1350,15 +1387,6 @@ class TinyMongoCollection(object):
             if self.table is None:
                 self.build_table()
             self._refresh_table()
-            if not isinstance(doc, dict):
-                raise ValueError('"doc" must be a dict')
-
-            # PyMongo generates an ID only when the field is absent. Explicit
-            # values such as 0, False, and None remain user-controlled IDs.
-            if "_id" in doc:
-                _id = doc["_id"]
-            else:
-                _id = doc["_id"] = generate_id()
 
             existing = self.find_one({"_id": _id})
             if existing is None:
@@ -1415,16 +1443,15 @@ class TinyMongoCollection(object):
             if "_id" in doc:
                 _id = doc["_id"]
             else:
-                _id = doc["_id"] = generate_id()
+                _id = doc["_id"] = _generate_document_id()
             _ids.append(_id)
 
         # Validate TinyMongo's one storage batch at the JSON boundary before
         # changing storage. PyMongo can split very large inputs across multiple
         # wire batches, so TinyMongo intentionally provides a stronger
         # whole-list guarantee here.
-        from .bson_codec import dumps as encode_storage_payload
-
-        encode_storage_payload(docs, ensure_ascii=False)
+        for index, doc in enumerate(docs):
+            self._validate_storage_document(doc, index=index)
 
         engine = self.parent.engine
         if engine is not None:
@@ -1699,6 +1726,7 @@ class TinyMongoCollection(object):
         """
         _reject_session(kwargs)
         _validate_update_document(doc)
+        self._validate_storage_document(doc)
         upsert = kwargs.get("upsert") is True
 
         if self.parent.engine is not None:
@@ -1706,6 +1734,7 @@ class TinyMongoCollection(object):
             if not matches:
                 if upsert:
                     inserted = _document_for_upsert(query, doc)
+                    self._validate_storage_document(inserted)
                     self.parent.engine.validate_unique_post_image(
                         self.tablename,
                         self.parent.engine.find(self.tablename, {}) + [inserted],
@@ -1719,6 +1748,7 @@ class TinyMongoCollection(object):
                     )
                 return UpdateResult(raw_result=[], matched_count=0, modified_count=0)
             updated = self.parent.engine.apply_update(matches[0], doc)
+            self._validate_storage_document(updated)
             modified = updated != matches[0]
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
@@ -1773,6 +1803,7 @@ class TinyMongoCollection(object):
             if item is None:
                 if upsert:
                     inserted = _document_for_upsert(query, doc)
+                    self._validate_storage_document(inserted)
                     self._validate_unique_post_image(self.table.all() + [inserted])
                     self.table.insert(inserted)
                     self._invalidate_indexes()
@@ -1785,6 +1816,7 @@ class TinyMongoCollection(object):
                 return UpdateResult(raw_result=[])
 
             updated = _apply_update_document(item, doc)
+            self._validate_storage_document(updated)
             modified = updated != item
             if modified:
                 post_image = [
@@ -1825,12 +1857,14 @@ class TinyMongoCollection(object):
         """
         _reject_session(kwargs)
         _validate_update_document(doc)
+        self._validate_storage_document(doc)
         upsert = kwargs.get("upsert") is True
 
         if self.parent.engine is not None:
             matches = self.parent.engine.find(self.tablename, query)
             if not matches and upsert:
                 inserted = _document_for_upsert(query, doc)
+                self._validate_storage_document(inserted)
                 self.parent.engine.validate_unique_post_image(
                     self.tablename,
                     self.parent.engine.find(self.tablename, {}) + [inserted],
@@ -1845,6 +1879,8 @@ class TinyMongoCollection(object):
             updates = [
                 (item, self.parent.engine.apply_update(item, doc)) for item in matches
             ]
+            for _original, updated in updates:
+                self._validate_storage_document(updated)
             modified_count = sum(updated != item for item, updated in updates)
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
@@ -1895,6 +1931,7 @@ class TinyMongoCollection(object):
                 items = list(self.table.search(allcond))
             if not items and upsert:
                 inserted = _document_for_upsert(query, doc)
+                self._validate_storage_document(inserted)
                 self._validate_unique_post_image(self.table.all() + [inserted])
                 self.table.insert(inserted)
                 self._invalidate_indexes()
@@ -1905,6 +1942,8 @@ class TinyMongoCollection(object):
                     upserted_id=inserted["_id"],
                 )
             updates = [(item, _apply_update_document(item, doc)) for item in items]
+            for _original, updated in updates:
+                self._validate_storage_document(updated)
             self._validate_unique_post_image(
                 [
                     next(
@@ -1949,12 +1988,17 @@ class TinyMongoCollection(object):
         Replaces one document matching the query with the replacement document.
         """
         _reject_session(kwargs)
+        if not isinstance(replacement, dict):
+            raise TypeError('"replacement" must be a dict')
+        self._validate_storage_document(replacement)
         if self.parent.engine is not None:
             item = self.parent.engine.find_one(self.tablename, query)
             if item is None:
                 if kwargs.get("upsert") is True:
                     inserted = copy.deepcopy(replacement)
-                    inserted.setdefault("_id", generate_id())
+                    if "_id" not in inserted:
+                        inserted["_id"] = _generate_document_id()
+                    self._validate_storage_document(inserted)
                     self.parent.engine.validate_unique_post_image(
                         self.tablename,
                         self.parent.engine.find(self.tablename, {}) + [inserted],
@@ -1969,6 +2013,7 @@ class TinyMongoCollection(object):
                 return UpdateResult(raw_result=[])
             updated = copy.deepcopy(replacement)
             updated["_id"] = item["_id"]
+            self._validate_storage_document(updated)
             modified = updated != item
             if modified:
                 self.parent.engine.validate_unique_post_image(
@@ -2019,7 +2064,9 @@ class TinyMongoCollection(object):
             if item is None:
                 if kwargs.get("upsert") is True:
                     inserted = copy.deepcopy(replacement)
-                    inserted.setdefault("_id", generate_id())
+                    if "_id" not in inserted:
+                        inserted["_id"] = _generate_document_id()
+                    self._validate_storage_document(inserted)
                     self._validate_unique_post_image(self.table.all() + [inserted])
                     self.table.insert(inserted)
                     self._invalidate_indexes()
@@ -2033,6 +2080,7 @@ class TinyMongoCollection(object):
 
             updated = copy.deepcopy(replacement)
             updated["_id"] = item["_id"]
+            self._validate_storage_document(updated)
             modified = updated != item
             if modified:
                 post_image = [
@@ -2782,9 +2830,8 @@ class TinyGridFS(object):
 
 
 def generate_id():
-    """Generate new UUID"""
-    # TODO: Use six.string_type to Py3 compat
-    return str(uuid4()).replace("-", "")
+    """Generate a portable UUID string for callers that explicitly want one."""
+    return uuid4().hex
 
 
 # def generate_id():

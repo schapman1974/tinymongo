@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 import tinymongo as tm
+from tinymongo import bson_types
+from tinymongo.errors import InvalidDocument
 from tinymongo.indexes import TinyMongoUnsupportedWarning
 
 
@@ -32,6 +34,80 @@ def talkpython_collection(request, tmp_path):
 
 def _labels(cursor):
     return [document["label"] for document in cursor]
+
+
+def test_implicit_ids_are_objectids_across_every_write_path(talkpython_collection):
+    collection = talkpython_collection
+    single = collection.insert_one({"kind": "single"})
+    many = collection.insert_many([{"kind": "many-a"}, {"kind": "many-b"}])
+    updated = collection.update_one(
+        {"kind": "update-one"},
+        {"$set": {"created": True}},
+        upsert=True,
+    )
+    updated_many = collection.update_many(
+        {"kind": "update-many"},
+        {"$set": {"created": True}},
+        upsert=True,
+    )
+    replaced = collection.replace_one(
+        {"kind": "replacement"},
+        {"kind": "replacement", "created": True},
+        upsert=True,
+    )
+    generated_ids = [
+        single.inserted_id,
+        *many.inserted_ids,
+        updated.upserted_id,
+        updated_many.upserted_id,
+        replaced.upserted_id,
+    ]
+
+    assert all(isinstance(document_id, ObjectId) for document_id in generated_ids)
+    for document_id in generated_ids:
+        reconstructed = ObjectId(str(document_id))
+        assert collection.find_one({"_id": reconstructed})["_id"] == document_id
+
+
+def test_explicit_string_generator_and_core_fallback_remain_available(monkeypatch):
+    explicit = tm.generate_id()
+
+    assert type(explicit) is str
+    assert len(explicit) == 32
+    int(explicit, 16)
+
+    monkeypatch.setattr(bson_types, "_ObjectId", None)
+    client = tm.TinyMongoClient(backend="memory")
+    try:
+        result = client.app.items.insert_one({"kind": "core-only"})
+
+        assert type(result.inserted_id) is str
+        assert len(result.inserted_id) == 32
+        assert client.app.items.find_one({"_id": result.inserted_id}) is not None
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("operation", ["update_one", "update_many", "replace_one"])
+def test_invalid_write_payload_fails_even_without_a_matching_document(
+    talkpython_collection, operation
+):
+    collection = talkpython_collection
+
+    with pytest.raises(InvalidDocument) as caught:
+        if operation == "replace_one":
+            collection.replace_one(
+                {"_id": "missing"},
+                {"value": {1, 2}},
+            )
+        else:
+            getattr(collection, operation)(
+                {"_id": "missing"},
+                {"$unset": {"value": {1, 2}}},
+            )
+
+    assert "set" in str(caught.value)
+    assert collection.count_documents({}) == 0
 
 
 def test_datetime_and_object_id_sort_in_both_directions(talkpython_collection):

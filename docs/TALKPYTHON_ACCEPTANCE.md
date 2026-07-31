@@ -10,9 +10,10 @@ contains two layers that make that handoff practical:
    `pymongo.MongoClient` and `pymongo.AsyncMongoClient` are patched to use a
    selected TinyMongo backend.
 
-The second layer still needs to be run in the Talk Python repository. Until that
-real application run happens, the roadmap's application-acceptance item remains
-open.
+Mike Kennedy has now run the second layer in the Talk Python repository against
+both MongoDB and TinyMongo SQLite. The remaining acceptance work is to rerun
+the focused follow-up cases, exercise the write-heavy admin and concurrency
+paths, and publish the complete dimensioned report.
 
 ## Prepare the application environment
 
@@ -94,7 +95,7 @@ The report is publishable only when every expected target cell was executed,
 the matching MongoDB reference behavior passed, and no result is unattributed.
 A partial run is still rendered, but it is labeled incomplete.
 
-## First application findings and rerun gate
+## Application result and rerun gate
 
 Mike Kennedy's first real Talk Python pass reached the asynchronous application
 initializer on SQLite, opened all four database handles, and accepted the index
@@ -112,28 +113,58 @@ to reusable contracts:
 - synchronous and asynchronous code must preserve the same behavior across
   memory, JSON, SQLite, DuckDB, and Parquet.
 
-The Mongo-compatible portions of these behaviors now run through the shared
+After those fixes, Mike migrated all 81,017 source documents with zero
+rejections and ran the real application suite through this repository's
+acceptance runner. MongoDB and TinyMongo SQLite both passed all 590 tests; the
+public site rendered from TinyMongo without MongoDB running. The recorded
+TinyMongo baseline was `master` at `6615f8b`, Python 3.14.6, PyMongo 4.17, and
+the SQLite backend. A fresh-memory run initially exposed four sitemap failures,
+which Mike confirmed and fixed as empty-data assumptions in the application
+rather than TinyMongo differences.
+
+The Mongo-compatible behaviors also run through TinyMongo's shared
 synchronous/asynchronous matrix and real MongoDB contracts. TinyMongo's
 stronger whole-input serialization preflight is covered locally because
-PyMongo may split a very large input across wire batches. Before publishing
-the Talk Python baseline, rerun the two reduced reproductions and the
-application suite, and record the exact Talk Python commit, Python and PyMongo
-versions, selected test inventory, and configuration. The runner's `--api`
-value labels results; the application configuration must actually exercise
-the corresponding client path.
+PyMongo may split a very large input across wire batches. Before publishing the
+final dimensioned report, record the exact Talk Python commit, selected test
+inventory, and configuration for each rerun. The runner's `--api` value labels
+results; the application configuration must actually exercise the
+corresponding client path.
+
+### Follow-up compatibility fixes
+
+Mike's next focused pass identified three more PyMongo-facing differences:
+
+- omitted `_id` values needed to be native `ObjectId` instances so the
+  application could reconstruct them from their string form;
+- `$ne: None` and `$nin` lists containing `None` needed to exclude missing
+  fields; and
+- unsupported document values needed to raise `InvalidDocument` instead of a
+  bare serialization `TypeError`.
+
+These cases now run through the shared synchronous/asynchronous contract
+matrix. TinyMongo creates native automatic IDs when optional BSON support is
+available, while dependency-free writes and the explicit `generate_id()`
+helper retain UUID strings. Invalid-document failures happen before storage,
+retain the rejected document and nested path context, and are catchable through
+both BSON's `InvalidDocument` and `PyMongoError` when PyMongo is installed.
+The main application goal is achieved; these three follow-up cases remain open
+until they are rerun in Talk Python's write paths.
 
 Mike's separate TinyMongo agent reference currently describes unreleased
 `master` behavior as version 1.2.0. After the compatibility branch merges,
 update that guide against the merge SHA or the `v1.2.1` tag, including the
 Binary codec, BSON-aware `_id` identity, `insert_many()` partial failures,
-bounded sort diagnostics, exact `$unset`, BSON-aware CLI, and dotted child
-collections. Also correct the stale list-only `insert_many()` signature and
-defaults, `BulkWriteError` details, blanket session claim, conditional
-`AsyncMongoClient` patch/import caveat, numeric-versus-bool identity wording,
-explicit null `_id` handling, `_default` collection filtering, current
-error/result shapes, and `bytearray` normalization. It should call PyMongo an
-optional runtime dependency—not a core dependency—for ObjectId and nonzero
-Binary values, patching, and conditional exception inheritance.
+bounded sort diagnostics, exact `$unset`, BSON-aware CLI, dotted child
+collections, native automatic `ObjectId` values, null-negation behavior, and
+contextual `InvalidDocument` errors. Also correct the stale list-only
+`insert_many()` signature and defaults, `BulkWriteError` details, blanket
+session claim, conditional `AsyncMongoClient` patch/import caveat,
+numeric-versus-bool identity wording, explicit null `_id` handling, `_default`
+collection filtering, current error/result shapes, and `bytearray`
+normalization. It should call PyMongo an optional runtime dependency—not a core
+dependency—for ObjectId and nonzero Binary values, patching, and conditional
+exception inheritance.
 The same guide update should correct constructor and sync-laziness wording,
 document validation as a no-op, empty-array and sort-error details,
 backend-specific locking and durability, the full object-storage environment

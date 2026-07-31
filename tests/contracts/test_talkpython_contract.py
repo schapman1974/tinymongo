@@ -165,6 +165,33 @@ def test_nin_excludes_values_and_includes_missing_fields(contract_target):
     assert sorted(_ids(documents)) == [1, 4]
 
 
+def test_null_negation_distinguishes_missing_and_non_null_fields(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": 1, "value": "real"},
+            {"_id": 2, "value": ""},
+            {"_id": 3, "value": None},
+            {"_id": 4},
+            {"_id": 5, "value": "other"},
+        ]
+    )
+
+    expectations = [
+        ({"value": {"$nin": [None, ""]}}, [1, 5]),
+        ({"value": {"$nin": (None, "")}}, [1, 5]),
+        ({"value": {"$ne": None}}, [1, 2, 5]),
+        ({"value": {"$ne": ""}}, [1, 3, 4, 5]),
+        ({"value": {"$nin": ["real"]}}, [2, 3, 4, 5]),
+        ({"value": {"$not": {"$regex": "^r"}}}, [2, 3, 4, 5]),
+        ({"value": {"$exists": True}}, [1, 2, 3, 5]),
+        ({"value": {"$exists": False}}, [4]),
+    ]
+
+    for query, expected_ids in expectations:
+        assert sorted(_ids(collection.find(query))) == expected_ids
+
+
 def test_nin_and_negated_regex_share_one_field_specification(contract_target):
     collection = contract_target.collection
     collection.insert_many(
@@ -333,6 +360,43 @@ def test_object_id_and_datetime_round_trip_and_range_query(contract_target):
     assert document["created_date"] == created_date
     assert isinstance(document["created_date"], datetime)
     assert _ids(in_range) == [episode_id]
+
+
+def test_generated_id_uses_the_standard_object_id_round_trip(contract_target):
+    bson = pytest.importorskip("bson")
+    collection = contract_target.collection
+    document = {"title": "A newly-created episode"}
+
+    result = collection.insert_one(document)
+    reconstructed = bson.ObjectId(str(result.inserted_id))
+    found = collection.find_one({"_id": reconstructed})
+
+    assert isinstance(result.inserted_id, bson.ObjectId)
+    assert document["_id"] == result.inserted_id
+    assert len(str(result.inserted_id)) == 24
+    assert reconstructed == result.inserted_id
+    assert found["title"] == document["title"]
+
+
+def test_invalid_document_has_a_bson_compatible_error(contract_target):
+    bson_errors = pytest.importorskip("bson.errors")
+    pymongo_errors = pytest.importorskip("pymongo.errors")
+    collection = contract_target.collection
+    document = {"payload": {"tags": {1, 2, 3}}}
+
+    with pytest.raises(bson_errors.InvalidDocument) as caught:
+        collection.insert_one(document)
+
+    if contract_target.name != "mongodb" and contract_target.api == "sync":
+        assert collection.name not in collection.database.list_collection_names()
+    assert collection.count_documents({}) == 0
+    if contract_target.name != "mongodb":
+        assert isinstance(caught.value, pymongo_errors.PyMongoError)
+        assert caught.value.document is document
+        assert collection.full_name in str(caught.value)
+        assert "payload" in str(caught.value)
+        assert "tags" in str(caught.value)
+        assert "set" in str(caught.value)
 
 
 def test_binary_round_trip_query_and_mongodb_sort_order(contract_target):

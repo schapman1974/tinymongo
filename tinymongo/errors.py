@@ -60,6 +60,9 @@ except ImportError:  # pragma: no cover - exercised in dependency-free installs
     class _InvalidOperation(_PyMongoError):
         pass
 
+    class _InvalidDocument(_PyMongoError):
+        pass
+
 else:
     _PyMongoError = _pymongo_errors.PyMongoError  # type: ignore[misc,assignment]
     _ConnectionFailure = _pymongo_errors.ConnectionFailure  # type: ignore[misc,assignment]
@@ -70,6 +73,7 @@ else:
     _DuplicateKeyError = _pymongo_errors.DuplicateKeyError  # type: ignore[misc,assignment]
     _BulkWriteError = _pymongo_errors.BulkWriteError  # type: ignore[misc,assignment]
     _InvalidOperation = _pymongo_errors.InvalidOperation  # type: ignore[misc,assignment]
+    _InvalidDocument = _pymongo_errors.InvalidDocument  # type: ignore[misc,assignment]
 
 
 class TinyMongoError(_PyMongoError):
@@ -106,6 +110,25 @@ class BulkWriteError(_BulkWriteError, OperationFailure):
 
 class InvalidOperation(_InvalidOperation, TinyMongoError):
     """Raised when a client attempts an invalid operation."""
+
+
+class InvalidDocument(_InvalidDocument, TinyMongoError):
+    """Raised when a document contains a value TinyMongo cannot encode.
+
+    PyMongo exposes :class:`bson.errors.InvalidDocument`, which is not itself a
+    ``PyMongoError``. TinyMongo intentionally inherits from both compatibility
+    families so existing application handlers can catch either one.
+    """
+
+    def __init__(self, message, document=None):
+        super(InvalidDocument, self).__init__(message)
+        self._document = document
+
+    @property
+    def document(self):
+        """Return the original document rejected by the encoder."""
+
+        return self._document
 
 
 class TinyMongoNotSupportedError(TinyMongoError, NotImplementedError):

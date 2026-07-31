@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 import tinymongo as tm
-from tinymongo.errors import DuplicateKeyError
+from tinymongo.errors import DuplicateKeyError, InvalidDocument
 from tinymongo import storage_backends
 from tinymongo.storage_backends import storage_extension
 
@@ -174,8 +174,10 @@ def test_memory_storage_uses_the_same_json_value_rules_as_default_storage():
         client.app.items.insert_one({"_id": "tuple", "values": (1, 2)})
         assert client.app.items.find_one({"_id": "tuple"})["values"] == [1, 2]
 
-        with pytest.raises(TypeError):
-            client.app.items.insert_one({"_id": "unsupported", "value": object()})
+        unsupported = {"_id": "unsupported", "value": {1, 2}}
+        with pytest.raises(InvalidDocument) as caught:
+            client.app.items.insert_one(unsupported)
+        assert caught.value.document is unsupported
         assert client.app.items.find_one({"_id": "unsupported"}) is None
     finally:
         client.close()

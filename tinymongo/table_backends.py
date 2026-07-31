@@ -509,15 +509,19 @@ def _field_matches(actual, expected, exact=False):
             ):
                 return False
         elif operator == "$ne":
-            if exists and equality(actual, operand):
+            if (not exists and operand is None) or (
+                exists and equality(actual, operand)
+            ):
                 return False
         elif operator == "$in":
-            values = operand if isinstance(operand, list) else [operand]
+            values = operand if isinstance(operand, (list, tuple)) else [operand]
             if not exists or not any(equality(actual, item) for item in values):
                 return False
         elif operator == "$nin":
-            values = operand if isinstance(operand, list) else [operand]
-            if exists and any(equality(actual, item) for item in values):
+            values = operand if isinstance(operand, (list, tuple)) else [operand]
+            if (not exists and any(item is None for item in values)) or (
+                exists and any(equality(actual, item) for item in values)
+            ):
                 return False
         elif operator == "$all":
             if not isinstance(actual, list) or not all(

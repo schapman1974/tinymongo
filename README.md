@@ -414,6 +414,12 @@ members), nested document paths, `$gt`, `$gte`, `$lt`, `$lte`, `$ne`,
 `$nin`, `$in`, `$all`, `$and`, `$or`, `$nor`, `$not`, `$regex`,
 case-insensitive `$options`, and `$exists`.
 
+MongoDB treats missing fields differently depending on the negated value.
+`{"field": {"$ne": None}}` and `$nin` lists containing `None` exclude
+documents where `field` is missing, while `$ne` and `$nin` with only non-null
+values continue to include missing fields. The same rule applies to dotted
+paths and array members across TinyMongo backends.
+
 Update support includes `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
 `$addToSet`, including `upsert=True`. As in PyMongo, `update_one()` and
 `update_many()` require update operators; use `replace_one()` for full-document
@@ -487,6 +493,14 @@ core dependency:
 pip install "tinymongo[bson]"
 ```
 
+When BSON support is installed, TinyMongo gives writes that omit `_id` a native
+`ObjectId`, including `insert_many()` and upsert paths. The returned value can
+be reconstructed with `ObjectId(str(result.inserted_id))`. A dependency-free
+installation falls back to a 32-character UUID string. The public
+`tinymongo.generate_id()` helper always returns that portable UUID string for
+callers, such as MongoEngine models, that explicitly want string IDs. Existing
+string and integer IDs remain readable and are never rewritten.
+
 ```python
 from datetime import datetime
 from bson import Binary, ObjectId
@@ -541,6 +555,13 @@ a client-side serialization failure leaves the entire TinyMongo input
 unwritten. This is a stronger whole-list guarantee than PyMongo provides for
 very large inputs, which it may split across multiple wire batches.
 
+An unsupported value raises `tinymongo.InvalidDocument` before storage is
+changed. The exception retains the rejected document in its `document`
+attribute, and its message identifies the collection and nested value path
+(plus the batch index for `insert_many()`). With PyMongo installed, it can be
+caught as either `bson.errors.InvalidDocument` or `pymongo.errors.PyMongoError`;
+dependency-free callers can catch `tinymongo.errors.TinyMongoError`.
+
 TinyMongo includes PyMongo-shaped contract tests that run application code with
 `import pymongo` redirected to TinyMongo:
 
@@ -582,7 +603,9 @@ PyMongo remains optional. It is needed for these comparisons,
 it is not required for normal TinyMongo clients, `datetime` storage, or native
 subtype-0 byte values. When it is installed, TinyMongo error classes also
 inherit the matching `pymongo.errors` classes, so existing `PyMongoError`
-handlers continue to work.
+handlers continue to work. `InvalidDocument` additionally preserves BSON's
+standard error identity while remaining inside TinyMongo's portable error
+hierarchy.
 
 PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract

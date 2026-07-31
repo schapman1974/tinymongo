@@ -262,7 +262,9 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
 
         builtins.__import__ = without_pymongo
 
+        import tinymongo
         from tinymongo import bson_codec, bson_types
+        from tinymongo.errors import InvalidDocument, TinyMongoError
 
         assert bson_types.bson_capabilities() == {
             "objectid": False,
@@ -272,6 +274,37 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
         assert bson_codec.object_id_available() is False
         assert bson_codec.binary_available() is False
         assert bson_codec.loads(bson_codec.dumps(b"core")) == b"core"
+        assert issubclass(InvalidDocument, TinyMongoError)
+
+        explicit_id = tinymongo.generate_id()
+        assert type(explicit_id) is str
+        assert len(explicit_id) == 32
+
+        client = tinymongo.TinyMongoClient(backend="memory")
+        result = client.core.items.insert_one({"kind": "implicit-id"})
+        assert type(result.inserted_id) is str
+        assert len(result.inserted_id) == 32
+        assert client.core.items.find_one({"_id": result.inserted_id}) is not None
+        client.close()
+
+        invalid_document = {
+            "_id": "invalid",
+            "nested": [{"unsupported": {1, 2}}],
+        }
+        try:
+            bson_codec.dumps(
+                invalid_document,
+                document_context="collection 'core.items'",
+            )
+        except TinyMongoError as error:
+            assert isinstance(error, InvalidDocument)
+            assert not isinstance(error, TypeError)
+            assert error.document is invalid_document
+            assert "collection 'core.items'" in str(error)
+            assert "$['nested'][0]['unsupported']" in str(error)
+            assert "<class 'set'>" in str(error)
+        else:
+            raise AssertionError("unsupported set encoded without an error")
 
         moment = datetime(2026, 7, 29, 12, 30)
         assert bson_codec.loads(bson_codec.dumps(moment)) == moment
