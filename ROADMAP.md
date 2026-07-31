@@ -85,10 +85,8 @@ with the follow-up audit of his
   migration reports, avoid unused nonlocal-storage directories, reject invalid
   backends eagerly with the complete alias list, and guard client metadata and
   listing methods after close.
-- [ ] After this work merges, update Mike's agent guide against the merge SHA
-  or the `v1.2.1` tag. Until 1.2.1 is published, label it as the forthcoming
-  1.2.1 release, use the Git install command, and do not describe the expanded
-  API as available from PyPI.
+- [ ] Update Mike's agent guide against the `v1.2.1` tag and describe the
+  expanded API as available from PyPI.
   Correct its list-only `insert_many()` signature
   and defaults, `BulkWriteError` details, blanket session-rejection claim,
   conditional `AsyncMongoClient` patch/import caveat, numeric-equivalence
@@ -115,12 +113,13 @@ with the follow-up audit of his
   [#75](https://github.com/schapman1974/tinymongo/issues/75) and
   [#76](https://github.com/schapman1974/tinymongo/issues/76).
 - [x] Run the real Talk Python acceptance suite against MongoDB and TinyMongo
-  SQLite: both passed all 590 tests, and the 81,017-document application
+  SQLite: both passed all 597 tests, and the 81,017-document application
   database migrated with zero rejections.
-- [ ] Rerun Mike's TM-009 and TM-010 reproductions plus the invalid-document
-  write path after these fixes merge, then publish the MongoDB, memory, and
-  SQLite baseline through [#72](https://github.com/schapman1974/tinymongo/issues/72)
-  and [#136](https://github.com/schapman1974/tinymongo/issues/136).
+- [x] Rerun Mike's TM-009 and TM-010 reproductions plus the invalid-document
+  write path after the fixes merged; all pass against the real application.
+- [ ] Publish the MongoDB, memory, and SQLite report artifacts through
+  [#72](https://github.com/schapman1974/tinymongo/issues/72) and
+  [#136](https://github.com/schapman1974/tinymongo/issues/136).
 
 Application-compatibility work:
 
@@ -130,9 +129,9 @@ Application-compatibility work:
   - [x] Run the application-derived compatibility contracts through both the
     synchronous and asynchronous APIs.
   - [x] Run the complete application suite through the async acceptance path:
-    MongoDB and TinyMongo SQLite each passed 590 tests.
-  - [ ] Complete the write-heavy admin and multi-worker SQLite follow-up, and
-    record any remaining differences.
+    MongoDB and TinyMongo SQLite each passed 597 tests.
+  - [x] Complete the write-heavy admin and multi-worker SQLite follow-up: all
+    21 admin checks passed with no errors, lost writes, or torn reads.
 - [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
 - [ ] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
   - [x] Milestone 1 ObjectId, datetime, and Binary storage/query support.
@@ -152,9 +151,8 @@ Application-compatibility work:
   - [x] Provide an external pytest runner that patches both PyMongo client
     classes before application tests are imported.
   - [x] Run the real Talk Python suite through the runner against the MongoDB
-    reference and TinyMongo SQLite, with 590 passing tests on each.
-  - [ ] Rerun the new focused cases and publish the reference, memory, and
-    SQLite report artifacts.
+    reference and TinyMongo SQLite, with 597 passing tests on each.
+  - [ ] Publish the reference, memory, and SQLite report artifacts.
 - [ ] [#87: Differential compatibility fuzzing](https://github.com/schapman1974/tinymongo/issues/87)
 
 Exit criteria:

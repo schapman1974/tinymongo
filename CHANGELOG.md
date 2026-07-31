@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.2.1] - Unreleased
+## [1.2.1] - 2026-07-31
 
 ### Added
 - Required CPython 3.14 CI coverage and beta-level CPython 3.14t coverage with
