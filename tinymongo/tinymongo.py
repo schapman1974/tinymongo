@@ -8,6 +8,7 @@ import copy
 from collections.abc import Iterable, Mapping, MutableMapping
 from functools import reduce, wraps
 import logging
+import operator as comparison_operator
 import os
 import shutil
 import threading
@@ -44,6 +45,7 @@ from .errors import (
     InvalidOperation,
     OperationFailure,
     TinyMongoNotSupportedError,
+    WriteError,
 )
 from .indexes import (
     INDEX_CATALOG_TABLE,
@@ -270,6 +272,292 @@ def _unset_nested(doc, path):
     current.pop(parts[-1], None)
 
 
+_UPDATE_OPERATORS = frozenset(("$set", "$unset", "$inc", "$push", "$pull", "$addToSet"))
+_PUSH_MODIFIERS = frozenset(("$each", "$position", "$sort", "$slice"))
+_ADD_TO_SET_MODIFIERS = frozenset(("$each",))
+_PULL_COMPARISON_OPERATORS = {
+    "$gt": comparison_operator.gt,
+    "$gte": comparison_operator.ge,
+    "$lt": comparison_operator.lt,
+    "$lte": comparison_operator.le,
+}
+_PULL_FIELD_OPERATORS = frozenset(("$eq",) + tuple(_PULL_COMPARISON_OPERATORS))
+_PULL_LOGICAL_OPERATORS = frozenset(("$and", "$or", "$nor"))
+
+
+def _raise_write_error(message):
+    """Raise a Mongo-shaped write error that remains a TinyMongoError."""
+
+    raise WriteError(message, code=2)
+
+
+def _is_modifier_document(value):
+    return isinstance(value, Mapping) and any(
+        isinstance(key, str) and key.startswith("$") for key in value
+    )
+
+
+def _is_modifier_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_sort_direction(value):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and value in (-1, 1)
+    )
+
+
+def _validate_each_modifier(value, operator, allowed_modifiers):
+    """Validate an array modifier document and return whether one was used."""
+
+    if not _is_modifier_document(value):
+        return False
+
+    unsupported = [key for key in value if key not in allowed_modifiers]
+    if unsupported:
+        _raise_write_error(
+            "{0} does not support modifier {1}".format(operator, repr(unsupported[0]))
+        )
+    if "$each" not in value:
+        _raise_write_error("{0} modifiers require $each".format(operator))
+    if not isinstance(value["$each"], (list, tuple)):
+        _raise_write_error("{0} $each requires an array".format(operator))
+    return True
+
+
+def _validate_push_operand(value):
+    if not _validate_each_modifier(value, "$push", _PUSH_MODIFIERS):
+        return False
+
+    if "$position" in value and not _is_modifier_integer(value["$position"]):
+        _raise_write_error("$push $position requires an integer")
+    if "$slice" in value and not _is_modifier_integer(value["$slice"]):
+        _raise_write_error("$push $slice requires an integer")
+    if "$sort" in value:
+        sort_spec = value["$sort"]
+        if _is_sort_direction(sort_spec):
+            return True
+        if not isinstance(sort_spec, Mapping) or not sort_spec:
+            _raise_write_error("$push $sort requires 1, -1, or a non-empty document")
+        if not all(
+            isinstance(field, str) and _is_sort_direction(direction)
+            for field, direction in sort_spec.items()
+        ):
+            _raise_write_error("$push $sort contains an invalid sort specification")
+    return True
+
+
+def _validate_add_to_set_operand(value):
+    return _validate_each_modifier(value, "$addToSet", _ADD_TO_SET_MODIFIERS)
+
+
+def _validate_pull_field_condition(condition):
+    """Validate the operators applied to one array element or document field."""
+
+    if not isinstance(condition, Mapping):
+        return
+
+    operator_keys = [
+        key for key in condition if isinstance(key, str) and key.startswith("$")
+    ]
+    if not operator_keys:
+        return
+    if len(operator_keys) != len(condition):
+        _raise_write_error("$pull cannot mix field and document query operators")
+
+    for key, operand in condition.items():
+        if key not in _PULL_FIELD_OPERATORS:
+            _raise_write_error("$pull does not support query operator {0}".format(key))
+        if key in _PULL_COMPARISON_OPERATORS and (
+            operand is None or bson_scalar_sort_key(operand) is None
+        ):
+            _raise_write_error(
+                "$pull {0} requires a supported scalar value".format(key)
+            )
+
+
+def _validate_pull_document_condition(condition):
+    """Validate a query applied to each embedded document in the array."""
+
+    for key, operand in condition.items():
+        if key in _PULL_LOGICAL_OPERATORS:
+            if (
+                not isinstance(operand, (list, tuple))
+                or not operand
+                or not all(isinstance(clause, Mapping) for clause in operand)
+            ):
+                _raise_write_error(
+                    "$pull {0} requires an array of documents".format(key)
+                )
+            for clause in operand:
+                _validate_pull_document_condition(clause)
+        elif isinstance(key, str) and key.startswith("$"):
+            _raise_write_error(
+                "$pull does not support document query operator {0}".format(key)
+            )
+        else:
+            _validate_pull_field_condition(operand)
+
+
+def _validate_pull_condition(condition):
+    """Reject unsupported query operators instead of silently matching nothing."""
+
+    if not isinstance(condition, Mapping):
+        return
+
+    operator_keys = [
+        key for key in condition if isinstance(key, str) and key.startswith("$")
+    ]
+    if any(key in _PULL_LOGICAL_OPERATORS for key in operator_keys):
+        _validate_pull_document_condition(condition)
+    elif operator_keys:
+        _validate_pull_field_condition(condition)
+    else:
+        _validate_pull_document_condition(condition)
+
+
+def _validate_update_operators(update_doc):
+    for operator, changes in update_doc.items():
+        if operator not in _UPDATE_OPERATORS:
+            raise TinyMongoNotSupportedError(
+                "Unsupported update operator: {0}".format(operator)
+            )
+        if not isinstance(changes, dict):
+            raise ValueError("{0} update requires a dict".format(operator))
+        if operator == "$push":
+            for value in changes.values():
+                _validate_push_operand(value)
+        elif operator == "$addToSet":
+            for value in changes.values():
+                _validate_add_to_set_operand(value)
+        elif operator == "$pull":
+            for value in changes.values():
+                _validate_pull_condition(value)
+
+
+def _sort_pushed_values(values, sort_spec):
+    """Sort array values using whole-value BSON ordering."""
+
+    order = TinyMongoCursor([])._order
+    if _is_sort_direction(sort_spec):
+        values.sort(key=order, reverse=sort_spec < 0)
+        return
+
+    # Stable passes from the least-significant field implement a compound
+    # sort while retaining the BSON ordering already shared by cursors.
+    for field, direction in reversed(list(sort_spec.items())):
+        values.sort(
+            key=lambda item, path=field: order(_get_nested(item, path, None)),
+            reverse=direction < 0,
+        )
+
+
+def _apply_push(current, value):
+    if not _validate_push_operand(value):
+        current.append(copy.deepcopy(value))
+        return current
+
+    additions = copy.deepcopy(list(value["$each"]))
+    if "$position" not in value:
+        current.extend(additions)
+    else:
+        position = value["$position"]
+        if position < 0:
+            position = max(len(current) + position, 0)
+        else:
+            position = min(position, len(current))
+        current[position:position] = additions
+
+    if "$sort" in value:
+        _sort_pushed_values(current, value["$sort"])
+
+    if "$slice" in value:
+        limit = value["$slice"]
+        if limit > 0:
+            current = current[:limit]
+        elif limit < 0:
+            current = current[limit:]
+        else:
+            current = []
+    return current
+
+
+def _apply_add_to_set(current, value):
+    candidates = value["$each"] if _validate_add_to_set_operand(value) else [value]
+    for candidate in candidates:
+        if not any(bson_values_equal(candidate, existing) for existing in current):
+            current.append(copy.deepcopy(candidate))
+    return current
+
+
+def _pull_comparison_matches(actual, operand, comparison):
+    operand_identity = bson_identity_key(operand)
+    operand_order = bson_scalar_sort_key(operand)
+    values = actual if isinstance(actual, (list, tuple)) else [actual]
+    for value in values:
+        value_identity = bson_identity_key(value)
+        value_order = bson_scalar_sort_key(value)
+        if (
+            value_identity is not None
+            and value_order is not None
+            and value_identity[0] == operand_identity[0]
+            and comparison(value_order[1], operand_order[1])
+        ):
+            return True
+    return False
+
+
+def _pull_field_matches(actual, condition):
+    if actual is _MISSING:
+        return False
+    if not isinstance(condition, Mapping) or not any(
+        isinstance(key, str) and key.startswith("$") for key in condition
+    ):
+        return _value_matches(actual, condition)
+
+    for query_operator, operand in condition.items():
+        if query_operator == "$eq":
+            if not _value_matches(actual, operand):
+                return False
+        elif not _pull_comparison_matches(
+            actual, operand, _PULL_COMPARISON_OPERATORS[query_operator]
+        ):
+            return False
+    return True
+
+
+def _pull_document_matches(document, condition):
+    for key, expected in condition.items():
+        if key == "$and":
+            if not all(_pull_document_matches(document, item) for item in expected):
+                return False
+        elif key == "$or":
+            if not any(_pull_document_matches(document, item) for item in expected):
+                return False
+        elif key == "$nor":
+            if any(_pull_document_matches(document, item) for item in expected):
+                return False
+        elif not _pull_field_matches(_get_nested(document, key), expected):
+            return False
+    return True
+
+
+def _pull_matches(item, condition):
+    if not isinstance(condition, Mapping):
+        return bson_values_equal(item, condition)
+
+    operator_keys = [
+        key for key in condition if isinstance(key, str) and key.startswith("$")
+    ]
+    if any(key in _PULL_LOGICAL_OPERATORS for key in operator_keys):
+        return isinstance(item, Mapping) and _pull_document_matches(item, condition)
+    if operator_keys:
+        return _pull_field_matches(item, condition)
+    return isinstance(item, Mapping) and _pull_document_matches(item, condition)
+
+
 def _apply_update_document(item, update_doc):
     updated = copy.deepcopy(item)
     operator_keys = [key for key in update_doc if key.startswith("$")]
@@ -280,10 +568,9 @@ def _apply_update_document(item, update_doc):
             replacement["_id"] = item["_id"]
         return replacement
 
-    for operator, changes in update_doc.items():
-        if not isinstance(changes, dict):
-            raise ValueError("{0} update requires a dict".format(operator))
+    _validate_update_operators(update_doc)
 
+    for operator, changes in update_doc.items():
         if operator == "$set":
             for path, value in changes.items():
                 _set_nested(updated, path, value)
@@ -300,25 +587,26 @@ def _apply_update_document(item, update_doc):
                 if not isinstance(current, list):
                     raise ValueError("$push target must be a list")
                 current = list(current)
-                current.append(value)
+                current = _apply_push(current, value)
                 _set_nested(updated, path, current)
         elif operator == "$pull":
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
                 if not isinstance(current, list):
                     raise ValueError("$pull target must be a list")
-                _set_nested(updated, path, [item for item in current if item != value])
-        elif operator == "$addToSet":
+                _set_nested(
+                    updated,
+                    path,
+                    [item for item in current if not _pull_matches(item, value)],
+                )
+        elif operator == "$addToSet":  # pragma: no branch - operators prevalidated
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
                 if not isinstance(current, list):
                     raise ValueError("$addToSet target must be a list")
                 current = list(current)
-                if value not in current:
-                    current.append(value)
+                current = _apply_add_to_set(current, value)
                 _set_nested(updated, path, current)
-        else:
-            raise ValueError("Unsupported update operator: {0}".format(operator))
 
     updated["_id"] = item["_id"]
     return updated
@@ -360,6 +648,7 @@ def _validate_update_document(update_doc):
         or not all(key.startswith("$") for key in update_doc)
     ):
         raise ValueError("update only works with $ operators; use replace_one instead")
+    _validate_update_operators(update_doc)
 
 
 def _reject_session(kwargs):
@@ -1749,7 +2038,7 @@ class TinyMongoCollection(object):
                 return UpdateResult(raw_result=[], matched_count=0, modified_count=0)
             updated = self.parent.engine.apply_update(matches[0], doc)
             self._validate_storage_document(updated)
-            modified = updated != matches[0]
+            modified = not bson_values_equal(updated, matches[0])
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
                 [
@@ -1817,7 +2106,7 @@ class TinyMongoCollection(object):
 
             updated = _apply_update_document(item, doc)
             self._validate_storage_document(updated)
-            modified = updated != item
+            modified = not bson_values_equal(updated, item)
             if modified:
                 post_image = [
                     (
@@ -1881,7 +2170,9 @@ class TinyMongoCollection(object):
             ]
             for _original, updated in updates:
                 self._validate_storage_document(updated)
-            modified_count = sum(updated != item for item, updated in updates)
+            modified_count = sum(
+                not bson_values_equal(updated, item) for item, updated in updates
+            )
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
                 [
@@ -1963,7 +2254,7 @@ class TinyMongoCollection(object):
             result = []
             modified_count = 0
             for item, updated in updates:
-                if updated != item:
+                if not bson_values_equal(updated, item):
                     modified_count += 1
                     result.extend(
                         self.table.update(

@@ -906,7 +906,7 @@ class TableBackend(object):
         updated_ids = []
         for doc in matches:
             updated = self.apply_update(doc, update_doc)
-            if updated != doc:
+            if not bson_values_equal(updated, doc):
                 self.replace_one(collection, doc["_id"], updated)
                 updated_ids.append(doc["_id"])
         return updated_ids
