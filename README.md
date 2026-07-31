@@ -17,17 +17,15 @@ supported at the beta level for the backends described below.
 
 # Installation
 
-The latest stable release can be installed via `pip install tinymongo`.
-This checkout is the forthcoming 1.2.1 release line. Until 1.2.1 is published
-on PyPI, install the Git branch directly to use the APIs documented below:
+The latest stable release is 1.2.1 and can be installed from PyPI:
 
 ```bash
-pip install "tinymongo @ git+https://github.com/schapman1974/tinymongo.git@master"
+pip install "tinymongo==1.2.1"
 ```
 
 For development, clone this repository and run `pip install -e .` from its
-root. Use the `v1.2.0` tag when you need documentation that matches the current
-stable package exactly; use the `v1.2.1` tag after that release is published.
+root. Use the `v1.2.1` tag when you need source and documentation that match
+the current stable package exactly; `master` may contain unreleased changes.
 
 The default JSON backend has a small dependency set. Optional database backends
 may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.

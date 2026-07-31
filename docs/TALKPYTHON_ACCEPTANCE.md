@@ -115,12 +115,13 @@ to reusable contracts:
 
 After those fixes, Mike migrated all 81,017 source documents with zero
 rejections and ran the real application suite through this repository's
-acceptance runner. MongoDB and TinyMongo SQLite both passed all 590 tests; the
-public site rendered from TinyMongo without MongoDB running. The recorded
-TinyMongo baseline was `master` at `6615f8b`, Python 3.14.6, PyMongo 4.17, and
-the SQLite backend. A fresh-memory run initially exposed four sitemap failures,
-which Mike confirmed and fixed as empty-data assumptions in the application
-rather than TinyMongo differences.
+acceptance runner. After the final follow-up in #143, MongoDB and TinyMongo
+SQLite both passed all 597 tests; all nine application surfaces and all 21
+admin-write checks passed. The public site rendered from TinyMongo without
+MongoDB running. The final recorded TinyMongo baseline was `master` at
+`07e9b40`, Python 3.14.6, PyMongo 4.17, and the SQLite backend. A fresh-memory
+run initially exposed four sitemap failures, which Mike confirmed and fixed as
+empty-data assumptions in the application rather than TinyMongo differences.
 
 The Mongo-compatible behaviors also run through TinyMongo's shared
 synchronous/asynchronous matrix and real MongoDB contracts. TinyMongo's
@@ -148,13 +149,13 @@ available, while dependency-free writes and the explicit `generate_id()`
 helper retain UUID strings. Invalid-document failures happen before storage,
 retain the rejected document and nested path context, and are catchable through
 both BSON's `InvalidDocument` and `PyMongoError` when PyMongo is installed.
-The main application goal is achieved; these three follow-up cases remain open
-until they are rerun in Talk Python's write paths.
+Mike reran these cases unchanged against `07e9b40`; all passed in the focused
+reproductions and the real Talk Python write paths. The main application goal
+is complete with no known correctness defect in Talk Python's TinyMongo path.
 
-Mike's separate TinyMongo agent reference currently describes unreleased
-`master` behavior as version 1.2.0. After the compatibility branch merges,
-update that guide against the merge SHA or the `v1.2.1` tag, including the
-Binary codec, BSON-aware `_id` identity, `insert_many()` partial failures,
+Mike's separate TinyMongo agent reference should now be updated against the
+`v1.2.1` tag, including the Binary codec, BSON-aware `_id` identity,
+`insert_many()` partial failures,
 bounded sort diagnostics, exact `$unset`, BSON-aware CLI, dotted child
 collections, native automatic `ObjectId` values, null-negation behavior, and
 contextual `InvalidDocument` errors. Also correct the stale list-only
