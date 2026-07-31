@@ -11,7 +11,7 @@ import pytest
 
 import tinymongo
 from tinymongo.asyncio import AsyncTinyMongoClient
-from tinymongo.errors import BulkWriteError, DuplicateKeyError
+from tinymongo.errors import BulkWriteError, DuplicateKeyError, InvalidDocument
 from tinymongo.tinymongo import TinyMongoCollection
 
 
@@ -126,14 +126,21 @@ def test_insert_many_serialization_preflight_is_all_or_nothing(
     collection = client.app.items
     documents = [
         {"name": "first"},
-        {"name": "invalid", "value": object()},
+        {"name": "invalid", "value": {1, 2}},
         {"name": "last"},
     ]
 
-    with pytest.raises(TypeError):
+    with pytest.raises(InvalidDocument) as caught:
         collection.insert_many(documents, ordered=ordered)
 
+    message = str(caught.value)
+    assert caught.value.document is documents[1]
+    assert "collection 'app.items'" in message
+    assert "document index 1" in message
+    assert "['value']" in message
+    assert "<class 'set'>" in message
     assert all("_id" in document for document in documents)
+    assert collection.name not in collection.database.list_collection_names()
     assert collection.count_documents({}) == 0
     client.close()
 

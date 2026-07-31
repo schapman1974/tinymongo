@@ -19,6 +19,7 @@ import json
 import math
 
 from . import bson_types
+from .errors import InvalidDocument
 
 
 # Compatibility aliases remain patchable for dependency-error tests and older
@@ -35,6 +36,7 @@ _BINARY_VALUE = "binary"
 _BINARY_DATA = "base64"
 _BINARY_SUBTYPE = "subtype"
 _NONFINITE_FLOAT = "float"
+_ROOT_UNSET = object()
 
 
 def bson_available():
@@ -54,8 +56,23 @@ def binary_available():
     return _Binary is not None
 
 
-def encode_value(value):
+def _nested_path(path, key):
+    if isinstance(key, int):
+        return "{0}[{1}]".format(path, key)
+    return "{0}[{1!r}]".format(path, key)
+
+
+def _bounded_repr(value, limit=160):
+    rendered = repr(value)
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 3] + "..."
+
+
+def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
     """Recursively convert supported non-JSON values into tagged JSON data."""
+    if _root is _ROOT_UNSET:
+        _root = value
     spec = bson_types.bson_type_spec(value)
     storage_tag = spec.storage_tag if spec is not None else None
     if storage_tag == "objectid":
@@ -81,13 +98,51 @@ def encode_value(value):
             return {
                 _TYPE_MARKER: _ESCAPED_MAPPING,
                 _VALUE_MARKER: [
-                    [str(key), encode_value(item)] for key, item in value.items()
+                    [
+                        str(key),
+                        encode_value(
+                            item,
+                            _path=_nested_path(_path, key),
+                            _root=_root,
+                            _context=_context,
+                        ),
+                    ]
+                    for key, item in value.items()
                 ],
             }
-        return {str(key): encode_value(item) for key, item in value.items()}
+        return {
+            str(key): encode_value(
+                item,
+                _path=_nested_path(_path, key),
+                _root=_root,
+                _context=_context,
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [encode_value(item) for item in value]
-    return value
+        return [
+            encode_value(
+                item,
+                _path=_nested_path(_path, index),
+                _root=_root,
+                _context=_context,
+            )
+            for index, item in enumerate(value)
+        ]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+
+    context = " for {0}".format(_context) if _context else ""
+    raise InvalidDocument(
+        "Invalid document{0} at {1!r}: cannot encode object {2}, "
+        "of type {3!r}".format(
+            context,
+            _path,
+            _bounded_repr(value),
+            type(value),
+        ),
+        document=_root,
+    )
 
 
 def _encode_binary(value, subtype):
@@ -178,10 +233,10 @@ def decode_value(value):
     return value
 
 
-def dumps(value, **kwargs):
+def dumps(value, document_context=None, **kwargs):
     """Serialize a TinyMongo value as JSON with BSON-compatible tagging."""
     kwargs.setdefault("allow_nan", False)
-    return json.dumps(encode_value(value), **kwargs)
+    return json.dumps(encode_value(value, _context=document_context), **kwargs)
 
 
 def loads(value):

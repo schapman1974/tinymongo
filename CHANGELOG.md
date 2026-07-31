@@ -100,6 +100,17 @@
   schema upgrades leave existing native JSON indexes in place.
 - Explicit null `_id` values are preserved, and exact recursive `_id` identity
   prevents scalar/container aliases and codec-normalized tuple/list duplicates.
+- Implicit IDs now use native `ObjectId` values when optional BSON support is
+  installed, including insert batches and upserts, so their string form can be
+  reconstructed with `ObjectId(...)`. Dependency-free writes and the explicit
+  `generate_id()` helper retain portable UUID-string IDs.
+- `$ne: None` and `$nin` lists containing `None` now exclude missing fields,
+  matching MongoDB without changing the missing-field behavior of non-null
+  negation.
+- Unsupported document values now raise `InvalidDocument` before storage is
+  changed, with the original document and nested path context. When PyMongo is
+  installed, the error is catchable through both BSON's `InvalidDocument` and
+  `PyMongoError`; dependency-free callers retain the TinyMongo error hierarchy.
 - Remote SQL duplicate races are reread and replanned so ordered and unordered
   batches retain their documented partial-write behavior; database commit
   failures now propagate instead of being reported as successful writes.

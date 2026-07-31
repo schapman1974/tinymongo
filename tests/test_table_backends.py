@@ -326,6 +326,41 @@ def test_matches_filter_operator_edges():
     assert not matches_filter(doc, {"name": {"$unknown": "Ada"}})
 
 
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ({}, (False, False, False, True, True)),
+        ({"value": None}, (False, False, False, True, True)),
+        ({"value": 0}, (True, True, False, False, False)),
+        ({"value": 1}, (True, True, True, True, True)),
+        ({"value": []}, (True, True, True, True, True)),
+        ({"value": [None]}, (False, False, False, True, True)),
+        ({"value": [0]}, (True, True, False, False, False)),
+        ({"value": [None, 0]}, (False, False, False, False, False)),
+    ],
+)
+def test_null_negation_matches_mongodb_missing_and_array_semantics(document, expected):
+    queries = [
+        {"value": {"$ne": None}},
+        {"value": {"$nin": [None]}},
+        {"value": {"$nin": [None, 0]}},
+        {"value": {"$ne": 0}},
+        {"value": {"$nin": [0]}},
+    ]
+
+    assert tuple(matches_filter(document, query) for query in queries) == expected
+    if not document:
+        assert not matches_filter({"nested": {}}, {"nested.value": {"$ne": None}})
+        assert not matches_filter(
+            {"nested": {}},
+            {"nested.value": {"$nin": [None, "blocked"]}},
+        )
+        assert not matches_filter(
+            {"nested": {}},
+            {"nested.value": {"$nin": (None, "blocked")}},
+        )
+
+
 def test_array_equality_supports_exact_arrays_and_scalar_membership():
     document = {"items": [1, 2], "nested": [["a", "b"], ["c"]]}
 

@@ -49,6 +49,15 @@ with the follow-up audit of his
   numbers, and equivalent numeric representations share one key.
 - [x] Use typed physical `_id` keys on SQL, DuckDB, and Parquet backends without
   breaking reads, replacements, or deletes for existing stringified keys.
+- [x] Generate native `ObjectId` values for implicit IDs when optional BSON
+  support is installed across inserts and upserts, while keeping dependency-free
+  UUID fallback IDs and the explicit string-returning `generate_id()` helper.
+- [x] Match MongoDB's null-negation boundary: `$ne: None` and `$nin` lists
+  containing `None` exclude missing fields, while non-null negation continues
+  to include them.
+- [x] Raise `InvalidDocument` before writes containing unsupported values, with
+  original-document and nested-path context plus BSON, PyMongo, and
+  dependency-free TinyMongo catch compatibility.
 - [x] Preserve embedded-document field order and strict-JSON non-finite floats
   in remote SQL rows while continuing to read legacy rows without an ordered
   copy.
@@ -87,8 +96,11 @@ with the follow-up audit of his
   collection filtering, current error/result shapes, and `bytearray`
   normalization. Also distinguish PyMongo from a core dependency: it is an
   optional runtime dependency for ObjectId and nonzero Binary values, patching,
-  and conditional exception inheritance. Correct the remaining constructor,
-  sync-laziness, validation, sort, locking, environment-variable,
+  and conditional exception inheritance. Document the native automatic
+  `ObjectId` versus explicit string `generate_id()` behavior, null-negation
+  handling for missing fields, and the contextual `InvalidDocument` hierarchy.
+  Correct the remaining constructor, sync-laziness, validation, sort,
+  locking, environment-variable,
   capabilities-detection, portable-error-catching, index-migration wording,
   and the contradictory async `db.name` collection example identified by the
   guide audit.
@@ -102,10 +114,13 @@ with the follow-up audit of his
 - [ ] Extend unique-index tokens to supported BSON values through
   [#75](https://github.com/schapman1974/tinymongo/issues/75) and
   [#76](https://github.com/schapman1974/tinymongo/issues/76).
-- [ ] Rerun Mike's two focused reproductions, resume the real Talk Python
-  acceptance run, and publish the MongoDB, memory, and SQLite baseline through
-  [#72](https://github.com/schapman1974/tinymongo/issues/72) and
-  [#136](https://github.com/schapman1974/tinymongo/issues/136).
+- [x] Run the real Talk Python acceptance suite against MongoDB and TinyMongo
+  SQLite: both passed all 590 tests, and the 81,017-document application
+  database migrated with zero rejections.
+- [ ] Rerun Mike's TM-009 and TM-010 reproductions plus the invalid-document
+  write path after these fixes merge, then publish the MongoDB, memory, and
+  SQLite baseline through [#72](https://github.com/schapman1974/tinymongo/issues/72)
+  and [#136](https://github.com/schapman1974/tinymongo/issues/136).
 
 Application-compatibility work:
 
@@ -114,7 +129,9 @@ Application-compatibility work:
     off-thread storage calls, async cleanup, and sync-result parity.
   - [x] Run the application-derived compatibility contracts through both the
     synchronous and asynchronous APIs.
-  - [ ] Run the complete async application contract against Talk Python and
+  - [x] Run the complete application suite through the async acceptance path:
+    MongoDB and TinyMongo SQLite each passed 590 tests.
+  - [ ] Complete the write-heavy admin and multi-worker SQLite follow-up, and
     record any remaining differences.
 - [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
 - [ ] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
@@ -122,7 +139,8 @@ Application-compatibility work:
   - [ ] Add UUID, Decimal128, and regular-expression round trips.
 - [ ] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
   - [x] Talk Python query slice: scalar-to-array equality, combined `$nin`,
-    `$not`, `$regex`, case-insensitive `$options`, and missing fields.
+    `$not`, `$regex`, case-insensitive `$options`, and Mongo-correct
+    null-versus-missing negation.
   - [ ] Prioritize the remaining query and update candidates from measured
     application failures.
 - [ ] [#102: Optional PyMongo-version adaptation](https://github.com/schapman1974/tinymongo/issues/102)
@@ -133,8 +151,10 @@ Application-compatibility work:
     sync/async backend and MongoDB contract matrix.
   - [x] Provide an external pytest runner that patches both PyMongo client
     classes before application tests are imported.
-  - [ ] Run the real Talk Python suite through the runner and publish its
-    reference, memory, and SQLite baseline.
+  - [x] Run the real Talk Python suite through the runner against the MongoDB
+    reference and TinyMongo SQLite, with 590 passing tests on each.
+  - [ ] Rerun the new focused cases and publish the reference, memory, and
+    SQLite report artifacts.
 - [ ] [#87: Differential compatibility fuzzing](https://github.com/schapman1974/tinymongo/issues/87)
 
 Exit criteria:
@@ -323,7 +343,8 @@ Exit criteria:
    contract, and publish the baseline compatibility score.
    - [x] Exercise the Talk-Python-derived contract slice through sync and async.
    - [x] Add deterministic reporting and an external application test runner.
-   - [ ] Complete the real application run with Mike and record every difference.
+   - [x] Complete the real application run with Mike and record every difference.
+   - [ ] Rerun the three follow-up cases and publish the dimensioned baseline.
 5. [ ] Build aggregation core after the real-application acceptance path works.
 6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
    compatibility gaps.

@@ -6,11 +6,67 @@ import pytest
 
 import tinymongo as tm
 from tinymongo import bson_codec, bson_types
+from tinymongo.errors import InvalidDocument, TinyMongoError
 
 
 bson = pytest.importorskip("bson")
 ObjectId = bson.ObjectId
 Binary = bson.Binary
+
+
+def test_invalid_document_matches_tinymongo_bson_and_pymongo_hierarchies():
+    from bson.errors import InvalidDocument as BsonInvalidDocument
+    from pymongo.errors import InvalidDocument as PyMongoInvalidDocument
+    from pymongo.errors import PyMongoError
+
+    document = {"value": {1, 2}}
+
+    with pytest.raises(InvalidDocument) as caught:
+        bson_codec.dumps(document)
+
+    error = caught.value
+    assert isinstance(error, TinyMongoError)
+    assert isinstance(error, BsonInvalidDocument)
+    assert isinstance(error, PyMongoInvalidDocument)
+    assert isinstance(error, PyMongoError)
+    assert not isinstance(error, TypeError)
+    assert error.document is document
+
+
+def test_invalid_document_reports_nested_path_and_write_context():
+    document = {
+        "_id": "broken",
+        "outer": {"items": [{"valid": 1}, {"unsupported": {1, 2}}]},
+    }
+
+    with pytest.raises(InvalidDocument) as caught:
+        bson_codec.dumps(
+            document,
+            document_context="collection 'app.items', document index 4",
+        )
+
+    message = str(caught.value)
+    assert caught.value.document is document
+    assert "collection 'app.items', document index 4" in message
+    assert "$['outer']['items'][1]['unsupported']" in message
+    assert "cannot encode object" in message
+    assert "<class 'set'>" in message
+
+
+def test_invalid_document_bounds_the_offending_value_representation():
+    class VerboseUnsupportedValue:
+        def __repr__(self):
+            return "unsupported-" + ("x" * 500)
+
+    document = {"value": VerboseUnsupportedValue()}
+
+    with pytest.raises(InvalidDocument) as caught:
+        bson_codec.dumps(document)
+
+    message = str(caught.value)
+    assert "unsupported-" in message
+    assert "..." in message
+    assert "x" * 200 not in message
 
 
 def _extended_document():
