@@ -3,15 +3,15 @@
 ## [Unreleased]
 
 ### Added
-- A shared, backend-independent aggregation engine for `$match`, `$project`,
-  `$set`, `$addFields`, `$unset`, and `$group`, with `$ifNull`, `$literal`, and
-  `$size` projection expressions, `$$REMOVE`, field-path or null group keys,
-  and `$min`, `$max`, and `$sum` accumulators across synchronous and
-  asynchronous clients.
+- A shared, backend-independent aggregation engine for `$match`, `$sort`,
+  `$skip`, `$limit`, `$count`, `$project`, `$set`, `$addFields`, `$unset`, and
+  `$group`, with `$ifNull`, `$literal`, and `$size` projection expressions,
+  `$$REMOVE`, field-path or null group keys, and `$min`, `$max`, and `$sum`
+  accumulators across synchronous and asynchronous clients.
 - Cross-backend and real-MongoDB aggregation contracts based on production
   application pipelines, including full inclusion/exclusion and computed
-  projection modes, dotted array writes, BSON ordering, null/missing values,
-  empty inputs, and async cursor behavior.
+  projection modes, dotted array writes and sorts, BSON ordering, pagination,
+  counts, null/missing values, empty inputs, and async cursor behavior.
 
 ### Changed
 - Aggregation capability reporting now describes the exact supported stages,
@@ -23,6 +23,8 @@
   inside another array before reaching the requested field.
 - Aggregation projections preserve source BSON field order for retained fields
   and append directly computed fields in specification order.
+- Cursor and aggregation sorting now traverse dotted paths through multi-item
+  arrays consistently instead of treating those values as missing.
 
 ## [1.2.1] - 2026-07-31
 

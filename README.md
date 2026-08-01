@@ -483,13 +483,13 @@ Broader BSON comparison across query ranges and indexes remains tracked in
 ## Aggregation core subset
 
 `Collection.aggregate()` supports the production-driven core of `$match`,
-`$project`, `$set`, `$addFields`, `$unset`, and `$group`. `$match` uses the same
-query operators as `find()`. `$project` supports inclusion, exclusion, renamed
-or computed fields, nested specifications, dotted output paths through arrays,
-and MongoDB's special `_id` rules. The available projection expressions are
-`$ifNull`, `$literal`, and `$size`; `$$REMOVE` conditionally omits or removes a
-field. `$group` accepts a field-path or `None` `_id` and the `$min`, `$max`, and
-`$sum` accumulators:
+`$sort`, `$skip`, `$limit`, `$count`, `$project`, `$set`, `$addFields`, `$unset`,
+and `$group`. `$match` uses the same query operators as `find()`. `$project`
+supports inclusion, exclusion, renamed or computed fields, nested
+specifications, dotted output paths through arrays, and MongoDB's special
+`_id` rules. The available projection expressions are `$ifNull`, `$literal`,
+and `$size`; `$$REMOVE` conditionally omits or removes a field. `$group` accepts
+a field-path or `None` `_id` and the `$min`, `$max`, and `$sum` accumulators:
 
 ```python
 activity = events.aggregate(
@@ -513,11 +513,20 @@ rows = activity.to_list()
 ```
 
 In the async API, await `aggregate()` to obtain an async cursor, then use
-`async for` or `await cursor.to_list()`. `$set` and `$addFields` are aliases that
-retain the input document, support nested and dotted array-aware writes, and
-evaluate every right-hand expression against the original stage input. `$unset`
-accepts one field name or a nonempty list of field names and follows exclusion
-projection behavior. Numeric array-index paths remain unsupported.
+`async for` or `await cursor.to_list()`. `$sort` accepts up to 32 ascending or
+descending keys and shares `find().sort()` field-path, array, and BSON ordering
+rules. `$skip` accepts a nonnegative 64-bit integer, `$limit` requires a positive
+64-bit integer, and `$count` emits one named count document—or no document for
+empty input. Integral floating-point values are accepted for sort directions,
+skip, and limit like MongoDB. Compound sorts preserve values from the same
+array element and reject independent parallel arrays; canonical numeric path
+parts select array indexes.
+
+`$set` and `$addFields` are aliases that retain the input document, support
+nested and dotted array-aware writes, and evaluate every right-hand expression
+against the original stage input. `$unset` accepts one field name or a nonempty
+list of field names and follows exclusion projection behavior. Numeric
+array-index paths remain unsupported for projection output.
 
 `$min` and `$max` ignore null and missing inputs unless every input is null or
 missing, in which case they return null. `$sum` ignores missing and nonnumeric
@@ -530,8 +539,8 @@ Other stages, accumulators, expressions, and aggregation options raise
 `client.capabilities()["aggregation"]` value lists the exact supported stages,
 accumulators, and expressions; `client.supports("aggregation")` reports whether
 any aggregation subset is available. In particular, `$replaceRoot`,
-`$replaceWith`, variables other than `$$REMOVE`, and MongoDB's broader expression
-language are not part of this slice yet.
+`$replaceWith`, `$meta` sort expressions, variables other than `$$REMOVE`, and
+MongoDB's broader expression language are not part of this slice yet.
 
 ## ObjectId, datetime, and binary values
 

@@ -156,6 +156,21 @@ def test_remote_sql_aggregation_core(backend, env_name):
                 "items": 2,
             }
         ]
+
+        assert docs.aggregate(
+            [
+                {"$sort": {"score": -1, "_id": 1}},
+                {"$skip": 1},
+                {"$limit": 1},
+                {"$project": {"_id": 1, "score": 1}},
+            ]
+        ).to_list() == [{"_id": 2, "score": 5}]
+        assert docs.aggregate(
+            [
+                {"$match": {"team": "alpha"}},
+                {"$count": "matched"},
+            ]
+        ).to_list() == [{"matched": 2}]
     finally:
         docs.drop()
         client.close()
@@ -203,6 +218,24 @@ def test_remote_sql_async_aggregation_projection(backend, env_name):
                 ]
             )
             assert await cursor.to_list() == [{"_id": "python", "total": 2}]
+
+            page = await docs.aggregate(
+                [
+                    {"$sort": {"_id": -1}},
+                    {"$skip": 1},
+                    {"$limit": 2},
+                    {"$project": {"_id": 1}},
+                ]
+            )
+            assert await page.to_list() == [{"_id": 3}, {"_id": 2}]
+
+            count = await docs.aggregate(
+                [
+                    {"$limit": 3},
+                    {"$count": "selected"},
+                ]
+            )
+            assert await count.to_list() == [{"selected": 3}]
         finally:
             await docs.drop()
             await client.close()

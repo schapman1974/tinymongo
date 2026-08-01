@@ -133,6 +133,10 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
     assert capabilities["aggregation"] == {
         "stages": (
             "$match",
+            "$sort",
+            "$skip",
+            "$limit",
+            "$count",
             "$project",
             "$set",
             "$addFields",

@@ -176,9 +176,10 @@ Exit criteria:
   - [x] Land the first shared sync/async engine slice with pipeline validation,
     compatible cursors, structured capability reporting, and clear unsupported
     feature errors.
-- [ ] [#96: Basic aggregation stages](https://github.com/schapman1974/tinymongo/issues/96)
+- [x] [#96: Basic aggregation stages](https://github.com/schapman1974/tinymongo/issues/96)
   - [x] Implement `$match` through the existing query matcher.
-  - [ ] Add the remaining basic stages.
+  - [x] Add `$sort`, `$skip`, `$limit`, and `$count` through the shared
+    synchronous and asynchronous engine.
 - [x] [#97: Aggregation projection stages](https://github.com/schapman1974/tinymongo/issues/97)
   - [x] Add the application-required `$project`, `$size`, and `$ifNull` slice.
   - [x] Complete the initial projection scope with full `$project` modes,
@@ -358,6 +359,7 @@ Exit criteria:
    - [x] Deliver the shared `$match` plus `$group`/`$min`/`$max`/`$sum` slice
      across synchronous and asynchronous APIs.
    - [x] Add the measured `$project`/`$size`/`$ifNull` slice.
+   - [x] Complete the basic `$sort`, `$skip`, `$limit`, and `$count` stages.
    - [ ] Complete the second-application acceptance rerun with Mike.
 6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
    compatibility gaps.
