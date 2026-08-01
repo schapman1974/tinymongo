@@ -4,6 +4,8 @@ from datetime import datetime
 
 import pytest
 
+from .support import observe
+
 
 pytestmark = pytest.mark.contract
 
@@ -326,6 +328,161 @@ def test_dotted_paths_preserve_empty_array_traversals(contract_target):
     assert any(row == {"_id": [], "count": 2} for row in rows)
     assert any(row == {"_id": [3], "count": 1} for row in rows)
     assert any(row == {"_id": None, "count": 1} for row in rows)
+
+
+def test_project_size_ifnull_application_rollup(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": 1, "course_id": "python", "lectures": ["a", "b"]},
+            {"_id": 2, "course_id": "python", "lectures": []},
+            {"_id": 3, "course_id": "python", "lectures": None},
+            {"_id": 4, "course_id": "python"},
+            {"_id": 5, "course_id": "mongo", "lectures": ["one"]},
+            {"_id": 6, "course_id": "excluded", "lectures": [1, 2, 3]},
+        ]
+    )
+
+    rows = list(
+        collection.aggregate(
+            [
+                {"$match": {"course_id": {"$in": ["python", "mongo"]}}},
+                {
+                    "$project": {
+                        "course_id": 1,
+                        "count": {"$size": {"$ifNull": ["$lectures", []]}},
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$course_id",
+                        "total": {"$sum": "$count"},
+                    }
+                },
+            ]
+        )
+    )
+
+    assert _by_id(rows) == {
+        "python": {"_id": "python", "total": 2},
+        "mongo": {"_id": "mongo", "total": 1},
+    }
+
+
+def test_project_inclusion_id_and_expression_contract(contract_target):
+    collection = contract_target.collection
+    collection.insert_one(
+        {
+            "_id": 1,
+            "course_id": "python",
+            "lectures": ["one", "two"],
+            "profile": {"name": "Ada", "secret": "hidden"},
+        }
+    )
+
+    assert list(
+        collection.aggregate(
+            [
+                {
+                    "$project": {
+                        "course_id": 1,
+                        "profile.name": 1,
+                        "copied": "$profile.name",
+                        "fallback": {
+                            "$ifNull": ["$missing", "$profile.name", "unknown"]
+                        },
+                    }
+                }
+            ]
+        )
+    ) == [
+        {
+            "_id": 1,
+            "course_id": "python",
+            "profile": {"name": "Ada"},
+            "copied": "Ada",
+            "fallback": "Ada",
+        }
+    ]
+    assert list(
+        collection.aggregate(
+            [
+                {
+                    "$project": {
+                        "_id": 0,
+                        "course_id": 1,
+                        "count": {"$size": "$lectures"},
+                    }
+                }
+            ]
+        )
+    ) == [{"course_id": "python", "count": 2}]
+
+
+def test_project_dotted_inclusion_preserves_array_shape(contract_target):
+    collection = contract_target.collection
+    collection.insert_one(
+        {
+            "_id": 1,
+            "items": [
+                {"name": "intro", "secret": 1},
+                {},
+                {"name": "loops", "secret": 2},
+            ],
+        }
+    )
+
+    assert list(collection.aggregate([{"$project": {"_id": 0, "items.name": 1}}])) == [
+        {"items": [{"name": "intro"}, {}, {"name": "loops"}]}
+    ]
+
+
+def test_project_expression_argument_and_lazy_evaluation_contract(contract_target):
+    collection = contract_target.collection
+    collection.insert_one(
+        {
+            "_id": 1,
+            "zero": 0,
+            "not_an_array": "bad",
+            "values": [1, 2, 3],
+        }
+    )
+
+    assert list(
+        collection.aggregate(
+            [
+                {
+                    "$project": {
+                        "_id": 0,
+                        "field_size": {"$size": ["$values"]},
+                        "literal_size": {"$size": [[1, 2]]},
+                        "literal_empty_size": {"$size": [[]]},
+                        "lazy": {"$ifNull": ["$zero", {"$size": "$not_an_array"}]},
+                        "missing_ifnull": {"$ifNull": ["$missing_one", "$missing_two"]},
+                        "tuple_literal": (1, 2),
+                        "tuple_size": {"$size": ((1, 2),)},
+                    }
+                }
+            ]
+        )
+    ) == [
+        {
+            "field_size": 3,
+            "literal_size": 2,
+            "literal_empty_size": 0,
+            "lazy": 0,
+            "tuple_literal": [1, 2],
+            "tuple_size": 2,
+        }
+    ]
+
+    for operand in ([], [1, 2]):
+        outcome = observe(
+            lambda operand=operand: list(
+                collection.aggregate([{"$project": {"invalid": {"$size": operand}}}])
+            )
+        )
+        assert outcome.error == "operation_failure"
 
 
 def test_aggregate_cursor_consumes_in_chunks(contract_target):

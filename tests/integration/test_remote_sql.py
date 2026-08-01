@@ -1,3 +1,4 @@
+import asyncio
 from collections import UserDict
 import os
 import math
@@ -6,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 import tinymongo as tm
+from tinymongo.asyncio import AsyncTinyMongoClient
 from tinymongo.errors import (
     BulkWriteError,
     DuplicateKeyError,
@@ -110,8 +112,8 @@ def test_remote_sql_aggregation_core(backend, env_name):
     try:
         docs.insert_many(
             [
-                {"_id": 1, "team": "alpha", "score": 2},
-                {"_id": 2, "team": "alpha", "score": 5},
+                {"_id": 1, "team": "alpha", "score": 2, "items": [1, 2]},
+                {"_id": 2, "team": "alpha", "score": 5, "items": None},
                 {"_id": 3, "team": "beta", "score": 9},
             ]
         )
@@ -120,20 +122,78 @@ def test_remote_sql_aggregation_core(backend, env_name):
             [
                 {"$match": {"score": {"$lte": 5}}},
                 {
+                    "$project": {
+                        "team": 1,
+                        "score": 1,
+                        "item_count": {"$size": {"$ifNull": ["$items", []]}},
+                    }
+                },
+                {
                     "$group": {
                         "_id": "$team",
                         "minimum": {"$min": "$score"},
                         "maximum": {"$max": "$score"},
                         "total": {"$sum": "$score"},
+                        "items": {"$sum": "$item_count"},
                     }
                 },
             ]
         ).to_list()
 
-        assert rows == [{"_id": "alpha", "minimum": 2, "maximum": 5, "total": 7}]
+        assert rows == [
+            {
+                "_id": "alpha",
+                "minimum": 2,
+                "maximum": 5,
+                "total": 7,
+                "items": 2,
+            }
+        ]
     finally:
         docs.drop()
         client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_async_aggregation_projection(backend, env_name):
+    dsn, database, prefix = _remote_target(backend, env_name)
+    collection = prefix + "_async_aggregation"
+
+    async def scenario():
+        client = AsyncTinyMongoClient(backend=backend, dsn=dsn)
+        docs = client[database][collection]
+        try:
+            await docs.insert_many(
+                [
+                    {"_id": 1, "course_id": "python", "lectures": [1, 2]},
+                    {"_id": 2, "course_id": "python", "lectures": None},
+                    {"_id": 3, "course_id": "python"},
+                    {"_id": 4, "course_id": "excluded", "lectures": [1, 2, 3]},
+                ]
+            )
+            cursor = await docs.aggregate(
+                [
+                    {"$match": {"course_id": {"$in": ["python"]}}},
+                    {
+                        "$project": {
+                            "course_id": 1,
+                            "count": {"$size": {"$ifNull": ["$lectures", []]}},
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": "$course_id",
+                            "total": {"$sum": "$count"},
+                        }
+                    },
+                ]
+            )
+            assert await cursor.to_list() == [{"_id": "python", "total": 2}]
+        finally:
+            await docs.drop()
+            await client.close()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)

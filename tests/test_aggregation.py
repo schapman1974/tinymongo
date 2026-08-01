@@ -162,6 +162,243 @@ def test_leading_match_is_pushed_into_the_collection_query(monkeypatch):
     assert queries == [{}]
 
 
+def test_project_includes_fields_and_computes_against_original_document():
+    collection = _collection("aggregation-project-computed")
+    stored = {
+        "_id": 1,
+        "name": "Ada",
+        "count": 99,
+        "zero": 0,
+        "lectures": ["intro", "loops"],
+        "profile": {"email": "ada@example.com", "secret": "hidden"},
+    }
+    collection.insert_one(stored)
+    pipeline = [
+        {
+            "$project": {
+                "_id": 0,
+                "name": 1,
+                "profile.email": 1,
+                "alias": "$name",
+                "count": {"$size": {"$ifNull": ["$lectures", []]}},
+                "old_count": "$count",
+                "choice": {"$ifNull": ["$missing", "$zero", "fallback"]},
+                "omitted": "$missing",
+            }
+        }
+    ]
+    original_pipeline = copy.deepcopy(pipeline)
+
+    assert collection.aggregate(pipeline).to_list() == [
+        {
+            "name": "Ada",
+            "profile": {"email": "ada@example.com"},
+            "alias": "Ada",
+            "count": 2,
+            "old_count": 99,
+            "choice": 0,
+        }
+    ]
+    assert pipeline == original_pipeline
+    assert collection.find_one({"_id": 1}) == stored
+
+
+def test_project_default_id_special_id_exclusion_and_missing_inclusion():
+    collection = _collection("aggregation-project-id")
+    collection.insert_one(
+        {
+            "_id": 1,
+            "name": "Ada",
+            "secret": "hidden",
+            "profile": {"name": "Ada", "secret": "hidden"},
+        }
+    )
+
+    assert collection.aggregate(
+        [{"$project": {"name": 1, "missing": 1, "copy": "$name"}}]
+    ).to_list() == [{"_id": 1, "name": "Ada", "copy": "Ada"}]
+    assert collection.aggregate([{"$project": {"profile": {"name": 1}}}]).to_list() == [
+        {"_id": 1, "profile": {"name": "Ada"}}
+    ]
+    assert collection.aggregate([{"$project": {"_id": 0}}]).to_list() == [
+        {
+            "name": "Ada",
+            "secret": "hidden",
+            "profile": {"name": "Ada", "secret": "hidden"},
+        }
+    ]
+
+
+def test_project_ifnull_preserves_non_null_values_and_size_accepts_arrays():
+    collection = _collection("aggregation-project-values")
+    collection.insert_one(
+        {
+            "_id": 1,
+            "zero": 0,
+            "false": False,
+            "empty": [],
+            "nullable": None,
+            "values": [1, 2, 3],
+        }
+    )
+
+    assert collection.aggregate(
+        [
+            {
+                "$project": {
+                    "_id": 0,
+                    "zero": {"$ifNull": ["$zero", 10]},
+                    "false": {"$ifNull": ["$false", True]},
+                    "empty": {"$ifNull": ["$empty", [1]]},
+                    "fallback": {"$ifNull": ["$missing", "$nullable", "last"]},
+                    "missing_fallback": {"$ifNull": ["$missing", "$also_missing"]},
+                    "lazy": {"$ifNull": ["$zero", {"$size": "$nullable"}]},
+                    "size": {"$size": ["$values"]},
+                    "empty_size": {"$size": {"$ifNull": ["$missing", []]}},
+                    "literal_size": {"$size": [[1, 2]]},
+                    "literal_empty_size": {"$size": [[]]},
+                }
+            }
+        ]
+    ).to_list() == [
+        {
+            "zero": 0,
+            "false": False,
+            "empty": [],
+            "fallback": "last",
+            "lazy": 0,
+            "size": 3,
+            "empty_size": 0,
+            "literal_size": 2,
+            "literal_empty_size": 0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"_id": 1},
+        {"_id": 1, "value": None},
+        {"_id": 1, "value": "three"},
+        {"_id": 1, "value": {"nested": True}},
+        {"_id": 1, "value": 3},
+    ],
+)
+def test_project_size_rejects_non_array_runtime_values(document):
+    collection = _collection("aggregation-project-size-type")
+    collection.insert_one(document)
+
+    with pytest.raises(OperationFailure, match=r"\$size.*array"):
+        collection.aggregate([{"$project": {"size": {"$size": "$value"}}}])
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "error", "message"),
+    [
+        ([{"$project": []}], OperationFailure, r"\$project"),
+        ([{"$project": {}}], OperationFailure, "non-empty"),
+        (
+            [{"$project": {"secret": 0}}],
+            TinyMongoNotSupportedError,
+            "exclusion",
+        ),
+        (
+            [{"$project": {"profile": {"secret": 0}}}],
+            TinyMongoNotSupportedError,
+            "exclusion",
+        ),
+        (
+            [{"$project": {"nested.count": {"$size": "$values"}}}],
+            TinyMongoNotSupportedError,
+            "dotted output",
+        ),
+        (
+            [{"$project": {"value": {"$add": [1, 2]}}}],
+            TinyMongoNotSupportedError,
+            r"\$add",
+        ),
+        (
+            [{"$project": {"value": "$a..b"}}],
+            OperationFailure,
+            "components",
+        ),
+        (
+            [{"$project": {"value": {"$size": {"$ifNull": ["$a.$bad", []]}}}}],
+            OperationFailure,
+            "start with",
+        ),
+        (
+            [{"$project": {"value": {"$ifNull": "$missing"}}}],
+            OperationFailure,
+            r"\$ifNull",
+        ),
+        (
+            [{"$project": {"value": {"$ifNull": ["$missing"]}}}],
+            OperationFailure,
+            r"\$ifNull",
+        ),
+        (
+            [{"$project": {"value": {"$size": []}}}],
+            OperationFailure,
+            r"\$size",
+        ),
+        (
+            [{"$project": {"value": {"$size": [1, 2]}}}],
+            OperationFailure,
+            r"\$size",
+        ),
+        (
+            [{"$project": {"value": {"$size": "$items", "extra": 1}}}],
+            OperationFailure,
+            "one operator",
+        ),
+        (
+            [{"$project": {"parent": 1, "parent.child": "$value"}}],
+            OperationFailure,
+            "Path collision",
+        ),
+        (
+            [{"$project": {"parent.child": "$value", "parent": 1}}],
+            OperationFailure,
+            "Path collision",
+        ),
+        (
+            [
+                {
+                    "$group": {
+                        "_id": None,
+                        "total": {"$sum": {"$size": "$items"}},
+                    }
+                }
+            ],
+            TinyMongoNotSupportedError,
+            r"\$size",
+        ),
+        (
+            [{"$group": {"_id": "$a.", "total": {"$sum": 1}}}],
+            OperationFailure,
+            "end with",
+        ),
+        (
+            [{"$group": {"_id": None, "total": {"$sum": "$a\x00b"}}}],
+            OperationFailure,
+            "null bytes",
+        ),
+    ],
+)
+def test_project_validation_fails_before_storage_read(pipeline, error, message):
+    client = tinymongo.TinyMongoClient(
+        "memory://aggregation-project-validation-{0}".format(uuid4().hex),
+        backend="memory",
+    )
+    collection = client.db.items
+
+    with pytest.raises(error, match=message):
+        collection.aggregate(pipeline)
+    assert client.db.list_collection_names() == []
+
+
 @pytest.mark.parametrize(
     ("pipeline", "message"),
     [
@@ -288,9 +525,11 @@ def test_capability_descriptions_are_fresh_and_supports_is_true():
     first["stages"] = ()
 
     client = tinymongo.TinyMongoClient(backend="memory")
-    assert second["stages"] == ("$match", "$group")
+    assert second["stages"] == ("$match", "$project", "$group")
+    assert second["expressions"] == ("$ifNull", "$size")
     assert client.capabilities()["aggregation"]["stages"] == (
         "$match",
+        "$project",
         "$group",
     )
     assert client.supports("aggregation") is True
@@ -303,7 +542,12 @@ def test_expression_literals_are_copied_and_unsupported_paths_fail():
     result["literal"][1]["value"] = 3
 
     assert expression == {"literal": [1, {"value": 2}]}
-    assert context.evaluate({}, (1, 2)) == (1, 2)
+    assert context.evaluate({}, {"missing": "$missing"}) == {}
+    assert context.evaluate({}, (1, 2)) == [1, 2]
+    assert context.evaluate({}, {"$size": ((1, 2),)}, ("$size",)) == 2
+    assert context.resolve_field_path({"reference": {"$id": 7}}, "$reference.$id") == 7
+    with pytest.raises(OperationFailure, match=r"\$ifNull"):
+        context.evaluate({}, {"$ifNull": ["$missing"]}, ("$ifNull",))
     with pytest.raises(TinyMongoNotSupportedError, match=r"\$add"):
         context.evaluate({}, {"$add": [1, 2]})
     for path in ("field", "$"):
@@ -368,8 +612,8 @@ def test_async_aggregate_returns_async_cursor():
         collection = client.db.items
         await collection.insert_many(
             [
-                {"_id": 1, "group": "a", "value": 2},
-                {"_id": 2, "group": "a", "value": 3},
+                {"_id": 1, "group": "a", "value": 2, "items": [1, 2]},
+                {"_id": 2, "group": "a", "value": 3, "items": None},
             ]
         )
         cursor = await collection.aggregate(
@@ -382,6 +626,21 @@ def test_async_aggregate_returns_async_cursor():
         assert [row async for row in cursor] == [{"_id": "a", "total": 5}]
         await cursor.close()
         assert cursor.alive is False
+        projected = await collection.aggregate(
+            [
+                {
+                    "$project": {
+                        "_id": 0,
+                        "group": 1,
+                        "count": {"$size": {"$ifNull": ["$items", []]}},
+                    }
+                }
+            ]
+        )
+        assert await projected.to_list() == [
+            {"group": "a", "count": 2},
+            {"group": "a", "count": 0},
+        ]
         empty = await collection.aggregate([{"$match": {"_id": "missing"}}])
         assert empty.alive is False
         async with await collection.aggregate([]) as managed:

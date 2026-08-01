@@ -482,19 +482,26 @@ Broader BSON comparison across query ranges and indexes remains tracked in
 
 ## Aggregation core subset
 
-`Collection.aggregate()` supports the production-driven core of `$match` and
-`$group`. `$match` uses the same query operators as `find()`. `$group` accepts a
-field-path or `None` `_id` and the `$min`, `$max`, and `$sum` accumulators:
+`Collection.aggregate()` supports the production-driven core of `$match`,
+`$project`, and `$group`. `$match` uses the same query operators as `find()`.
+`$project` supports inclusion fields, `_id: 0`, and top-level computed fields
+using `$size` and `$ifNull`. `$group` accepts a field-path or `None` `_id` and
+the `$min`, `$max`, and `$sum` accumulators:
 
 ```python
 activity = events.aggregate(
     [
-        {"$match": {"user_id": user_id}},
+        {"$match": {"course_id": {"$in": course_ids}}},
+        {
+            "$project": {
+                "course_id": 1,
+                "count": {"$size": {"$ifNull": ["$lectures", []]}},
+            }
+        },
         {
             "$group": {
                 "_id": "$course_id",
-                "last_activity": {"$max": "$created_date"},
-                "plays": {"$sum": 1},
+                "total": {"$sum": "$count"},
             }
         },
     ]
@@ -503,7 +510,9 @@ rows = activity.to_list()
 ```
 
 In the async API, await `aggregate()` to obtain an async cursor, then use
-`async for` or `await cursor.to_list()`. Dotted field paths are supported.
+`async for` or `await cursor.to_list()`. Dotted field paths and dotted inclusion
+projections are supported. Computed dotted output paths and exclusion of fields
+other than `_id` remain outside this measured projection slice and fail clearly.
 `$min` and `$max` ignore null and missing inputs unless every input is null or
 missing, in which case they return null. `$sum` ignores missing and nonnumeric
 values, and an empty input produces no groups, including for `_id: None`.
