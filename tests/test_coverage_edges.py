@@ -19,6 +19,7 @@ from tinymongo.errors import (
     DuplicateKeyError,
     OperationFailure,
     TinyMongoNotSupportedError,
+    WriteError,
 )
 from tinymongo.results import (
     DeleteResult,
@@ -741,10 +742,12 @@ def test_update_operator_error_edges(tmp_path):
         c.update_one({"_id": 1}, {"$set": {"x": 1}, "plain": 2})
     with pytest.raises(ValueError, match="requires a dict"):
         c.update_one({"_id": 1}, {"$set": "not-a-dict"})
-    with pytest.raises(TypeError):
+    with pytest.raises(WriteError, match="\\$inc requires numeric values") as one:
         c.update_one({"_id": 1}, {"$inc": {"count": 1}})
-    with pytest.raises(TypeError):
+    assert one.value.code == 14
+    with pytest.raises(WriteError, match="\\$inc requires numeric values") as many:
         c.update_many({"_id": 1}, {"$inc": {"count": 1}})
+    assert many.value.code == 14
     with pytest.raises(TypeError):
         c.replace_one({"_id": 1}, object())
 

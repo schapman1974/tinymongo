@@ -12,6 +12,7 @@ from tinymongo.errors import InvalidDocument, TinyMongoError
 bson = pytest.importorskip("bson")
 ObjectId = bson.ObjectId
 Binary = bson.Binary
+Decimal128 = bson.Decimal128
 
 
 def test_invalid_document_matches_tinymongo_bson_and_pymongo_hierarchies():
@@ -116,6 +117,51 @@ def test_codec_tags_are_valid_readable_json():
         "__tinymongo_type_v1__": "datetime",
         "value": document["created"].isoformat(),
     }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        Decimal128("1234567890.00100"),
+        Decimal128("-0"),
+        Decimal128("NaN"),
+        Decimal128("sNaN"),
+        Decimal128("Infinity"),
+    ],
+)
+def test_codec_round_trips_exact_decimal128_bid_values(value):
+    encoded = bson_codec.encode_value(value)
+    restored = bson_codec.decode_value(encoded)
+
+    assert encoded == {
+        "__tinymongo_type_v1__": "decimal128",
+        "value": value.bid.hex(),
+    }
+    assert isinstance(restored, Decimal128)
+    assert restored.bid == value.bid
+
+
+def test_decimal128_decode_explains_optional_dependency(monkeypatch):
+    value = Decimal128("19.95")
+    encoded = {
+        "__tinymongo_type_v1__": "decimal128",
+        "value": value.bid.hex(),
+    }
+    monkeypatch.setattr(bson_codec, "_Decimal128", None)
+
+    assert bson_codec.bson_available() is False
+    with pytest.raises(ImportError, match=r"pip install 'tinymongo\[bson\]'"):
+        bson_codec.decode_value(encoded)
+
+
+@pytest.mark.parametrize("payload", [None, 1, "short", "z" * 32, "00" * 17])
+def test_codec_preserves_malformed_decimal128_tags(payload):
+    tagged = {
+        "__tinymongo_type_v1__": "decimal128",
+        "value": payload,
+    }
+
+    assert bson_codec.decode_value(tagged) == tagged
 
 
 def test_codec_loads_legacy_plain_json_without_changing_it():
@@ -280,6 +326,7 @@ def test_codec_preserves_malformed_binary_tags(payload):
         b"raw",
         bytearray(b"mutable"),
         Binary(bytes(range(16)), subtype=4),
+        Decimal128("12.50"),
         {"nested": [b"raw"]},
     ],
 )

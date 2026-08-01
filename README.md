@@ -26,6 +26,11 @@ pip install "tinymongo==1.2.1"
 For development, clone this repository and run `pip install -e .` from its
 root. Use the `v1.2.1` tag when you need source and documentation that match
 the current stable package exactly; `master` may contain unreleased changes.
+This README follows `master`: the aggregation core, advanced array-update
+modifiers, and Decimal128 support described below were added after `v1.2.1`
+and are not part of the 1.2.1 package on PyPI. See
+[`CHANGELOG.md`](https://github.com/schapman1974/tinymongo/blob/master/CHANGELOG.md)
+for the complete unreleased list.
 
 The default JSON backend has a small dependency set. Optional database backends
 may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
@@ -227,10 +232,11 @@ pip install "tinymongo[serialization]"
 
 If an optional driver is missing, selecting that backend raises an `ImportError`
 with the corresponding installation command. PyMongo is not a core runtime
-dependency. It is selected at runtime for `ObjectId`, non-generic `Binary`
-subtypes, patching, and conditional PyMongo exception inheritance, and is also
-used by development compatibility tests. Install `tinymongo[bson]` for BSON
-values or `tinymongo[pymongo]` for patching and installed-version compatibility.
+dependency. It is selected at runtime for `ObjectId`, `Decimal128`, non-generic
+`Binary` subtypes, patching, and conditional PyMongo exception inheritance,
+and is also used by development compatibility tests. Install
+`tinymongo[bson]` for BSON values or `tinymongo[pymongo]` for patching and
+installed-version compatibility.
 
 ## Free-threaded Python 3.14
 
@@ -421,7 +427,9 @@ paths and array members across TinyMongo backends.
 Update support includes `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
 `$addToSet`, including `upsert=True`. As in PyMongo, `update_one()` and
 `update_many()` require update operators; use `replace_one()` for full-document
-replacement.
+replacement. `$push` accepts `$each`, `$position`, `$sort`, and `$slice`;
+`$addToSet` accepts `$each`; and `$pull` accepts literal, query, and document
+operands.
 
 `find()` and `find_one()` accept Mongo-style inclusion and exclusion
 projections. Dotted paths project nested fields, `_id` follows MongoDB's special
@@ -436,6 +444,17 @@ Inclusion and exclusion cannot be mixed except for `_id`. Computed expressions,
 `$meta`, positional projection, and numeric array positions are rejected with a
 clear error. The second positional argument to `find()` is now the PyMongo-style
 projection argument; pass sorting as `sort=` or call `.sort()` on the cursor.
+For unsorted SQLite scans, TinyMongo applies a normalized projection as each row
+is read and releases the complete source document before reading the next row.
+The common `{"_id": 1}` sweep goes further and reads only each JSON `_id` value,
+so large unrequested payloads never enter Python memory. Filters still evaluate
+against complete source values when Python-side matching is required.
+
+This memory bound has explicit limits. Sorting must see unprojected sort keys,
+so a sorted SQLite cursor falls back to complete source documents before it
+projects the results. Other TinyMongo backends also continue to materialize
+complete matched documents before projection. Finally, exclusion projections
+that return most of each document naturally retain the size of those results.
 
 Collections expose durable indexes and unique constraints:
 
@@ -464,9 +483,10 @@ declaration is rejected before any batch entry is created.
 Unique indexes support scalar values and flat arrays on embedded backends;
 missing and `null` share one unique key. Object values, nested arrays,
 non-finite numbers, and array traversal inside a dotted index path are not
-supported for unique indexes yet. Remote SQL uses native constraints for scalar
-races. It rejects array values under unique indexes because its native indexes
-cannot yet guarantee cross-process multikey uniqueness.
+supported for unique indexes yet. Remote SQL uses native constraints for
+ordinary JSON scalar races. It rejects array and `Decimal128` values under
+unique indexes because its native JSON indexes cannot yet guarantee
+cross-process MongoDB multikey or exact numeric uniqueness.
 
 SQL, DuckDB, and Parquet storage uses typed physical `_id` keys for new rows.
 Existing databases with older stringified keys remain readable and mutable.
@@ -542,12 +562,12 @@ any aggregation subset is available. In particular, `$replaceRoot`,
 `$replaceWith`, `$meta` sort expressions, variables other than `$$REMOVE`, and
 MongoDB's broader expression language are not part of this slice yet.
 
-## ObjectId, datetime, and binary values
+## ObjectId, datetime, binary, and Decimal128 values
 
 `datetime` and `bytes` values round-trip through every backend. `bytearray` is
 accepted and reads back as `bytes`. Install the optional BSON extra to use
-`bson.ObjectId` or non-generic `bson.Binary` subtypes without making PyMongo a
-core dependency:
+`bson.ObjectId`, `bson.Decimal128`, or non-generic `bson.Binary` subtypes
+without making PyMongo a core dependency:
 
 ```bash
 pip install "tinymongo[bson]"
@@ -563,13 +583,14 @@ string and integer IDs remain readable and are never rewritten.
 
 ```python
 from datetime import datetime
-from bson import Binary, ObjectId
+from bson import Binary, Decimal128, ObjectId
 
 episode_id = ObjectId()
 episodes.insert_one(
     {
         "_id": episode_id,
         "created_date": datetime.now(),
+        "price": Decimal128("19.95"),
         "image": b"\x89PNG\r\n\x1a\n",
         "asset_id": Binary(bytes(range(16)), subtype=4),
         "title": "Async Python",
@@ -587,8 +608,8 @@ subtypes preserve `bson.Binary.subtype`. The exact two-key mapping shape using
 codec; new user mappings with that shape are escaped automatically. If an
 older database already contains that valid tag shape as ordinary data, whether
 written through an earlier API or edited manually, rename one of those keys
-before upgrading so it is not interpreted as the tagged value. UUID,
-Decimal128, and regular-expression round trips remain
+before upgrading so it is not interpreted as the tagged value. UUID and
+regular-expression round trips remain
 tracked in [#75](https://github.com/schapman1974/tinymongo/issues/75).
 Non-finite floats (`NaN`, positive infinity, and negative infinity) also use
 strict JSON-safe tags. Remote SQL keeps the encoded document as a normal,
@@ -602,6 +623,14 @@ BinData sorts by length, subtype, and then unsigned bytes, matching MongoDB.
 Numeric `NaN` sorts below every other numeric value, matching MongoDB.
 TinyMongo retains Python microseconds, so it can distinguish two datetimes that
 MongoDB would store in the same millisecond.
+
+Decimal128 values retain their exact BSON representation and participate in
+numeric equality and range queries, sorting, embedded-backend unique indexes,
+`$inc`, and the supported `$group` numeric accumulators. Remote SQL rejects
+Decimal128 values under unique indexes until its native constraints can enforce
+MongoDB-equivalent numeric identity across concurrent writers. Reading
+`Decimal128` requires the same optional BSON extra used to write it.
+
 When a sort encounters a genuinely unsupported value type, TinyMongo emits one
 `TinyMongoUnsupportedWarning` per field and type instead of silently returning
 insertion order.
@@ -659,13 +688,13 @@ follow the
 [Talk Python acceptance run](https://github.com/schapman1974/tinymongo/blob/master/docs/TALKPYTHON_ACCEPTANCE.md).
 
 PyMongo remains optional. It is needed for these comparisons,
-`tinymongo.patch()`, `ObjectId` support, and non-generic `Binary` subtypes, but
-it is not required for normal TinyMongo clients, `datetime` storage, or native
-subtype-0 byte values. When it is installed, TinyMongo error classes also
-inherit the matching `pymongo.errors` classes, so existing `PyMongoError`
-handlers continue to work. `InvalidDocument` additionally preserves BSON's
-standard error identity while remaining inside TinyMongo's portable error
-hierarchy.
+`tinymongo.patch()`, `ObjectId` and `Decimal128` support, and non-generic
+`Binary` subtypes, but it is not required for normal TinyMongo clients,
+`datetime` storage, or native subtype-0 byte values. When it is installed,
+TinyMongo error classes also inherit the matching `pymongo.errors` classes, so
+existing `PyMongoError` handlers continue to work. `InvalidDocument`
+additionally preserves BSON's standard error identity while remaining inside
+TinyMongo's portable error hierarchy.
 
 PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract
@@ -686,6 +715,14 @@ storage, multiprocess writes, native indexes, projections, bulk writes,
 aggregation, sessions, transactions, change streams, and installed BSON support.
 Unknown capability names raise `ValueError` so configuration mistakes are
 visible.
+
+For local persistent backends, `multiprocess_writes=True` promises safe writes,
+not parallel write throughput. TinyDB JSON, SQLite, and DuckDB clients sharing
+one storage folder serialize writes across databases and collections through a
+store-wide advisory lock. Parquet uses one lock per logical database directory.
+Lock acquisition waits for up to 30 seconds before timing out. SQLite uses WAL
+mode, so reads can continue while another process holds the write lock, but its
+writes remain serialized.
 
 Operations whose semantics TinyMongo cannot honor raise
 `TinyMongoNotSupportedError`. This includes sessions, transactions, change

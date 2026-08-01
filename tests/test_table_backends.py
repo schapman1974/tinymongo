@@ -1,5 +1,8 @@
 import os
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import duckdb
 import pytest
@@ -31,7 +34,8 @@ from tinymongo.table_backends import (
     _json_dumps,
     _json_loads,
     _join_uri,
-    _reject_remote_unique_arrays,
+    _reject_remote_unique_values,
+    _SQLITE_UNIQUE_TOKEN_VERSION,
     matches_filter,
     requires_python_filter,
 )
@@ -436,10 +440,29 @@ def test_table_backend_abstract_methods(tmp_path):
     assert backend.all_docs("anything") == [{"_id": 1}]
     assert backend.create_index("anything", "field") == "field_1"
     assert backend.create_index("anything", "field") == "field_1"
+    legacy_first = parse_index_spec("legacy", name="legacy_first")
+    legacy_second = parse_index_spec("legacy", name="legacy_second")
+    backend._ephemeral_indexes["legacy"] = {
+        legacy_first.name: legacy_first,
+        legacy_second.name: legacy_second,
+    }
+    assert backend.create_index("legacy", legacy_second) == "legacy_second"
+    with pytest.raises(OperationFailure, match="different name") as different_name:
+        backend.create_index(
+            "anything", parse_index_spec("field", name="alternate_field")
+        )
+    assert different_name.value.code == 85
     assert (
         backend.create_index("anything", parse_index_spec("email", unique=True))
         == "email_1"
     )
+    assert (
+        backend.create_index(
+            "anything", parse_index_spec("email", name="email_nonunique")
+        )
+        == "email_nonunique"
+    )
+    assert backend.drop_index("anything", "email_nonunique") is None
     assert backend.drop_index("anything", "email") is None
     with pytest.raises(OperationFailure, match="Index not found"):
         backend.drop_index("anything", "missing")
@@ -589,6 +612,182 @@ def test_sqlite_unique_index_keeps_distinct_arbitrary_precision_integers(tmp_pat
         backend.insert_many("values", [{"_id": 3, "value": 2**63 + 1}])
 
 
+def test_sqlite_migrates_legacy_unique_float_tokens_before_decimal_writes(tmp_path):
+    bson = pytest.importorskip("bson")
+    path = str(tmp_path / "float-token-migration.sqlite")
+    backend = SQLiteTableBackend(path)
+    spec = parse_index_spec("value", unique=True)
+    backend.create_index("values", spec)
+    backend.insert_many("values", [{"_id": "double", "value": 1e23}])
+    physical_name = backend._physical_index_name("values", spec)
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.create_function(
+            "tinymongo_unique_token",
+            2,
+            lambda _data, _field: '["number:1E+23"]',
+            deterministic=True,
+        )
+        conn.execute('REINDEX "{0}"'.format(physical_name))
+        conn.execute(
+            "UPDATE __tinymongo_indexes SET token_version = 2 "
+            "WHERE collection_name = 'values' AND index_name = 'value_1'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reopened = SQLiteTableBackend(path)
+    reopened.insert_many(
+        "values", [{"_id": "decimal", "value": bson.Decimal128("1E+23")}]
+    )
+
+    assert {row["_id"] for row in reopened.find("values", {})} == {
+        "double",
+        "decimal",
+    }
+    conn = sqlite3.connect(path)
+    try:
+        version = conn.execute(
+            "SELECT token_version FROM __tinymongo_indexes "
+            "WHERE collection_name = 'values' AND index_name = 'value_1'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert version == _SQLITE_UNIQUE_TOKEN_VERSION
+
+
+def test_sqlite_numeric_token_migration_reports_existing_exact_duplicates(tmp_path):
+    path = str(tmp_path / "duplicate-token-migration.sqlite")
+    backend = SQLiteTableBackend(path)
+    spec = parse_index_spec("amount", unique=True)
+    physical_name = backend._physical_index_name("values", spec)
+    backend.insert_many(
+        "values",
+        [
+            {"_id": "integer", "amount": 2**60},
+            {"_id": "double", "amount": float(2**60)},
+        ],
+    )
+    conn = sqlite3.connect(path)
+    try:
+        conn.create_function(
+            "tinymongo_unique_token",
+            2,
+            lambda data, _field: data,
+            deterministic=True,
+        )
+        conn.execute(
+            "CREATE TABLE __tinymongo_indexes ("
+            "collection_name TEXT NOT NULL, index_name TEXT NOT NULL, "
+            "field_name TEXT NOT NULL, unique_flag INTEGER NOT NULL, "
+            "token_version INTEGER NOT NULL DEFAULT 2, "
+            "PRIMARY KEY (collection_name, index_name))"
+        )
+        conn.execute(
+            "INSERT INTO __tinymongo_indexes VALUES "
+            "('values', 'amount_1', 'amount', 1, 2)"
+        )
+        conn.execute(
+            'CREATE UNIQUE INDEX {0} ON "values" '
+            "(tinymongo_unique_token(data, 'amount'))".format(
+                '"{0}"'.format(physical_name)
+            )
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(DuplicateKeyError, match="exact BSON numeric identity"):
+        backend.get_index_specs("values")
+
+    conn = sqlite3.connect(path)
+    try:
+        version = conn.execute(
+            "SELECT token_version FROM __tinymongo_indexes"
+        ).fetchone()[0]
+        native_index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (physical_name,),
+        ).fetchone()
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        conn.close()
+    assert version == _SQLITE_UNIQUE_TOKEN_VERSION
+    assert native_index is None
+    assert integrity == "ok"
+    assert backend.get_index_specs("values") == [spec]
+
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many("values", [{"_id": "blocked", "amount": 3}])
+
+    backend.delete_ids("values", ["double"])
+    backend.drop_index("values", "amount_1")
+    assert backend.create_index("values", spec) == "amount_1"
+
+
+def test_sqlite_current_index_catalog_reads_do_not_take_the_write_lock(
+    tmp_path, monkeypatch
+):
+    backend = SQLiteTableBackend(str(tmp_path / "current-index-catalog.sqlite"))
+    backend.create_index("values", parse_index_spec("value", unique=True))
+
+    @contextmanager
+    def forbidden_write_lock():
+        raise AssertionError("a current catalog read must remain lock-free")
+        yield
+
+    monkeypatch.setattr(backend, "_write_lock", forbidden_write_lock)
+
+    assert backend.get_index_specs("values") == [parse_index_spec("value", unique=True)]
+
+
+def test_sqlite_upgrades_legacy_index_catalog_without_token_version(tmp_path):
+    path = str(tmp_path / "legacy-index-catalog.sqlite")
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE __tinymongo_indexes ("
+            "collection_name TEXT NOT NULL, index_name TEXT NOT NULL, "
+            "field_name TEXT NOT NULL, unique_flag INTEGER NOT NULL, "
+            "PRIMARY KEY (collection_name, index_name))"
+        )
+        conn.execute(
+            "INSERT INTO __tinymongo_indexes VALUES " "('ghost', 'value_1', 'value', 1)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    backends = [SQLiteTableBackend(path), SQLiteTableBackend(path)]
+    barrier = threading.Barrier(2)
+
+    def load_specs(backend):
+        barrier.wait()
+        return backend.get_index_specs("ghost")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(load_specs, backends))
+    assert results == [
+        [parse_index_spec("value", unique=True)],
+        [parse_index_spec("value", unique=True)],
+    ]
+    conn = sqlite3.connect(path)
+    try:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(__tinymongo_indexes)").fetchall()
+        }
+        version = conn.execute(
+            "SELECT token_version FROM __tinymongo_indexes"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "token_version" in columns
+    assert version == _SQLITE_UNIQUE_TOKEN_VERSION
+
+
 def test_sqlite_public_index_lookup_unions_scalar_and_array_matches(
     tmp_path, monkeypatch
 ):
@@ -619,7 +818,9 @@ def test_sqlite_public_index_lookup_unions_scalar_and_array_matches(
         2,
     ]
     assert any("json_type" in sql and "IN ('text'" in sql for sql in traced_sql)
-    assert any("json_type" in sql and "= 'array'" in sql for sql in traced_sql)
+    assert any(
+        "json_type" in sql and "IN ('array', 'object')" in sql for sql in traced_sql
+    )
 
     spec = parse_index_spec("email", name="email_lookup")
     where, params = backend.compiler.compile({"email": "ada@example.com"})
@@ -1229,7 +1430,7 @@ def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
 
 
 def test_remote_array_guard_ignores_nonunique_specs():
-    _reject_remote_unique_arrays(
+    _reject_remote_unique_values(
         [{"_id": 1, "tags": ["a", "b"]}],
         [parse_index_spec("tags")],
     )
@@ -1253,6 +1454,32 @@ def test_remote_unique_array_writes_fail_closed_across_clients(
 
     assert second.find_one("items", {"_id": 1}) == {"_id": 1, "tags": "a"}
     assert second.find_one("items", {"_id": 2}) is None
+
+
+@pytest.mark.parametrize("backend_name", ["postgres", "mysql"])
+def test_remote_unique_decimal128_values_fail_closed_across_clients(
+    monkeypatch, backend_name
+):
+    bson = pytest.importorskip("bson")
+    store = FakeRemoteStore()
+    factory = _postgres_backend if backend_name == "postgres" else _mysql_backend
+    first = factory(monkeypatch, store)
+    second = factory(monkeypatch, store)
+    first.create_index("items", parse_index_spec("value", unique=True))
+    first.insert_many("items", [{"_id": 1, "value": 1}])
+
+    with pytest.raises(TinyMongoNotSupportedError, match="Decimal128 values"):
+        second.insert_many("items", [{"_id": 2, "value": bson.Decimal128("1.00")}])
+    with pytest.raises(TinyMongoNotSupportedError, match="Decimal128 values"):
+        second.replace_one("items", 1, {"_id": 1, "value": bson.Decimal128("2.0")})
+
+    first.insert_many("existing", [{"_id": 1, "value": bson.Decimal128("3.00")}])
+    with pytest.raises(TinyMongoNotSupportedError, match="Decimal128 values"):
+        first.create_index("existing", parse_index_spec("value", unique=True))
+
+    first.create_index("ordinary", parse_index_spec("value"))
+    first.insert_many("ordinary", [{"_id": 1, "value": bson.Decimal128("4.00")}])
+    assert first.find_one("ordinary", {"_id": 1})["value"] == bson.Decimal128("4.00")
 
 
 def test_postgres_table_backend_with_fake_driver(monkeypatch):

@@ -266,6 +266,13 @@ def test_invalid_updates_are_preflighted_and_atomic_even_without_a_match(tmp_pat
         )
     with pytest.raises(TinyMongoNotSupportedError, match="Unsupported update operator"):
         collection.update_one({"_id": "missing"}, {"$unknown": {"value": 1}})
+    with pytest.raises(WriteError, match="numeric values") as invalid_inc:
+        collection.update_one({"_id": "missing"}, {"$inc": {"value": "one"}})
+    assert invalid_inc.value.code == 14
+
+    with pytest.raises(WriteError, match="numeric values") as invalid_target:
+        collection.update_one({"_id": 1}, {"$inc": {"status": 1}})
+    assert invalid_target.value.code == 14
 
     assert collection.find_one({"_id": 1}) == original
     client.close()

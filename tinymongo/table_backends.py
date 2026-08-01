@@ -11,6 +11,7 @@ import tempfile
 import threading
 from collections.abc import Mapping
 from contextlib import contextmanager
+from decimal import Decimal
 from functools import wraps
 from urllib.parse import parse_qs, unquote, urlparse
 from typing import Optional
@@ -18,7 +19,15 @@ from typing import Optional
 from .bson_codec import contains_extended_value
 from .bson_codec import dumps as bson_json_dumps
 from .bson_codec import loads as bson_json_loads
-from .bson_types import bson_identity_key, bson_values_equal
+from .bson_codec import storage_values_equal
+from .bson_types import (
+    bson_identity_key,
+    bson_number_decimal,
+    bson_scalar_sort_key,
+    bson_values_equal,
+    decimal128_type,
+    is_bson_number,
+)
 from .errors import (
     DuplicateKeyError,
     OperationFailure,
@@ -29,14 +38,20 @@ from .indexes import (
     INDEX_CATALOG_TABLE,
     IndexSpec,
     index_catalog_id,
+    index_spec_signature,
     index_tokens,
     parse_index_spec,
     validate_unique_documents,
 )
 from .parquet_storage import _acquire_rlock, _local_rlocks, portalocker
+from .projection import project_document
 
 
 _MISSING = object()
+_DECIMAL128 = decimal128_type()
+_ID_RATIO_HEX_TAG = "exact-ratio-hex-v1"
+_SAFE_JSON_INTEGER_BITS = 1800
+_SQLITE_UNIQUE_TOKEN_VERSION = 3
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
 _PHYSICAL_ID_PREFIX = "__tinymongo_id_v2__:"
 _LOGICAL_FILTER_OPERATORS = frozenset(("$and", "$or", "$nor"))
@@ -59,19 +74,64 @@ _FIELD_FILTER_OPERATORS = frozenset(
 )
 
 
+def _large_numeric_ratio(key):
+    """Return an exact ratio that is unsafe for bounded int-to-text runtimes."""
+
+    if (
+        isinstance(key, tuple)
+        and len(key) == 2
+        and all(isinstance(part, int) for part in key)
+        and any(abs(part).bit_length() > _SAFE_JSON_INTEGER_BITS for part in key)
+    ):
+        return key
+    return None
+
+
+def _signed_hex(value):
+    sign = "-" if value < 0 else ""
+    return sign + format(abs(value), "x")
+
+
+def _safe_registered_key(family, key):
+    ratio = _large_numeric_ratio(key) if family == "number" else None
+    if ratio is None:
+        return key
+    return [_ID_RATIO_HEX_TAG, _signed_hex(ratio[0]), _signed_hex(ratio[1])]
+
+
+def _legacy_large_ratio_physical_id_key(value):
+    """Recreate the pre-safe typed key without Python's decimal digit limit."""
+
+    identity = bson_identity_key(value)
+    if identity is None or identity[0] != "number":
+        return None
+    ratio = _large_numeric_ratio(identity[1])
+    if ratio is None:
+        return None
+    numerator = format(Decimal(ratio[0]), "f")
+    denominator = format(Decimal(ratio[1]), "f")
+    canonical = (
+        '["registered-scalar",["number",[' + numerator + "," + denominator + "]]]"
+    ).encode("ascii")
+    return _PHYSICAL_ID_PREFIX + hashlib.sha256(canonical).hexdigest()
+
+
+def _legacy_stringified_id(value):
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and abs(value).bit_length() > _SAFE_JSON_INTEGER_BITS
+    ):
+        return format(Decimal(value), "f")
+    return str(value)
+
+
 def _canonical_id_value(value):
     """Build a stable serialization of the registry's BSON identity key."""
     identity = bson_identity_key(value)
     if identity is not None:
         family, key = identity
-        if family == "number":
-            if isinstance(key, float):
-                if math.isinf(key):
-                    key = "-infinity" if key < 0 else "infinity"
-                else:
-                    key = list(key.as_integer_ratio())
-            elif isinstance(key, int):
-                key = [key, 1]
+        key = _safe_registered_key(family, key)
         return [
             "registered-scalar",
             json.loads(
@@ -121,7 +181,10 @@ def _physical_id_candidates(value):
     """Return the v2 key followed by compatible legacy stringified keys."""
 
     current = _physical_id_key(value)
-    legacy = [str(value)]
+    legacy = [_legacy_stringified_id(value)]
+    old_typed = _legacy_large_ratio_physical_id_key(value)
+    if old_typed is not None:
+        legacy.insert(0, old_typed)
     if not isinstance(value, bool) and isinstance(value, int):
         try:
             float_value = float(value)
@@ -442,8 +505,8 @@ def _simple_scalar_equality(filter_doc):
     return field, expected
 
 
-def _reject_remote_unique_arrays(documents, specs):
-    """Fail closed where remote native constraints cannot protect multikey races."""
+def _reject_remote_unique_values(documents, specs):
+    """Fail closed where remote constraints cannot protect Mongo uniqueness."""
     for spec in specs:
         if not spec.unique:
             continue
@@ -456,15 +519,43 @@ def _reject_remote_unique_arrays(documents, specs):
                         spec.name
                     )
                 )
+            if _DECIMAL128 is not None and isinstance(value, _DECIMAL128):
+                raise TinyMongoNotSupportedError(
+                    "Remote SQL unique index {0!r} does not support Decimal128 "
+                    "values; its native JSON constraint cannot guarantee "
+                    "cross-process MongoDB numeric uniqueness".format(spec.name)
+                )
 
 
 def _comparison_matches(actual, operand, comparison):
+    operand_identity = bson_identity_key(operand)
+    operand_order = bson_scalar_sort_key(operand)
+    if operand_identity is None or operand_order is None:
+        return False
     values = actual if isinstance(actual, list) else [actual]
     for value in values:
+        value_identity = bson_identity_key(value)
+        value_order = bson_scalar_sort_key(value)
         try:
-            if comparison(value, operand):
+            if (
+                value_identity is not None
+                and value_identity[0] == "number"
+                and is_bson_number(value)
+                and is_bson_number(operand)
+                and (
+                    bson_number_decimal(value).is_nan()
+                    != bson_number_decimal(operand).is_nan()
+                )
+            ):
+                continue
+            if (
+                value_identity is not None
+                and value_order is not None
+                and value_identity[0] == operand_identity[0]
+                and comparison(value_order[1], operand_order[1])
+            ):
                 return True
-        except (TypeError, ValueError):
+        except (ArithmeticError, TypeError, ValueError):
             continue
     return False
 
@@ -750,6 +841,14 @@ def requires_python_filter(filter_doc):
                     )
                 ):
                     return True
+                if any(
+                    operator in expected and is_bson_number(expected[operator])
+                    for operator in ("$gt", "$gte", "$lt", "$lte")
+                ):
+                    # Tagged Decimal128 values live in JSON objects, so native
+                    # numeric predicates cannot provide a complete candidate
+                    # set when the query operand is an int or double.
+                    return True
     return False
 
 
@@ -978,7 +1077,7 @@ class TableBackend(object):
         updated_ids = []
         for doc in matches:
             updated = self.apply_update(doc, update_doc)
-            if not bson_values_equal(updated, doc):
+            if not storage_values_equal(updated, doc):
                 self.replace_one(collection, doc["_id"], updated)
                 updated_ids.append(doc["_id"])
         return updated_ids
@@ -1010,15 +1109,34 @@ class TableBackend(object):
 
     def _check_index_compatibility(self, collection, spec):
         specs = self.get_index_specs(collection)
-        existing = next(
+        by_name = next(
             (current for current in specs if current.name == spec.name),
             None,
         )
-        if existing is not None and existing != spec:
+        if by_name is not None and by_name != spec:
             raise OperationFailure(
                 "An index with the same name or key has different options"
             )
-        return existing
+        if by_name is not None:
+            # Older releases allowed equivalent specs under different names.
+            # An exact name/spec retry remains idempotent even when that legacy
+            # duplicate is still present elsewhere in the catalog.
+            return by_name
+        equivalent = next(
+            (
+                current
+                for current in specs
+                if index_spec_signature(current) == index_spec_signature(spec)
+            ),
+            None,
+        )
+        if equivalent is not None and equivalent.name != spec.name:
+            raise OperationFailure(
+                "An index with the same key and options already exists under "
+                "a different name",
+                code=85,
+            )
+        return None
 
     def create_index(self, collection, spec):
         spec = self._coerce_index_spec(spec)
@@ -1070,16 +1188,20 @@ class SQLiteTableBackend(TableBackend):
         digest = hashlib.sha256(identity.encode("utf8")).hexdigest()[:32]
         return "__tm_idx_{0}".format(digest)
 
-    def _connect(self):
-        conn = sqlite3.connect(self.path)
+    def _read_connect(self):
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.create_function(
             "tinymongo_unique_token",
             2,
             _sqlite_unique_token,
             deterministic=True,
         )
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    def _connect(self):
+        conn = self._read_connect()
+        conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
     def _ensure_index_catalog(self, conn):
@@ -1087,15 +1209,130 @@ class SQLiteTableBackend(TableBackend):
             "CREATE TABLE IF NOT EXISTS {0} ("
             "collection_name TEXT NOT NULL, index_name TEXT NOT NULL, "
             "field_name TEXT NOT NULL, unique_flag INTEGER NOT NULL, "
+            "token_version INTEGER NOT NULL DEFAULT {1}, "
             "PRIMARY KEY (collection_name, index_name))".format(
-                _quote_identifier(self.index_catalog_table)
+                _quote_identifier(self.index_catalog_table),
+                _SQLITE_UNIQUE_TOKEN_VERSION,
             )
         )
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info({0})".format(
+                    _quote_identifier(self.index_catalog_table)
+                )
+            ).fetchall()
+        }
+        migrated = False
+        if "token_version" not in columns:
+            conn.execute(
+                "ALTER TABLE {0} ADD COLUMN token_version INTEGER NOT NULL "
+                "DEFAULT 1".format(_quote_identifier(self.index_catalog_table))
+            )
+            migrated = True
+
+        stale = conn.execute(
+            "SELECT collection_name, index_name, field_name FROM {0} "
+            "WHERE unique_flag = 1 AND token_version < ?".format(
+                _quote_identifier(self.index_catalog_table)
+            ),
+            (_SQLITE_UNIQUE_TOKEN_VERSION,),
+        ).fetchall()
+        for collection, index_name, field in stale:
+            spec = IndexSpec(field=field, name=index_name, unique=True)
+            physical_name = self._physical_index_name(collection, spec)
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                (physical_name,),
+            ).fetchone()
+            if exists is not None:
+                try:
+                    conn.execute("REINDEX {0}".format(_quote_identifier(physical_name)))
+                except sqlite3.IntegrityError as exc:
+                    # An older token format could admit values which MongoDB
+                    # considers equal (for example int/float ``2**60``). The
+                    # old expression index is unsafe once this connection has
+                    # registered the exact-token function, so remove only its
+                    # native constraint and retain the unique catalog entry.
+                    # Store-wide write locking plus Python post-image
+                    # validation keeps the catalog fail-closed while the user
+                    # removes the conflicting row and recreates the index.
+                    conn.execute(
+                        "DROP INDEX IF EXISTS {0}".format(
+                            _quote_identifier(physical_name)
+                        )
+                    )
+                    conn.execute(
+                        "UPDATE {0} SET token_version = ? "
+                        "WHERE collection_name = ? AND index_name = ?".format(
+                            _quote_identifier(self.index_catalog_table)
+                        ),
+                        (_SQLITE_UNIQUE_TOKEN_VERSION, collection, index_name),
+                    )
+                    conn.commit()
+                    raise DuplicateKeyError(
+                        "Cannot upgrade unique index {0!r} on collection {1!r}: "
+                        "existing values conflict under exact BSON numeric "
+                        "identity. Its native constraint was disabled, but "
+                        "TinyMongo will continue enforcing the catalog entry; "
+                        "remove the conflict, then drop and recreate the "
+                        "index".format(index_name, collection)
+                    ) from exc
+            conn.execute(
+                "UPDATE {0} SET token_version = ? WHERE collection_name = ? "
+                "AND index_name = ?".format(
+                    _quote_identifier(self.index_catalog_table)
+                ),
+                (_SQLITE_UNIQUE_TOKEN_VERSION, collection, index_name),
+            )
+            migrated = True
+        if migrated:
+            conn.commit()
+
+    def _index_catalog_state(self, conn):
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (self.index_catalog_table,),
+        ).fetchone()
+        if exists is None:
+            return "absent"
+
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info({0})".format(
+                    _quote_identifier(self.index_catalog_table)
+                )
+            ).fetchall()
+        }
+        if "token_version" not in columns:
+            return "stale"
+
+        stale = conn.execute(
+            "SELECT 1 FROM {0} WHERE unique_flag = 1 AND token_version < ? "
+            "LIMIT 1".format(_quote_identifier(self.index_catalog_table)),
+            (_SQLITE_UNIQUE_TOKEN_VERSION,),
+        ).fetchone()
+        return "stale" if stale is not None else "ready"
 
     def get_index_specs(self, collection):
-        conn = self._connect()
+        conn = self._read_connect()
         try:
-            self._ensure_index_catalog(conn)
+            state = self._index_catalog_state(conn)
+            if state == "absent":
+                return []
+            if state == "stale":
+                # Index-token migrations change persisted expression-index
+                # keys. Serialize only this one-time upgrade, then leave normal
+                # catalog reads lock-free so SQLite WAL readers stay concurrent.
+                conn.close()
+                with self._write_lock():
+                    migration_conn = self._connect()
+                    try:
+                        self._ensure_index_catalog(migration_conn)
+                    finally:
+                        migration_conn.close()
+                conn = self._read_connect()
             rows = conn.execute(
                 "SELECT index_name, field_name, unique_flag FROM {0} "
                 "WHERE collection_name = ? ORDER BY index_name".format(
@@ -1243,7 +1480,169 @@ class SQLiteTableBackend(TableBackend):
                 if matches_filter(doc, filter_doc)
             ]
 
-    def _find_indexed_scalar_with_array_union(self, collection, filter_doc):
+    def find_projected(self, collection, filter_doc, projection):
+        """Scan SQLite rows while retaining only each projected post-image.
+
+        ``TinyMongoCollection`` discovers this optional backend hook at runtime,
+        which leaves the established ``find()`` signature intact for third-party
+        table backends.  Sorting deliberately does not use this path because its
+        keys must be read from the complete source documents first.
+        """
+
+        self.create_collection(collection)
+        indexed = self._find_indexed_scalar_with_array_union(
+            collection,
+            filter_doc,
+            projection=projection,
+        )
+        if indexed is not None:
+            return indexed
+
+        if requires_python_filter(filter_doc):
+            return self._scan_projected(
+                collection,
+                projection,
+                predicate=lambda document: matches_filter(document, filter_doc),
+            )
+
+        try:
+            where, params = self.compiler.compile(filter_doc)
+            if self._is_id_only_projection(projection) and not _filter_references_id(
+                filter_doc
+            ):
+                return self._scan_projected_ids(collection, where, params)
+
+            documents = self._scan_projected(
+                collection,
+                projection,
+                where=where,
+                params=params,
+                predicate=(
+                    (lambda document: matches_filter(document, filter_doc))
+                    if _filter_references_id(filter_doc)
+                    else None
+                ),
+            )
+            direct_id_equality = (
+                isinstance(filter_doc, dict)
+                and set(filter_doc) == {"_id"}
+                and not isinstance(filter_doc["_id"], dict)
+            )
+            if direct_id_equality and documents:
+                return documents
+            if _filter_requires_legacy_id_scan(filter_doc):
+                return self._scan_projected(
+                    collection,
+                    projection,
+                    predicate=lambda document: matches_filter(document, filter_doc),
+                )
+            return documents
+        except Exception:
+            return self._scan_projected(
+                collection,
+                projection,
+                predicate=lambda document: matches_filter(document, filter_doc),
+            )
+
+    @staticmethod
+    def _is_id_only_projection(projection):
+        return (
+            projection.mode == "include"
+            and projection.include_id
+            and not projection.tree
+        )
+
+    @staticmethod
+    def _project_sqlite_id(kind, value):
+        """Decode one SQLite JSON scalar without reading its document payload."""
+
+        if kind is None:
+            return {}
+        if kind == "null":
+            return {"_id": None}
+        if kind in ("true", "false"):
+            return {"_id": kind == "true"}
+        if kind == "integer":
+            # SQLite promotes JSON integers outside its signed 64-bit range to
+            # a REAL.  The caller must read just that one complete row instead
+            # of accepting a lossy identifier.
+            if isinstance(value, float):
+                return None
+            return {"_id": value}
+        if kind in ("object", "array"):
+            return _json_loads(
+                json.dumps(
+                    {"_id": json.loads(value)},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        return {"_id": value}
+
+    def _scan_projected_ids(self, collection, where, params):
+        """Return ``_id`` documents without transferring large JSON payloads."""
+
+        table = _quote_identifier(collection)
+        path = _sql_literal("$._id")
+        sql = (
+            "SELECT _id, json_type(data, {path}), "
+            "json_extract(data, {path}) FROM {table}{where}"
+        ).format(path=path, table=table, where=where)
+        conn = self._connect()
+        try:
+            documents = []
+            cursor = conn.execute(sql, params)
+            for physical_id, kind, value in cursor:
+                document = self._project_sqlite_id(kind, value)
+                if document is None:
+                    row = conn.execute(
+                        "SELECT data FROM {0} WHERE _id = ?".format(table),
+                        (physical_id,),
+                    ).fetchone()
+                    source_document = _json_loads(row[0])
+                    document = (
+                        {"_id": source_document["_id"]}
+                        if "_id" in source_document
+                        else {}
+                    )
+                documents.append(document)
+            return documents
+        finally:
+            conn.close()
+
+    def _scan_projected(
+        self,
+        collection,
+        projection,
+        where="",
+        params=None,
+        predicate=None,
+    ):
+        """Decode, filter, and release one source row at a time."""
+
+        sql = "SELECT data FROM {0}{1}".format(
+            _quote_identifier(collection),
+            where,
+        )
+        conn = self._connect()
+        try:
+            documents = []
+            cursor = conn.execute(sql, params or [])
+            for row in cursor:
+                document = _json_loads(row[0])
+                if predicate is not None and not predicate(document):
+                    continue
+                documents.append(project_document(document, projection))
+            return documents
+        finally:
+            conn.close()
+
+    def _find_indexed_scalar_with_array_union(
+        self,
+        collection,
+        filter_doc,
+        projection=None,
+    ):
         equality = _simple_scalar_equality(filter_doc)
         if equality is None:
             return None
@@ -1263,17 +1662,24 @@ class SQLiteTableBackend(TableBackend):
             path=path,
         )
         array_sql = (
-            "SELECT data FROM {table} WHERE json_type(data, {path}) = 'array'"
+            "SELECT data FROM {table} WHERE json_type(data, {path}) "
+            "IN ('array', 'object')"
         ).format(table=_quote_identifier(collection), path=path)
         conn = self._connect()
         try:
-            scalar_rows = conn.execute(scalar_sql, params).fetchall()
-            array_rows = conn.execute(array_sql).fetchall()
+            documents = []
+            for sql, sql_params in ((scalar_sql, params), (array_sql, [])):
+                for row in conn.execute(sql, sql_params):
+                    document = _json_loads(row[0])
+                    if matches_filter(document, filter_doc):
+                        documents.append(
+                            project_document(document, projection)
+                            if projection is not None
+                            else document
+                        )
+            return documents
         finally:
             conn.close()
-
-        candidates = [_json_loads(row[0]) for row in scalar_rows + array_rows]
-        return [doc for doc in candidates if matches_filter(doc, filter_doc)]
 
     def _all_docs_unfiltered(self, collection):
         self.create_collection(collection)
@@ -1381,11 +1787,17 @@ class SQLiteTableBackend(TableBackend):
                         )
                     )
                 conn.execute(
-                    "INSERT INTO {0} (collection_name, index_name, field_name, unique_flag) "
-                    "VALUES (?, ?, ?, ?)".format(
+                    "INSERT INTO {0} (collection_name, index_name, field_name, "
+                    "unique_flag, token_version) VALUES (?, ?, ?, ?, ?)".format(
                         _quote_identifier(self.index_catalog_table)
                     ),
-                    (collection, spec.name, spec.field, int(spec.unique)),
+                    (
+                        collection,
+                        spec.name,
+                        spec.field,
+                        int(spec.unique),
+                        _SQLITE_UNIQUE_TOKEN_VERSION,
+                    ),
                 )
                 conn.commit()
             except sqlite3.IntegrityError as exc:
@@ -2188,7 +2600,7 @@ class RemoteSQLTableBackend(TableBackend):
     def validate_unique_post_image(self, collection, documents):
         documents = list(documents)
         specs = self.get_index_specs(collection)
-        _reject_remote_unique_arrays(documents, specs)
+        _reject_remote_unique_values(documents, specs)
         validate_unique_documents(documents, specs)
 
     def _drop_native_index(self, conn, collection, spec):
@@ -2510,7 +2922,7 @@ class RemoteSQLTableBackend(TableBackend):
             return existing.name
         if spec.unique:
             documents = self.find(collection, {})
-            _reject_remote_unique_arrays(documents, [spec])
+            _reject_remote_unique_values(documents, [spec])
             validate_unique_documents(documents, [spec])
 
         conn = self._connect()

@@ -493,3 +493,26 @@ def test_remote_sql_native_index_catalog_and_unique_enforcement(backend, env_nam
         multikey.drop()
         scalar.drop()
         client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_decimal128_unique_values_fail_closed(backend, env_name):
+    bson = pytest.importorskip("bson")
+    dsn, database, prefix = _remote_target(backend, env_name)
+    client = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    protected = client[database][prefix + "_decimal_protected"]
+    existing = client[database][prefix + "_decimal_existing"]
+
+    try:
+        protected.create_index("value", unique=True)
+        protected.insert_one({"_id": 1, "value": 1})
+        with pytest.raises(TinyMongoNotSupportedError, match="Decimal128 values"):
+            protected.insert_one({"_id": 2, "value": bson.Decimal128("1.00")})
+
+        existing.insert_one({"_id": 1, "value": bson.Decimal128("2.00")})
+        with pytest.raises(TinyMongoNotSupportedError, match="Decimal128 values"):
+            existing.create_index("value", unique=True)
+    finally:
+        existing.drop()
+        protected.drop()
+        client.close()

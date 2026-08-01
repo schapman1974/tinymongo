@@ -314,6 +314,9 @@ def test_create_indexes_accepts_the_real_mixed_batch_and_enforces_unique(
         warning_messages = [str(item.message) for item in captured]
         assert any("newest_show" in message for message in warning_messages)
         assert any("published_show_priority" in message for message in warning_messages)
+        assert any(
+            "existing index 'is_published'" in message for message in warning_messages
+        )
         assert any("api_key_lookup" in message for message in warning_messages)
         assert any("optional_slug" in message for message in warning_messages)
         assert any("expire_geo_lookup" in message for message in warning_messages)
@@ -322,15 +325,17 @@ def test_create_indexes_accepts_the_real_mixed_batch_and_enforces_unique(
         lambda: collection.insert_one({"_id": 2, "email": "mike@example.com"})
     )
 
-    assert set(created) == {
+    expected_created = {
         "newest_show",
         "is_published",
-        "published_show_priority",
         "api_key_lookup",
         "optional_slug",
         "email_unique",
         "expire_geo_lookup",
     }
+    if contract_target.name == "mongodb":
+        expected_created.add("published_show_priority")
+    assert set(created) == expected_created
     assert duplicate.error == "duplicate_key"
 
 

@@ -7,7 +7,9 @@ from tinymongo.indexes import (
     IndexBatchPlan,
     IndexSpec,
     TinyMongoUnsupportedWarning,
+    degraded_index_reuse_warning,
     emit_index_plan_warnings,
+    index_spec_signature,
     plan_index_model,
     plan_index_models,
 )
@@ -62,6 +64,57 @@ def test_existing_index_spec_passes_through_unchanged():
     assert plan.name == "login"
     assert plan.requested_keys == (("email", 1),)
     assert plan.outcome == "create"
+
+
+def test_index_signature_uses_keys_and_unique_options_but_not_name():
+    assert index_spec_signature(IndexSpec("email", name="first")) == (
+        "email",
+        1,
+        False,
+    )
+    assert index_spec_signature(IndexSpec("email", name="second")) == (
+        "email",
+        1,
+        False,
+    )
+    assert index_spec_signature(IndexSpec("email", name="unique", unique=True)) == (
+        "email",
+        1,
+        True,
+    )
+
+    with pytest.raises(TypeError, match="IndexSpec"):
+        index_spec_signature("email")
+
+
+def test_degraded_reuse_warning_combines_degradation_and_existing_name():
+    plan = plan_index_model({"key": {"created": -1}, "name": "newest_created"})
+    warning = degraded_index_reuse_warning(
+        plan,
+        IndexSpec("created", name="created_lookup"),
+    )
+
+    assert "newest_created" in warning
+    assert "descending direction" in warning
+    assert "existing index 'created_lookup'" in warning
+    assert "reused" in warning
+
+
+def test_degraded_reuse_warning_rejects_invalid_or_inequivalent_inputs():
+    degraded = plan_index_model({"key": {"created": -1}})
+    skipped = plan_index_model({"key": {"body": "text"}})
+    ordinary = plan_index_model({"key": {"created": 1}})
+
+    with pytest.raises(TypeError, match="effective index plan"):
+        degraded_index_reuse_warning(object(), IndexSpec("created"))
+    with pytest.raises(TypeError, match="effective index plan"):
+        degraded_index_reuse_warning(skipped, IndexSpec("body"))
+    with pytest.raises(TypeError, match="existing IndexSpec"):
+        degraded_index_reuse_warning(degraded, object())
+    with pytest.raises(ValueError, match="Only degraded"):
+        degraded_index_reuse_warning(ordinary, IndexSpec("created"))
+    with pytest.raises(ValueError, match="equivalent"):
+        degraded_index_reuse_warning(degraded, IndexSpec("other"))
 
 
 @pytest.mark.parametrize(

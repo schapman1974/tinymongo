@@ -12,11 +12,22 @@
   application pipelines, including full inclusion/exclusion and computed
   projection modes, dotted array writes and sorts, BSON ordering, pagination,
   counts, null/missing values, empty inputs, and async cursor behavior.
+- MongoDB-style array updates for `$push` with `$each`, `$position`, `$sort`,
+  and `$slice`; `$addToSet` with `$each`; and literal, query, or document
+  operands for `$pull`, with atomic validation across sync and async backends.
+- Exact optional Decimal128 persistence plus numeric equality, range queries,
+  sorting, embedded unique indexes, `$inc`, and `$group` accumulators across
+  backends.
 
 ### Changed
 - Aggregation capability reporting now describes the exact supported stages,
   accumulators, and expressions instead of reporting a blanket unsupported
-  value.
+  value. The value therefore changed from falsey `False` to a truthy structured
+  mapping; use `client.supports("aggregation")` for a Boolean check or inspect
+  the mapping when selecting individual features.
+- Remote SQL unique indexes fail closed for Decimal128 values, as they already
+  do for arrays, when their native JSON constraints cannot guarantee exact
+  MongoDB numeric identity across concurrent writers.
 
 ### Fixed
 - Aggregation field references no longer cross a raw array nested directly
@@ -25,6 +36,27 @@
   and append directly computed fields in specification order.
 - Cursor and aggregation sorting now traverse dotted paths through multi-item
   arrays consistently instead of treating those values as missing.
+- Degraded index batches now reuse an existing equivalent effective index and
+  emit one warning instead of creating duplicate metadata or native work.
+- Direct equivalent index declarations under a different name now raise
+  MongoDB-compatible error code 85, while exact-name retries remain idempotent
+  for catalogs created by older releases.
+- Unsupported-feature warnings now retain the application call site across
+  synchronous calls and async executor threads.
+- Embedded unique indexes now use exact numeric identity across integers,
+  doubles, and Decimal128 values, including large exactly equivalent integers
+  and integral-looking doubles; SQLite attempts a one-time rebuild of legacy
+  expression indexes when upgrading the token format.
+- If that SQLite rebuild discovers values an older unique token incorrectly
+  treated as distinct, TinyMongo raises `DuplicateKeyError`, removes the unsafe
+  native expression constraint, and retains fail-closed catalog enforcement so
+  the conflicting row can be removed before the index is recreated.
+- Typed backend IDs now encode extreme Decimal128 ratios without relying on
+  Python's bounded decimal integer conversion.
+- Unsorted SQLite projections now shape and release documents during the row
+  scan, and `_id`-only sweeps avoid transferring unrequested JSON payloads into
+  Python. Sorted cursors retain their complete-document fallback so omitted
+  sort keys continue to order results correctly.
 
 ## [1.2.1] - 2026-07-31
 
