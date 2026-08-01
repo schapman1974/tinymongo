@@ -289,8 +289,9 @@ def test_project_size_rejects_non_array_runtime_values(document):
     collection = _collection("aggregation-project-size-type")
     collection.insert_one(document)
 
-    with pytest.raises(OperationFailure, match=r"\$size.*array"):
+    with pytest.raises(OperationFailure, match=r"\$size.*array") as caught:
         collection.aggregate([{"$project": {"size": {"$size": "$value"}}}])
+    assert caught.value.code == 17124
 
 
 @pytest.mark.parametrize(
@@ -298,21 +299,6 @@ def test_project_size_rejects_non_array_runtime_values(document):
     [
         ([{"$project": []}], OperationFailure, r"\$project"),
         ([{"$project": {}}], OperationFailure, "non-empty"),
-        (
-            [{"$project": {"secret": 0}}],
-            TinyMongoNotSupportedError,
-            "exclusion",
-        ),
-        (
-            [{"$project": {"profile": {"secret": 0}}}],
-            TinyMongoNotSupportedError,
-            "exclusion",
-        ),
-        (
-            [{"$project": {"nested.count": {"$size": "$values"}}}],
-            TinyMongoNotSupportedError,
-            "dotted output",
-        ),
         (
             [{"$project": {"value": {"$add": [1, 2]}}}],
             TinyMongoNotSupportedError,
@@ -525,11 +511,21 @@ def test_capability_descriptions_are_fresh_and_supports_is_true():
     first["stages"] = ()
 
     client = tinymongo.TinyMongoClient(backend="memory")
-    assert second["stages"] == ("$match", "$project", "$group")
-    assert second["expressions"] == ("$ifNull", "$size")
+    assert second["stages"] == (
+        "$match",
+        "$project",
+        "$set",
+        "$addFields",
+        "$unset",
+        "$group",
+    )
+    assert second["expressions"] == ("$ifNull", "$literal", "$size")
     assert client.capabilities()["aggregation"]["stages"] == (
         "$match",
         "$project",
+        "$set",
+        "$addFields",
+        "$unset",
         "$group",
     )
     assert client.supports("aggregation") is True

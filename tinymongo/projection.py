@@ -127,11 +127,12 @@ def _include_value(value, tree):
         return copy.deepcopy(value)
     if isinstance(value, dict):
         result = {}
-        for key, child_tree in tree.items():
-            if key in value:
-                child = _include_value(value[key], child_tree)
-                if child is not _OMIT:
-                    result[key] = child
+        for key, child_value in value.items():
+            if key not in tree:
+                continue
+            child = _include_value(child_value, tree[key])
+            if child is not _OMIT:
+                result[key] = child
         return result
     if isinstance(value, list):
         result = []
@@ -170,12 +171,13 @@ def project_document(document, projection):
         return result
 
     result = {}
-    if projection.include_id and "_id" in document and "_id" not in projection.tree:
-        result["_id"] = copy.deepcopy(document["_id"])
-    for key, tree in projection.tree.items():
-        if key not in document:
-            continue
-        value = _include_value(document[key], tree)
-        if value is not _OMIT:
-            result[key] = value
+    for key, value in document.items():
+        if key == "_id" and key not in projection.tree:
+            included = copy.deepcopy(value) if projection.include_id else _OMIT
+        elif key in projection.tree:
+            included = _include_value(value, projection.tree[key])
+        else:
+            included = _OMIT
+        if included is not _OMIT:
+            result[key] = included
     return result
