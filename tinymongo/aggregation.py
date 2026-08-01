@@ -9,7 +9,10 @@ from __future__ import absolute_import
 
 import copy
 from collections.abc import Mapping
+from itertools import islice
+import math
 from numbers import Number
+import warnings
 
 from .bson_types import (
     binary_components,
@@ -18,7 +21,9 @@ from .bson_types import (
     bson_value_sort_key,
 )
 from .errors import OperationFailure, TinyMongoNotSupportedError
+from .indexes import TinyMongoUnsupportedWarning
 from .projection import normalize_projection, project_document
+from .sorting import sort_documents
 from .table_backends import matches_filter, validate_filter_operators
 
 
@@ -43,6 +48,10 @@ _SUPPORTED_ACCUMULATORS = ("$max", "$min", "$sum")
 _SUPPORTED_EXPRESSIONS = ("$ifNull", "$literal", "$size")
 _SUPPORTED_STAGES = (
     "$match",
+    "$sort",
+    "$skip",
+    "$limit",
+    "$count",
     "$project",
     "$set",
     "$addFields",
@@ -479,8 +488,13 @@ class AggregationEngine(object):
 
     def __init__(self):
         self.context = AggregationContext()
+        self._unsupported_sort_warnings = set()
         self.stage_registry = {
             "$match": (self._validate_match, self._match),
+            "$sort": (self._validate_sort, self._sort),
+            "$skip": (self._validate_skip, self._skip),
+            "$limit": (self._validate_limit, self._limit),
+            "$count": (self._validate_count, self._count),
             "$project": (self._validate_project, self._project),
             "$set": (self._validate_add_fields, self._add_fields),
             "$addFields": (self._validate_add_fields, self._add_fields),
@@ -548,6 +562,151 @@ class AggregationEngine(object):
             for document in documents
             if matches_filter(document, specification)
         )
+
+    def _validate_sort(self, specification):
+        if not isinstance(specification, Mapping):
+            raise OperationFailure(
+                "the $sort key specification must be an object", code=15973
+            )
+        if not specification:
+            raise OperationFailure(
+                "$sort stage must have at least one sort key", code=15976
+            )
+        if len(specification) > 32:
+            raise OperationFailure("too many compound keys", code=13103)
+
+        prepared = []
+        for field, direction in specification.items():
+            if not isinstance(field, str):
+                raise OperationFailure(
+                    "Illegal non-string key in $sort specification", code=15974
+                )
+            if not field:
+                raise OperationFailure(
+                    "FieldPath cannot be constructed with empty string", code=40352
+                )
+            if field.startswith("$"):
+                raise OperationFailure(
+                    "FieldPath field names may not start with '$'", code=16410
+                )
+            self.context.validate_field_path("$placeholder." + field)
+
+            if isinstance(direction, Mapping) and "$meta" in direction:
+                raise TinyMongoNotSupportedError(
+                    "Aggregation $sort $meta expressions are not supported by "
+                    "TinyMongo"
+                )
+            if isinstance(direction, bool) or not isinstance(direction, (int, float)):
+                raise OperationFailure(
+                    "Illegal key in $sort specification: {0}".format(field),
+                    code=15974,
+                )
+            if (
+                isinstance(direction, float) and not math.isfinite(direction)
+            ) or direction not in (-1, 1):
+                raise OperationFailure(
+                    "$sort key ordering must be 1 (for ascending) or -1 "
+                    "(for descending)",
+                    code=15975,
+                )
+            prepared.append((field, int(direction)))
+        return tuple(prepared)
+
+    def _warn_unsupported_sort_value(self, field, value):
+        warning_key = (field, type(value))
+        if warning_key in self._unsupported_sort_warnings:
+            return
+        self._unsupported_sort_warnings.add(warning_key)
+        warnings.warn(
+            "Sorting field '{0}' encountered unsupported value type '{1}'; "
+            "values of this type compare as null.".format(
+                field,
+                type(value).__name__,
+            ),
+            TinyMongoUnsupportedWarning,
+            stacklevel=4,
+        )
+
+    def _sort(self, documents, specification):
+        return sort_documents(
+            documents,
+            specification,
+            unsupported_value_callback=self._warn_unsupported_sort_value,
+        )
+
+    @staticmethod
+    def _validate_integral_stage_number(value, stage, code):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise OperationFailure(
+                "invalid argument to {0} stage: Expected a number".format(stage),
+                code=code,
+            )
+        if isinstance(value, float) and (
+            not math.isfinite(value) or not value.is_integer()
+        ):
+            raise OperationFailure(
+                "invalid argument to {0} stage: Expected an integer".format(stage),
+                code=code,
+            )
+
+        normalized = int(value)
+        if normalized < 0 or normalized > (2**63 - 1):
+            raise OperationFailure(
+                "invalid argument to {0} stage: Expected a non-negative "
+                "64-bit integer".format(stage),
+                code=code,
+            )
+        return normalized
+
+    @classmethod
+    def _validate_skip(cls, value):
+        return cls._validate_integral_stage_number(value, "$skip", 5107200)
+
+    @classmethod
+    def _validate_limit(cls, value):
+        normalized = cls._validate_integral_stage_number(value, "$limit", 5107201)
+        if normalized == 0:
+            raise OperationFailure("the limit must be positive", code=15958)
+        return normalized
+
+    @staticmethod
+    def _skip(documents, amount):
+        return islice(documents, amount, None)
+
+    @staticmethod
+    def _limit(documents, amount):
+        return islice(documents, amount)
+
+    @staticmethod
+    def _validate_count(field):
+        if not isinstance(field, str):
+            raise OperationFailure(
+                "the count field must be a non-empty string", code=40156
+            )
+        if not field:
+            raise OperationFailure(
+                "the count field must be a non-empty string", code=40157
+            )
+        if field.startswith("$"):
+            raise OperationFailure(
+                "the count field cannot be a $-prefixed path", code=40158
+            )
+        if "\x00" in field:
+            raise OperationFailure(
+                "the count field cannot contain a null byte", code=40159
+            )
+        if "." in field:
+            raise OperationFailure("the count field cannot contain '.'", code=40160)
+        if field == "_id":
+            raise OperationFailure(
+                "a group's fields must not include '_id'", code=15948
+            )
+        return field
+
+    @staticmethod
+    def _count(documents, field):
+        amount = sum(1 for _document in documents)
+        return [] if amount == 0 else [{field: amount}]
 
     def _validate_project(self, specification):
         if not isinstance(specification, Mapping):

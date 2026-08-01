@@ -25,6 +25,7 @@ from .bson_types import (
     object_id_type,
 )
 from .aggregation import AggregationEngine, aggregation_capabilities
+from .sorting import bson_document_sort_value_key, sort_documents
 from .storage_backends import (
     clear_memory_database,
     clear_memory_namespace,
@@ -2808,22 +2809,19 @@ class TinyMongoCursor(object):
         into a sortable tuple.
         """
 
-        if isinstance(value, list) and is_reverse is not None:
-            members = (
-                [self._order(member, sort_field=sort_field) for member in value]
-                if value
-                else [(-1, ())]
-            )
-            # MongoDB compares an array sort field by its smallest element for
-            # ascending order and its largest element for descending order.
-            return max(members) if is_reverse else min(members)
-
-        value_key = bson_value_sort_key(value)
-        if value_key is None:
-            if sort_field is not None:
-                self._warn_unsupported_sort_value(sort_field, value)
-            return 0, None
-        return value_key
+        if is_reverse is None:
+            value_key = bson_value_sort_key(value)
+            if value_key is None:
+                if sort_field is not None:
+                    self._warn_unsupported_sort_value(sort_field, value)
+                return 0, None
+            return value_key
+        return bson_document_sort_value_key(
+            value,
+            descending=is_reverse,
+            sort_field=sort_field,
+            unsupported_value_callback=self._warn_unsupported_sort_value,
+        )
 
     def sort(self, key_or_list, direction=None):
         """
@@ -2879,91 +2877,11 @@ class TinyMongoCursor(object):
 
         self._sort_spec = (copy.deepcopy(key_or_list), direction)
 
-        # sorting
-
-        _cursordat = list(self._source_data)
-
-        total = len(_cursordat)
-        pre_sect_stack = list()
-        for pair in sort_specifier:
-
-            is_reverse = bool(1 - pair[1])
-            value_stack = list()
-            for index, data in enumerate(_cursordat):
-
-                # get field value
-
-                not_found = None
-                for key in pair[0].split("."):
-                    not_found = True
-
-                    if isinstance(data, dict) and key in data:
-                        data = copy.deepcopy(data[key])
-                        not_found = False
-
-                    elif isinstance(data, list):
-                        if not is_reverse and len(data) == 1:
-                            # MongoDB treat [{data}] as {data}
-                            # when finding fields
-                            if isinstance(data[0], dict) and key in data[0]:
-                                data = copy.deepcopy(data[0][key])
-                                not_found = False
-
-                        elif is_reverse:
-                            # MongoDB will keep finding field in reverse mode
-                            for _d in data:
-                                if isinstance(_d, dict) and key in _d:
-                                    data = copy.deepcopy(_d[key])
-                                    not_found = False
-                                    break
-
-                    if not_found:
-                        break
-
-                # parsing data for sorting
-
-                if not_found:
-                    # treat no match as None
-                    data = None
-
-                value = self._order(data, is_reverse, pair[0])
-
-                # read previous section
-                pre_sect = pre_sect_stack[index] if pre_sect_stack else 0
-                # inverse if in reverse mode
-                # for keeping order as ASCENDING after sort
-                pre_sect = (total - pre_sect) if is_reverse else pre_sect
-                _ind = (total - index) if is_reverse else index
-
-                value_stack.append((pre_sect, value, _ind))
-
-            # sorting cursor data
-
-            value_stack.sort(reverse=is_reverse)
-
-            ordereddat = list()
-            sect_stack = list()
-            sect_id = -1
-            last_dat = None
-            for dat in value_stack:
-                # restore if in reverse mode
-                _ind = (total - dat[-1]) if is_reverse else dat[-1]
-                ordereddat.append(_cursordat[_ind])
-
-                # define section
-                # maintain the sorting result in next level sorting
-                if not dat[1] == last_dat:
-                    sect_id += 1
-                sect_stack.append(sect_id)
-                last_dat = dat[1]
-
-            # save result for next level sorting
-            _cursordat = ordereddat
-            pre_sect_stack = sect_stack
-
-        # done
-
-        self._source_data = _cursordat
+        self._source_data = sort_documents(
+            self._source_data,
+            sort_specifier,
+            unsupported_value_callback=self._warn_unsupported_sort_value,
+        )
         self._refresh_view()
 
         return self

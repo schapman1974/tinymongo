@@ -389,7 +389,6 @@ def test_project_validation_fails_before_storage_read(pipeline, error, message):
     ("pipeline", "message"),
     [
         ([{"$lookup": {}}], r"\$lookup"),
-        ([{"$sort": {"value": 1}}], r"\$sort"),
         ([{"$group": {"_id": "$key", "mean": {"$avg": "$value"}}}], r"\$avg"),
         ([{"$group": {"_id": "literal"}}], "field path or None"),
         ([{"$group": {"_id": "$$ROOT"}}], "field path or None"),
@@ -513,6 +512,10 @@ def test_capability_descriptions_are_fresh_and_supports_is_true():
     client = tinymongo.TinyMongoClient(backend="memory")
     assert second["stages"] == (
         "$match",
+        "$sort",
+        "$skip",
+        "$limit",
+        "$count",
         "$project",
         "$set",
         "$addFields",
@@ -522,6 +525,10 @@ def test_capability_descriptions_are_fresh_and_supports_is_true():
     assert second["expressions"] == ("$ifNull", "$literal", "$size")
     assert client.capabilities()["aggregation"]["stages"] == (
         "$match",
+        "$sort",
+        "$skip",
+        "$limit",
+        "$count",
         "$project",
         "$set",
         "$addFields",
