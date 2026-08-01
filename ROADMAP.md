@@ -179,9 +179,10 @@ Exit criteria:
 - [ ] [#96: Basic aggregation stages](https://github.com/schapman1974/tinymongo/issues/96)
   - [x] Implement `$match` through the existing query matcher.
   - [ ] Add the remaining basic stages.
-- [ ] [#97: Aggregation projection stages](https://github.com/schapman1974/tinymongo/issues/97)
+- [x] [#97: Aggregation projection stages](https://github.com/schapman1974/tinymongo/issues/97)
   - [x] Add the application-required `$project`, `$size`, and `$ifNull` slice.
-  - [ ] Complete the remaining projection-stage and expression scope.
+  - [x] Complete the initial projection scope with full `$project` modes,
+    `$set`, `$addFields`, `$unset`, `$literal`, and `$$REMOVE`.
 - [ ] [#91: Grouping and accumulators](https://github.com/schapman1974/tinymongo/issues/91)
   - [x] Support field-path and `None` group keys with `$min`, `$max`, and
     `$sum`.

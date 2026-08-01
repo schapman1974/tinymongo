@@ -122,10 +122,17 @@ def test_remote_sql_aggregation_core(backend, env_name):
             [
                 {"$match": {"score": {"$lte": 5}}},
                 {
+                    "$set": {
+                        "item_count": {"$size": {"$ifNull": ["$items", []]}},
+                        "temporary": {"$literal": "$score"},
+                    }
+                },
+                {"$unset": ["items", "temporary"]},
+                {
                     "$project": {
                         "team": 1,
                         "score": 1,
-                        "item_count": {"$size": {"$ifNull": ["$items", []]}},
+                        "item_count": 1,
                     }
                 },
                 {
@@ -175,9 +182,16 @@ def test_remote_sql_async_aggregation_projection(backend, env_name):
                 [
                     {"$match": {"course_id": {"$in": ["python"]}}},
                     {
+                        "$addFields": {
+                            "count": {"$size": {"$ifNull": ["$lectures", []]}},
+                            "literal": {"$literal": "$course_id"},
+                        }
+                    },
+                    {"$unset": ["lectures", "literal"]},
+                    {
                         "$project": {
                             "course_id": 1,
-                            "count": {"$size": {"$ifNull": ["$lectures", []]}},
+                            "count": 1,
                         }
                     },
                     {

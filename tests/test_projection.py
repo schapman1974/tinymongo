@@ -64,6 +64,10 @@ def test_projection_inclusion_sequences_and_id_rules(collection):
         "name": "Ada",
     }
     assert collection.find_one({"_id": 1}, {"name": 2, "_id": 0}) == {"name": "Ada"}
+    assert project_document(
+        {"_id": 1, "name": "Ada", "secret": True},
+        normalize_projection({"name": 1, "_id": 0}),
+    ) == {"name": "Ada"}
     assert collection.find_one({"_id": 1}, {"_id": 1}) == {"_id": 1}
     assert collection.find_one({"_id": 1}, {"_id": 0}) == {
         "name": "Ada",

@@ -131,9 +131,16 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
     assert capabilities["backend"] == backend
     assert capabilities["persistent"] is True
     assert capabilities["aggregation"] == {
-        "stages": ("$match", "$project", "$group"),
+        "stages": (
+            "$match",
+            "$project",
+            "$set",
+            "$addFields",
+            "$unset",
+            "$group",
+        ),
         "accumulators": ("$max", "$min", "$sum"),
-        "expressions": ("$ifNull", "$size"),
+        "expressions": ("$ifNull", "$literal", "$size"),
     }
     assert capabilities["sessions"] is False
     assert client.supports("multiprocess_writes") is True

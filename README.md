@@ -483,10 +483,13 @@ Broader BSON comparison across query ranges and indexes remains tracked in
 ## Aggregation core subset
 
 `Collection.aggregate()` supports the production-driven core of `$match`,
-`$project`, and `$group`. `$match` uses the same query operators as `find()`.
-`$project` supports inclusion fields, `_id: 0`, and top-level computed fields
-using `$size` and `$ifNull`. `$group` accepts a field-path or `None` `_id` and
-the `$min`, `$max`, and `$sum` accumulators:
+`$project`, `$set`, `$addFields`, `$unset`, and `$group`. `$match` uses the same
+query operators as `find()`. `$project` supports inclusion, exclusion, renamed
+or computed fields, nested specifications, dotted output paths through arrays,
+and MongoDB's special `_id` rules. The available projection expressions are
+`$ifNull`, `$literal`, and `$size`; `$$REMOVE` conditionally omits or removes a
+field. `$group` accepts a field-path or `None` `_id` and the `$min`, `$max`, and
+`$sum` accumulators:
 
 ```python
 activity = events.aggregate(
@@ -510,20 +513,25 @@ rows = activity.to_list()
 ```
 
 In the async API, await `aggregate()` to obtain an async cursor, then use
-`async for` or `await cursor.to_list()`. Dotted field paths and dotted inclusion
-projections are supported. Computed dotted output paths and exclusion of fields
-other than `_id` remain outside this measured projection slice and fail clearly.
+`async for` or `await cursor.to_list()`. `$set` and `$addFields` are aliases that
+retain the input document, support nested and dotted array-aware writes, and
+evaluate every right-hand expression against the original stage input. `$unset`
+accepts one field name or a nonempty list of field names and follows exclusion
+projection behavior. Numeric array-index paths remain unsupported.
+
 `$min` and `$max` ignore null and missing inputs unless every input is null or
 missing, in which case they return null. `$sum` ignores missing and nonnumeric
 values, and an empty input produces no groups, including for `_id: None`.
-TinyMongo keeps first-seen group order for repeatable local results, but—as
-with MongoDB—`$group` output order is not a public guarantee.
+TinyMongo keeps first-seen group order for repeatable local results, but—as with
+MongoDB—`$group` output order is not a public guarantee.
 
 Other stages, accumulators, expressions, and aggregation options raise
 `TinyMongoNotSupportedError` with the unsupported feature named. The structured
 `client.capabilities()["aggregation"]` value lists the exact supported stages,
 accumulators, and expressions; `client.supports("aggregation")` reports whether
-any aggregation subset is available.
+any aggregation subset is available. In particular, `$replaceRoot`,
+`$replaceWith`, variables other than `$$REMOVE`, and MongoDB's broader expression
+language are not part of this slice yet.
 
 ## ObjectId, datetime, and binary values
 
