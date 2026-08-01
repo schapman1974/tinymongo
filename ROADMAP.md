@@ -180,7 +180,8 @@ Exit criteria:
   - [x] Implement `$match` through the existing query matcher.
   - [ ] Add the remaining basic stages.
 - [ ] [#97: Aggregation projection stages](https://github.com/schapman1974/tinymongo/issues/97)
-  - [ ] Add the application-required `$project`, `$size`, and `$ifNull` slice.
+  - [x] Add the application-required `$project`, `$size`, and `$ifNull` slice.
+  - [ ] Complete the remaining projection-stage and expression scope.
 - [ ] [#91: Grouping and accumulators](https://github.com/schapman1974/tinymongo/issues/91)
   - [x] Support field-path and `None` group keys with `$min`, `$max`, and
     `$sum`.
@@ -355,8 +356,8 @@ Exit criteria:
 5. [ ] Build aggregation core after the real-application acceptance path works.
    - [x] Deliver the shared `$match` plus `$group`/`$min`/`$max`/`$sum` slice
      across synchronous and asynchronous APIs.
-   - [ ] Add the measured `$project`/`$size`/`$ifNull` slice and complete the
-     second-application acceptance rerun.
+   - [x] Add the measured `$project`/`$size`/`$ifNull` slice.
+   - [ ] Complete the second-application acceptance rerun with Mike.
 6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
    compatibility gaps.
 7. [ ] Implement GridFS on stable BSON, index, and cursor foundations.

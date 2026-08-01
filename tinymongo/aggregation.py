@@ -1,24 +1,40 @@
 """Backend-independent aggregation pipeline execution.
 
-The first supported slice intentionally stays small: ``$match`` and ``$group``
-with the ``$min``, ``$max``, and ``$sum`` accumulators.  Keeping the pipeline
-engine separate from storage lets every TinyMongo backend share validation,
-field-path, missing-value, and BSON comparison behavior.
+The production-driven slice intentionally stays small: ``$match``, ``$project``,
+and ``$group`` with the ``$ifNull`` and ``$size`` projection expressions and the
+``$min``, ``$max``, and ``$sum`` accumulators. Keeping the pipeline engine
+separate from storage lets every TinyMongo backend share validation, field-path,
+missing-value, and BSON comparison behavior.
 """
 
 from __future__ import absolute_import
 
 import copy
 from collections.abc import Mapping
+from numbers import Number
 
 from .bson_types import bson_value_identity_key, bson_value_sort_key
 from .errors import OperationFailure, TinyMongoNotSupportedError
+from .projection import normalize_projection, project_document
 from .table_backends import matches_filter, validate_filter_operators
 
 
 _MISSING = object()
+_ALLOWED_DOLLAR_PREFIXED_FIELDS = frozenset(
+    (
+        "$db",
+        "$id",
+        "$recordId",
+        "$ref",
+        "$searchRootDocumentId",
+        "$searchScore",
+        "$searchSortValues",
+        "$sortKey",
+    )
+)
 _SUPPORTED_ACCUMULATORS = ("$max", "$min", "$sum")
-_SUPPORTED_STAGES = ("$match", "$group")
+_SUPPORTED_EXPRESSIONS = ("$ifNull", "$size")
+_SUPPORTED_STAGES = ("$match", "$project", "$group")
 
 
 def _sum_value(value):
@@ -37,7 +53,7 @@ def aggregation_capabilities():
     return {
         "stages": _SUPPORTED_STAGES,
         "accumulators": _SUPPORTED_ACCUMULATORS,
-        "expressions": (),
+        "expressions": _SUPPORTED_EXPRESSIONS,
     }
 
 
@@ -86,7 +102,48 @@ class AggregationContext(object):
                 "Aggregation field paths must be strings such as '$field'"
             )
 
-    def validate_expression(self, expression):
+        path = expression[1:]
+        if path.endswith("."):
+            raise OperationFailure(
+                "Aggregation field paths must not end with '.'", code=40353
+            )
+        parts = path.split(".")
+        if any(not part for part in parts):
+            raise OperationFailure(
+                "Aggregation field path components cannot be empty", code=15998
+            )
+        for part in parts:
+            if part.startswith("$") and part not in _ALLOWED_DOLLAR_PREFIXED_FIELDS:
+                raise OperationFailure(
+                    "Aggregation field path components may not start with '$'",
+                    code=16410,
+                )
+            if "\x00" in part:
+                raise OperationFailure(
+                    "Aggregation field path components may not contain null bytes",
+                    code=16411,
+                )
+
+    @staticmethod
+    def _expression_operator(expression):
+        operators = [key for key in expression if str(key).startswith("$")]
+        if not operators:
+            return None
+        if len(expression) != 1 or len(operators) != 1:
+            raise OperationFailure(
+                "Aggregation expression documents must contain one operator"
+            )
+        return operators[0]
+
+    @staticmethod
+    def _size_operand(operand):
+        if isinstance(operand, (list, tuple)):
+            if len(operand) != 1:
+                raise OperationFailure("$size requires exactly one expression")
+            return operand[0]
+        return operand
+
+    def validate_expression(self, expression, allowed_operators=()):
         """Reject unsupported expression operators before reading documents."""
 
         if isinstance(expression, str) and expression.startswith("$"):
@@ -94,41 +151,82 @@ class AggregationContext(object):
             return
         if isinstance(expression, (list, tuple)):
             for item in expression:
-                self.validate_expression(item)
+                self.validate_expression(item, allowed_operators)
             return
         if isinstance(expression, Mapping):
-            operators = [key for key in expression if str(key).startswith("$")]
-            if operators:
-                raise TinyMongoNotSupportedError(
-                    "Aggregation expression {0} is not supported by TinyMongo".format(
-                        operators[0]
+            operator = self._expression_operator(expression)
+            if operator is not None:
+                if operator not in allowed_operators:
+                    raise TinyMongoNotSupportedError(
+                        "Aggregation expression {0} is not supported by TinyMongo".format(
+                            operator
+                        )
                     )
-                )
+                operand = expression[operator]
+                if operator == "$ifNull":
+                    if not isinstance(operand, (list, tuple)) or len(operand) < 2:
+                        raise OperationFailure(
+                            "$ifNull requires at least two expressions"
+                        )
+                    for item in operand:
+                        self.validate_expression(item, allowed_operators)
+                    return
+                self.validate_expression(self._size_operand(operand), allowed_operators)
+                return
             for value in expression.values():
-                self.validate_expression(value)
+                self.validate_expression(value, allowed_operators)
 
     def resolve_field_path(self, document, expression):
         self.validate_field_path(expression)
         return _resolve_parts(document, expression[1:].split("."))
 
-    def evaluate(self, document, expression):
+    def evaluate(self, document, expression, allowed_operators=()):
         if isinstance(expression, str) and expression.startswith("$"):
             return self.resolve_field_path(document, expression)
         if isinstance(expression, list):
-            return [self.evaluate(document, item) for item in expression]
+            values = [
+                self.evaluate(document, item, allowed_operators) for item in expression
+            ]
+            return [None if value is _MISSING else value for value in values]
         if isinstance(expression, tuple):
-            return tuple(self.evaluate(document, item) for item in expression)
+            values = [
+                self.evaluate(document, item, allowed_operators) for item in expression
+            ]
+            return [None if value is _MISSING else value for value in values]
         if isinstance(expression, Mapping):
-            operators = [key for key in expression if str(key).startswith("$")]
-            if operators:
-                raise TinyMongoNotSupportedError(
-                    "Aggregation expression {0} is not supported by TinyMongo".format(
-                        operators[0]
+            operator = self._expression_operator(expression)
+            if operator is not None:
+                if operator not in allowed_operators:
+                    raise TinyMongoNotSupportedError(
+                        "Aggregation expression {0} is not supported by TinyMongo".format(
+                            operator
+                        )
                     )
+                operand = expression[operator]
+                if operator == "$ifNull":
+                    if not isinstance(operand, (list, tuple)) or len(operand) < 2:
+                        raise OperationFailure(
+                            "$ifNull requires at least two expressions"
+                        )
+                    for item in operand[:-1]:
+                        value = self.evaluate(document, item, allowed_operators)
+                        if value is not _MISSING and value is not None:
+                            return value
+                    return self.evaluate(document, operand[-1], allowed_operators)
+
+                value = self.evaluate(
+                    document, self._size_operand(operand), allowed_operators
                 )
-            return {
-                key: self.evaluate(document, value) for key, value in expression.items()
-            }
+                if not isinstance(value, list):
+                    raise OperationFailure("$size requires an array input")
+                return len(value)
+
+            result = {}
+            for key, value in expression.items():
+                evaluated = self.evaluate(document, value, allowed_operators)
+                if evaluated is not _MISSING:
+                    result[key] = evaluated
+            return result
         return copy.deepcopy(expression)
 
 
@@ -139,6 +237,7 @@ class AggregationEngine(object):
         self.context = AggregationContext()
         self.stage_registry = {
             "$match": (self._validate_match, self._match),
+            "$project": (self._validate_project, self._project),
             "$group": (self._validate_group, self._group),
         }
 
@@ -202,6 +301,72 @@ class AggregationEngine(object):
             for document in documents
             if matches_filter(document, specification)
         )
+
+    @staticmethod
+    def _is_projection_flag(value):
+        return isinstance(value, Number) or (
+            isinstance(value, Mapping)
+            and not any(str(key).startswith("$") for key in value)
+        )
+
+    @classmethod
+    def _has_non_id_exclusion(cls, specification, prefix=""):
+        for field, value in specification.items():
+            path = ".".join(part for part in (prefix, str(field)) if part)
+            if isinstance(value, Mapping) and not any(
+                str(key).startswith("$") for key in value
+            ):
+                if cls._has_non_id_exclusion(value, path):
+                    return True
+            elif isinstance(value, Number) and not bool(value) and path != "_id":
+                return True
+        return False
+
+    def _validate_project(self, specification):
+        if not isinstance(specification, Mapping) or not specification:
+            raise OperationFailure("$project stage must contain a non-empty document")
+
+        if self._has_non_id_exclusion(specification):
+            raise TinyMongoNotSupportedError(
+                "$project exclusion of fields other than _id is not supported"
+            )
+
+        shape = {}
+        computed = []
+        for output_field, expression in specification.items():
+            if self._is_projection_flag(expression):
+                shape[output_field] = copy.deepcopy(expression)
+                continue
+            self.context.validate_expression(expression, _SUPPORTED_EXPRESSIONS)
+            shape[output_field] = 1
+            computed.append((output_field, copy.deepcopy(expression)))
+
+        projection = normalize_projection(shape)
+        if any(
+            isinstance(output_field, str) and "." in output_field
+            for output_field, _expression in computed
+        ):
+            raise TinyMongoNotSupportedError(
+                "$project computed dotted output paths are not supported"
+            )
+        return projection, tuple(computed)
+
+    def _project(self, documents, prepared_project):
+        projection, computed = prepared_project
+
+        def project_one(document):
+            projected = project_document(document, projection)
+            for output_field, expression in computed:
+                value = self.context.evaluate(
+                    document, expression, _SUPPORTED_EXPRESSIONS
+                )
+                if value is _MISSING:
+                    projected.pop(output_field, None)
+                else:
+                    projected[output_field] = copy.deepcopy(value)
+            return projected
+
+        return (project_one(document) for document in documents)
 
     def _group(self, documents, prepared_group):
         group_expression, accumulators = prepared_group
@@ -293,6 +458,8 @@ class AggregationEngine(object):
             raise TinyMongoNotSupportedError(
                 "$group _id currently supports a field path or None"
             )
+        if group_expression is not None:
+            self.context.validate_field_path(group_expression)
 
         accumulators = []
         for output_field, accumulator in specification.items():
