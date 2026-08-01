@@ -2,12 +2,16 @@
 
 import json
 import math
-import warnings
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Mapping, Optional
 
 from .errors import DuplicateKeyError, TinyMongoNotSupportedError
+from .bson_types import bson_number_decimal, decimal128_type
+from .warning_context import emit_warning
+
+
+_Decimal128 = decimal128_type()
 
 
 INDEX_METADATA_VERSION = 1
@@ -120,6 +124,13 @@ class IndexSpec:
             name=metadata["name"],
             unique=metadata["unique"],
         )
+
+
+def index_spec_signature(spec):
+    """Return the key-and-options identity used to detect equivalent indexes."""
+    if not isinstance(spec, IndexSpec):
+        raise TypeError("Index signatures require an IndexSpec")
+    return (spec.field, spec.direction, spec.unique)
 
 
 def parse_index_spec(key, **options):
@@ -283,6 +294,27 @@ def _plan_warning(name, features):
     return "Index {0!r} was created with reduced behavior: {1}.".format(name, details)
 
 
+def degraded_index_reuse_warning(plan, existing):
+    """Describe one degraded declaration being satisfied by an existing index."""
+    if not isinstance(plan, IndexModelPlan) or plan.spec is None:
+        raise TypeError("Degraded index reuse requires an effective index plan")
+    if not isinstance(existing, IndexSpec):
+        raise TypeError("Degraded index reuse requires an existing IndexSpec")
+    if not plan.degraded_features:
+        raise ValueError("Only degraded index plans may reuse an equivalent index")
+    if index_spec_signature(plan.spec) != index_spec_signature(existing):
+        raise ValueError("A degraded index may only reuse an equivalent index")
+
+    details = "; ".join(
+        _degraded_feature_message(item) for item in plan.degraded_features
+    )
+    return (
+        "Index {0!r} was accepted with reduced behavior: {1}. Its effective "
+        "specification matches existing index {2!r}, so TinyMongo reused that "
+        "index instead of creating a duplicate."
+    ).format(plan.name, details, existing.name)
+
+
 def plan_index_model(model):
     """Plan one duck-typed PyMongo ``IndexModel`` declaration.
 
@@ -372,7 +404,7 @@ def emit_index_plan_warnings(plan, stacklevel=2):
     if not isinstance(plan, IndexBatchPlan):
         raise TypeError("Index warning emission requires an IndexBatchPlan")
     for message in plan.warnings:
-        warnings.warn(
+        emit_warning(
             message,
             TinyMongoUnsupportedWarning,
             stacklevel=stacklevel,
@@ -399,6 +431,20 @@ def _nested_value(document, path):
     return current
 
 
+def _exact_decimal_text(value):
+    """Normalize a Decimal without rounding its coefficient to 28 digits."""
+
+    with localcontext() as context:
+        context.prec = max(1, len(value.as_tuple().digits))
+        return str(value.normalize())
+
+
+def _float_token(value):
+    """Return a token for the double's exact numeric value."""
+
+    return "number:{0}".format(_exact_decimal_text(Decimal.from_float(value)))
+
+
 def _scalar_token(value):
     if value is MISSING or value is None:
         return "null:"
@@ -407,13 +453,20 @@ def _scalar_token(value):
     if isinstance(value, int):
         if value == 0:
             return "number:0"
-        return "number:{0}".format(Decimal(value).normalize())
+        return "number:{0}".format(_exact_decimal_text(Decimal(value)))
     if isinstance(value, float):
         if not math.isfinite(value):
             _unsupported("Non-finite numbers cannot be indexed")
         if value == 0:
             return "number:0"
-        return "number:{0}".format(Decimal(str(value)).normalize())
+        return _float_token(value)
+    if _Decimal128 is not None and isinstance(value, _Decimal128):
+        decimal_value = bson_number_decimal(value)
+        if not decimal_value.is_finite():
+            _unsupported("Non-finite numbers cannot be indexed")
+        if decimal_value == 0:
+            return "number:0"
+        return "number:{0}".format(_exact_decimal_text(decimal_value))
     if isinstance(value, str):
         return "string:{0}".format(
             json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -477,8 +530,10 @@ __all__ = [
     "IndexSpec",
     "MISSING",
     "TinyMongoUnsupportedWarning",
+    "degraded_index_reuse_warning",
     "emit_index_plan_warnings",
     "index_catalog_id",
+    "index_spec_signature",
     "index_tokens",
     "parse_index_spec",
     "plan_index_model",

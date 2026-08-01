@@ -3,7 +3,7 @@
 The JSON codec, query comparison, and cursor sorting all consume this registry
 so type recognition and subclass precedence cannot drift between them. PyMongo
 is optional: its bundled :mod:`bson` implementation is enabled atomically only
-when both ``ObjectId`` and ``Binary`` can be imported.
+when ``ObjectId``, ``Binary``, and ``Decimal128`` can all be imported.
 """
 
 from __future__ import absolute_import
@@ -11,6 +11,7 @@ from __future__ import absolute_import
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, localcontext
 import math
 from typing import Any, Callable, Optional
 
@@ -19,12 +20,18 @@ try:
     import pymongo as _pymongo  # noqa: F401 - proves this is PyMongo's bson
     from bson import ObjectId as _ObjectId
     from bson.binary import Binary as _Binary
+    from bson.decimal128 import (
+        Decimal128 as _Decimal128,
+        create_decimal128_context as _create_decimal128_context,
+    )
 except ImportError:  # pragma: no cover - environment without optional bson
     # Treat the optional implementation as one capability. This avoids
     # accidentally accepting the unrelated third-party ``bson`` distribution
     # or reporting partial BSON support from a broken installation.
     _ObjectId = None  # type: ignore[misc,assignment]
     _Binary = None  # type: ignore[misc,assignment]
+    _Decimal128 = None  # type: ignore[misc,assignment]
+    _create_decimal128_context = None  # type: ignore[misc,assignment]
 
 
 @dataclass(frozen=True)
@@ -51,18 +58,115 @@ def _number_identity_key(value):
     # MongoDB considers numeric values across integer/double representations by
     # numeric value. Python already supplies that equality/hash behavior except
     # for NaN, which MongoDB treats as one comparable numeric value.
-    if isinstance(value, float) and math.isnan(value):
+    decimal_value = bson_number_decimal(value)
+    if decimal_value.is_nan():
         return "nan"
-    return value
+    if decimal_value.is_infinite():
+        return "-infinity" if decimal_value.is_signed() else "infinity"
+    # A reduced ratio gives int, float, and Decimal128 one exact, JSON-safe
+    # identity without confusing a binary float such as 0.1 with Decimal128
+    # ("0.1"). This also preserves the physical-ID encoding used by earlier
+    # int/float releases.
+    return decimal_value.as_integer_ratio()
 
 
 def _number_sort_key(value):
     # MongoDB gives NaN a stable position below every other numeric value.
     # Python's raw NaN comparisons are unordered and can leave surrounding
     # ordinary numbers unsorted.
-    if isinstance(value, float) and math.isnan(value):
+    decimal_value = bson_number_decimal(value)
+    if decimal_value.is_nan():
         return 0, 0
-    return 1, value
+    return 1, decimal_value
+
+
+def bson_number_decimal(value):
+    """Return the exact :class:`Decimal` value of a supported BSON number."""
+
+    if isinstance(value, bool):
+        raise TypeError("Boolean values are not BSON numbers")
+    if _Decimal128 is not None and isinstance(value, _Decimal128):
+        return value.to_decimal()
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal.from_float(value)
+    raise TypeError("Unsupported BSON numeric type: {0}".format(type(value).__name__))
+
+
+def is_bson_number(value):
+    """Return whether ``value`` belongs to TinyMongo's BSON numeric family."""
+
+    return not isinstance(value, bool) and (
+        isinstance(value, (int, float))
+        or (_Decimal128 is not None and isinstance(value, _Decimal128))
+    )
+
+
+def _decimal128_update_operand(value):
+    """Convert one update operand using MongoDB's double-to-decimal rule."""
+
+    if isinstance(value, float):
+        if math.isfinite(value):
+            # MongoDB promotes a double used with Decimal128 to 15 significant
+            # decimal digits. Scientific notation retains the scale needed for
+            # results such as Decimal128("2") + 0.1 -> 2.100000000000000.
+            return Decimal(format(value, ".14e"))
+        return Decimal(str(value))
+    return bson_number_decimal(value)
+
+
+def add_bson_numbers(left, right):
+    """Add two update operands with MongoDB-style Decimal128 promotion."""
+
+    if not is_bson_number(left) or not is_bson_number(right):
+        raise TypeError("BSON numeric addition requires two numeric values")
+    if _Decimal128 is not None and (
+        isinstance(left, _Decimal128) or isinstance(right, _Decimal128)
+    ):
+        # PyMongo exposes the same IEEE-754 Decimal128 context MongoDB uses.
+        # Its traps are disabled, so sNaN and opposite infinities become NaN
+        # instead of leaking decimal.InvalidOperation into application code.
+        with localcontext(_create_decimal128_context()):
+            result = _decimal128_update_operand(left) + _decimal128_update_operand(
+                right
+            )
+        if (
+            isinstance(left, _Decimal128)
+            and not result.is_nan()
+            and result == left.to_decimal()
+        ):
+            # Preserve the existing BID, including scale and signed zero, when
+            # Decimal128 rounding makes the increment a storage-level no-op.
+            return left
+        return _Decimal128(result)
+    return left + right
+
+
+def decimal128_context():
+    """Return PyMongo's IEEE-754 Decimal128 arithmetic context."""
+
+    if _create_decimal128_context is None:
+        raise RuntimeError(
+            "Decimal128 arithmetic requires the optional pymongo package"
+        )
+    return _create_decimal128_context()
+
+
+def decimal128_from_decimal(value):
+    """Wrap a :class:`Decimal` in the installed BSON ``Decimal128`` type."""
+
+    if _Decimal128 is None:
+        raise RuntimeError(
+            "Decimal128 arithmetic requires the optional pymongo package"
+        )
+    return _Decimal128(value)
+
+
+def bson_number_truth(value):
+    """Return MongoDB's truth value for a numeric projection flag."""
+
+    return not bson_number_decimal(value).is_zero()
 
 
 def binary_components(value):
@@ -120,6 +224,14 @@ def _datetime_identity_key(value):
 # comparison order for the scalar families TinyMongo currently supports.
 _NULL = BSONTypeSpec("null", 0, _null_key, _null_key)
 _NUMBER = BSONTypeSpec("number", 1, _number_sort_key, _number_identity_key)
+_DECIMAL_NUMBER = BSONTypeSpec(
+    "number",
+    1,
+    _number_sort_key,
+    _number_identity_key,
+    storage_tag="decimal128",
+    requires_python_comparison=True,
+)
 _STRING = BSONTypeSpec("string", 2, _identity, _identity)
 _BINARY = BSONTypeSpec(
     "binary",
@@ -151,8 +263,14 @@ _DATETIME = BSONTypeSpec(
 def bson_capabilities():
     """Return the optional PyMongo BSON capabilities available at import time."""
 
-    available = _ObjectId is not None and _Binary is not None
-    return {"objectid": available, "binary": available}
+    available = (
+        _ObjectId is not None and _Binary is not None and _Decimal128 is not None
+    )
+    return {
+        "objectid": available,
+        "binary": available,
+        "decimal128": available,
+    }
 
 
 def object_id_type():
@@ -165,6 +283,12 @@ def binary_type():
     """Return PyMongo's ``Binary`` class, or ``None`` when unavailable."""
 
     return _Binary
+
+
+def decimal128_type():
+    """Return PyMongo's ``Decimal128`` class, or ``None`` when unavailable."""
+
+    return _Decimal128
 
 
 def bson_type_spec(value) -> Optional[BSONTypeSpec]:
@@ -182,11 +306,13 @@ def bson_type_spec(value) -> Optional[BSONTypeSpec]:
         return _BINARY
     if _ObjectId is not None and isinstance(value, _ObjectId):
         return _OBJECT_ID
+    if _Decimal128 is not None and isinstance(value, _Decimal128):
+        return _DECIMAL_NUMBER
     if isinstance(value, datetime):
         return _DATETIME
     if isinstance(value, bool):
         return _BOOLEAN
-    if isinstance(value, (int, float)):
+    if is_bson_number(value):
         return _NUMBER
     if isinstance(value, str):
         return _STRING

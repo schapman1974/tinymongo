@@ -15,15 +15,18 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
 
     monkeypatch.setattr(bson_types, "_ObjectId", marker)
     monkeypatch.setattr(bson_types, "_Binary", marker)
+    monkeypatch.setattr(bson_types, "_Decimal128", marker)
     assert bson_types.bson_capabilities() == {
         "objectid": True,
         "binary": True,
+        "decimal128": True,
     }
 
     monkeypatch.setattr(bson_types, "_Binary", None)
     assert bson_types.bson_capabilities() == {
         "objectid": False,
         "binary": False,
+        "decimal128": False,
     }
 
     monkeypatch.setattr(bson_types, "_ObjectId", None)
@@ -31,6 +34,7 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
     assert bson_types.bson_capabilities() == {
         "objectid": False,
         "binary": False,
+        "decimal128": False,
     }
 
 

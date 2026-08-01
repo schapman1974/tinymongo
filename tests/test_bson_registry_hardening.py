@@ -69,6 +69,7 @@ def test_registry_is_the_encoding_metadata_source():
     values = [
         (datetime(2026, 7, 29, 12, 30), "datetime"),
         (bson.ObjectId("000000000000000000000001"), "objectid"),
+        (bson.Decimal128("19.950"), "decimal128"),
         (b"native", "binary"),
         (bytearray(b"mutable"), "binary"),
         (uuid_binary, "binary"),
@@ -100,6 +101,12 @@ def test_binary_and_numeric_identity_keys_follow_bson_equality():
     assert bson_types.bson_values_equal(generic_binary, b"same") is True
     assert bson_types.bson_values_equal(uuid_binary, bytes(uuid_binary)) is False
     assert bson_types.bson_identity_key(1) == bson_types.bson_identity_key(1.0)
+    assert bson_types.bson_identity_key(1) == bson_types.bson_identity_key(
+        bson.Decimal128("1.00")
+    )
+    assert bson_types.bson_identity_key(0.1) != bson_types.bson_identity_key(
+        bson.Decimal128("0.1")
+    )
     assert bson_types.bson_values_equal(1, 1.0) is True
     assert bson_types.bson_values_equal(True, 1) is False
     assert bson_types.bson_identity_key(float("nan")) == bson_types.bson_identity_key(
@@ -108,9 +115,11 @@ def test_binary_and_numeric_identity_keys_follow_bson_equality():
 
 
 def test_numeric_sort_places_nan_below_all_other_numbers():
+    bson = pytest.importorskip("bson")
     values = [
         ("one", 1.0),
         ("nan", float("nan")),
+        ("decimal-nan", bson.Decimal128("NaN")),
         ("negative", -1.0),
         ("negative-infinity", float("-inf")),
         ("zero", 0.0),
@@ -125,6 +134,7 @@ def test_numeric_sort_places_nan_below_all_other_numbers():
         )
     ] == [
         "nan",
+        "decimal-nan",
         "negative-infinity",
         "negative",
         "zero",
@@ -269,10 +279,12 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
         assert bson_types.bson_capabilities() == {
             "objectid": False,
             "binary": False,
+            "decimal128": False,
         }
         assert bson_codec.bson_available() is False
         assert bson_codec.object_id_available() is False
         assert bson_codec.binary_available() is False
+        assert bson_codec.decimal128_available() is False
         assert bson_codec.loads(bson_codec.dumps(b"core")) == b"core"
         assert issubclass(InvalidDocument, TinyMongoError)
 
@@ -285,6 +297,12 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
         assert type(result.inserted_id) is str
         assert len(result.inserted_id) == 32
         assert client.core.items.find_one({"_id": result.inserted_id}) is not None
+
+        totals = client.core.totals
+        totals.insert_many([{"value": 0.1}, {"value": 0.2}])
+        assert totals.aggregate(
+            [{"$group": {"_id": None, "total": {"$sum": "$value"}}}]
+        ).to_list() == [{"_id": None, "total": 0.30000000000000004}]
         client.close()
 
         invalid_document = {

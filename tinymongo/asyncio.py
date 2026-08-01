@@ -22,6 +22,11 @@ from .tinymongo import (
     TinyMongoCollection,
     TinyMongoCursor,
 )
+from .warning_context import (
+    WarningOrigin,
+    capture_warning_origin,
+    use_warning_origin,
+)
 
 
 class _AsyncClientState:
@@ -64,7 +69,9 @@ class _AsyncClientState:
     async def call(self, operation: Callable[[TinyMongoClient], Any]) -> Any:
         """Run one complete synchronous operation outside the event loop."""
 
-        return await asyncio.to_thread(self._invoke, operation)
+        origin = capture_warning_origin()
+        with use_warning_origin(origin):
+            return await asyncio.to_thread(self._invoke, operation)
 
     def _close(self) -> None:
         with self._condition:
@@ -506,6 +513,7 @@ class AsyncTinyMongoCursor:
         self._find_args = tuple(find_args)
         self._find_kwargs = dict(find_kwargs or {})
         self._sort: Optional[Tuple[Any, Any]] = None
+        self._sort_warning_origin: Optional[WarningOrigin] = None
         self._skip = 0
         self._limit = 0
         self._documents: Optional[List[Dict[str, Any]]] = None
@@ -525,6 +533,7 @@ class AsyncTinyMongoCursor:
         # specifications fail at configuration time, like PyMongo's cursor.
         TinyMongoCursor([]).sort(key_or_list, direction)
         self._sort = (copy.deepcopy(key_or_list), direction)
+        self._sort_warning_origin = capture_warning_origin()
         return self
 
     def skip(self, count: int) -> "AsyncTinyMongoCursor":
@@ -575,6 +584,7 @@ class AsyncTinyMongoCursor:
             documents=self._seed_documents,
         )
         clone._sort = copy.deepcopy(self._sort)
+        clone._sort_warning_origin = self._sort_warning_origin
         clone._skip = self._skip
         clone._limit = self._limit
         return clone
@@ -589,7 +599,8 @@ class AsyncTinyMongoCursor:
         if self._seed_documents is not None:
             cursor = TinyMongoCursor(copy.deepcopy(self._seed_documents))
             if self._sort is not None:
-                cursor.sort(self._sort[0], self._sort[1])
+                with use_warning_origin(self._sort_warning_origin):
+                    cursor.sort(self._sort[0], self._sort[1])
             documents = list(cursor)
             if self._skip:
                 documents = documents[self._skip :]
@@ -615,7 +626,8 @@ class AsyncTinyMongoCursor:
                 **self._find_kwargs,
             )
             if self._sort is not None:
-                cursor.sort(self._sort[0], self._sort[1])
+                with use_warning_origin(self._sort_warning_origin):
+                    cursor.sort(self._sort[0], self._sort[1])
             documents = list(cursor)
             if self._skip:
                 documents = documents[self._skip :]

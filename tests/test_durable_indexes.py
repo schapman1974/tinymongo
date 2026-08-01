@@ -14,6 +14,7 @@ from tinymongo.errors import (
     OperationFailure,
     TinyMongoNotSupportedError,
 )
+from tinymongo.indexes import INDEX_CATALOG_TABLE, IndexSpec
 from tinymongo.storage_backends import clear_memory_namespace
 
 
@@ -364,13 +365,136 @@ def test_index_creation_is_idempotent_and_rejects_conflicts(
         == "login_email"
     )
 
-    assert users.create_index("email", name="other_name", unique=True) == "other_name"
+    with pytest.raises(OperationFailure, match="different name") as different_name:
+        users.create_index("email", name="other_name", unique=True)
+    assert different_name.value.code == 85
     with pytest.raises(OperationFailure, match="different options"):
         users.create_index("username", name="login_email", unique=True)
     with pytest.raises(OperationFailure, match="different options"):
         users.create_index("email", name="login_email", unique=False)
 
-    assert set(_indexes_by_name(users)) == {"_id_", "login_email", "other_name"}
+    assert set(_indexes_by_name(users)) == {"_id_", "login_email"}
+
+
+def test_legacy_equivalent_index_catalog_keeps_named_retry_idempotent(tmp_path):
+    client = tinymongo.TinyMongoClient(str(tmp_path / "legacy-equivalent"))
+    users = client.app.users
+    users.create_index("email", name="first")
+    duplicate = IndexSpec("email", name="second")
+    users.parent.tinydb.table(INDEX_CATALOG_TABLE).insert(
+        users._index_document(duplicate)
+    )
+
+    assert users.create_index("email", name="second") == "second"
+
+
+def test_degraded_batch_reuses_equivalent_indexes_and_preserves_unique_options(
+    durable_index_backend,
+):
+    client = durable_index_backend.open()
+    users = client.app.users
+    users.create_index("created", name="created_lookup")
+
+    with pytest.warns(UserWarning) as captured:
+        names = users.create_indexes(
+            [
+                {"key": {"created": -1}, "name": "newest_created"},
+                {"key": {"created": "hashed"}, "name": "hashed_created"},
+                {
+                    "key": {"created": -1},
+                    "name": "unique_created",
+                    "unique": True,
+                },
+            ]
+        )
+
+    assert names == ["created_lookup", "created_lookup", "unique_created"]
+    assert len(captured) == 3
+    assert "descending direction" in str(captured[0].message)
+    assert "existing index 'created_lookup'" in str(captured[0].message)
+    assert "hashed indexing" in str(captured[1].message)
+    assert "existing index 'created_lookup'" in str(captured[1].message)
+    assert "reused" not in str(captured[2].message)
+    assert set(_indexes_by_name(users)) == {
+        "_id_",
+        "created_lookup",
+        "unique_created",
+    }
+
+
+def test_degraded_batch_reuses_an_earlier_batch_entry(durable_index_backend):
+    client = durable_index_backend.open()
+    users = client.app.users
+
+    with pytest.warns(UserWarning) as captured:
+        names = users.create_indexes(
+            [
+                {"key": {"score": -1}, "name": "score_desc"},
+                {"key": {"score": "hashed"}, "name": "score_hashed"},
+            ]
+        )
+
+    assert names == ["score_desc", "score_desc"]
+    assert len(captured) == 2
+    assert "reused" not in str(captured[0].message)
+    assert "existing index 'score_desc'" in str(captured[1].message)
+    assert set(_indexes_by_name(users)) == {"_id_", "score_desc"}
+
+
+def test_degraded_id_batch_reuses_the_builtin_index(durable_index_backend):
+    client = durable_index_backend.open()
+    users = client.app.users
+
+    with pytest.warns(UserWarning) as captured:
+        names = users.create_indexes(
+            [
+                {"key": {"_id": -1}, "name": "id_desc"},
+                {"key": {"_id": "hashed"}, "name": "id_hash"},
+            ]
+        )
+
+    assert names == ["_id_", "_id_"]
+    assert len(captured) == 2
+    assert "existing index '_id_'" in str(captured[1].message)
+    assert users.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
+
+
+def test_concurrent_degraded_batches_plan_under_one_storage_lock(
+    durable_index_backend, monkeypatch
+):
+    client = durable_index_backend.open()
+    users = client.app.users
+    original = users._current_index_specs
+    start = threading.Barrier(2)
+    observation_lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def observed_specs():
+        nonlocal active, maximum_active
+        with observation_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.03)
+            return original()
+        finally:
+            with observation_lock:
+                active -= 1
+
+    monkeypatch.setattr(users, "_current_index_specs", observed_specs)
+
+    def create(name):
+        start.wait()
+        return users.create_indexes([{"key": {"score": -1}, "name": name}])[0]
+
+    with pytest.warns(UserWarning):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            names = list(executor.map(create, ("score_first", "score_second")))
+
+    assert len(set(names)) == 1
+    assert maximum_active == 1
+    assert set(_indexes_by_name(users)) == {"_id_", names[0]}
 
 
 def test_builtin_id_index_has_fixed_options(durable_index_backend):

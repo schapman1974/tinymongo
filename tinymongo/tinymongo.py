@@ -6,26 +6,31 @@ from __future__ import absolute_import
 
 import copy
 from collections.abc import Iterable, Mapping, MutableMapping
+from dataclasses import replace
 from functools import reduce, wraps
 import logging
 import operator as comparison_operator
 import os
 import shutil
 import threading
-import warnings
 from uuid import uuid4
 
 from tinydb import Query, TinyDB, where  # type: ignore[attr-defined]
-from .bson_codec import bson_available
+from .bson_codec import bson_available, storage_values_equal
 from .bson_types import (
+    add_bson_numbers,
     bson_identity_key,
+    bson_number_decimal,
     bson_scalar_sort_key,
     bson_value_sort_key,
     bson_values_equal,
+    decimal128_type,
+    is_bson_number,
     object_id_type,
 )
 from .aggregation import AggregationEngine, aggregation_capabilities
 from .sorting import bson_document_sort_value_key, sort_documents
+from .warning_context import emit_warning
 from .storage_backends import (
     clear_memory_database,
     clear_memory_namespace,
@@ -52,10 +57,13 @@ from .errors import (
 )
 from .indexes import (
     INDEX_CATALOG_TABLE,
+    IndexBatchPlan,
     IndexSpec,
     TinyMongoUnsupportedWarning,
+    degraded_index_reuse_warning,
     emit_index_plan_warnings,
     index_catalog_id,
+    index_spec_signature,
     parse_index_spec,
     plan_index_models,
     validate_unique_documents,
@@ -89,6 +97,7 @@ def Q(query, key):
 
 
 _MISSING = object()
+_DECIMAL128 = decimal128_type()
 
 
 def _generate_document_id():
@@ -288,10 +297,10 @@ _PULL_FIELD_OPERATORS = frozenset(("$eq",) + tuple(_PULL_COMPARISON_OPERATORS))
 _PULL_LOGICAL_OPERATORS = frozenset(("$and", "$or", "$nor"))
 
 
-def _raise_write_error(message):
+def _raise_write_error(message, code=2):
     """Raise a Mongo-shaped write error that remains a TinyMongoError."""
 
-    raise WriteError(message, code=2)
+    raise WriteError(message, code=code)
 
 
 def _is_modifier_document(value):
@@ -301,14 +310,18 @@ def _is_modifier_document(value):
 
 
 def _is_modifier_integer(value):
-    return isinstance(value, int) and not isinstance(value, bool)
+    if isinstance(value, bool) or not is_bson_number(value):
+        return False
+    numeric = bson_number_decimal(value)
+    return numeric.is_finite() and numeric == numeric.to_integral_value()
 
 
 def _is_sort_direction(value):
     return (
         not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and value in (-1, 1)
+        and is_bson_number(value)
+        and bson_number_decimal(value).is_finite()
+        and bson_number_decimal(value) in (-1, 1)
     )
 
 
@@ -438,6 +451,10 @@ def _validate_update_operators(update_doc):
         elif operator == "$pull":
             for value in changes.values():
                 _validate_pull_condition(value)
+        elif operator == "$inc":
+            for value in changes.values():
+                if not is_bson_number(value):
+                    _raise_write_error("$inc requires numeric values", code=14)
 
 
 def _sort_pushed_values(values, sort_spec):
@@ -445,7 +462,7 @@ def _sort_pushed_values(values, sort_spec):
 
     order = TinyMongoCursor([])._order
     if _is_sort_direction(sort_spec):
-        values.sort(key=order, reverse=sort_spec < 0)
+        values.sort(key=order, reverse=bson_number_decimal(sort_spec) < 0)
         return
 
     # Stable passes from the least-significant field implement a compound
@@ -453,7 +470,7 @@ def _sort_pushed_values(values, sort_spec):
     for field, direction in reversed(list(sort_spec.items())):
         values.sort(
             key=lambda item, path=field: order(_get_nested(item, path, None)),
-            reverse=direction < 0,
+            reverse=bson_number_decimal(direction) < 0,
         )
 
 
@@ -466,7 +483,7 @@ def _apply_push(current, value):
     if "$position" not in value:
         current.extend(additions)
     else:
-        position = value["$position"]
+        position = int(bson_number_decimal(value["$position"]))
         if position < 0:
             position = max(len(current) + position, 0)
         else:
@@ -477,7 +494,7 @@ def _apply_push(current, value):
         _sort_pushed_values(current, value["$sort"])
 
     if "$slice" in value:
-        limit = value["$slice"]
+        limit = int(bson_number_decimal(value["$slice"]))
         if limit > 0:
             current = current[:limit]
         elif limit < 0:
@@ -502,6 +519,17 @@ def _pull_comparison_matches(actual, operand, comparison):
     for value in values:
         value_identity = bson_identity_key(value)
         value_order = bson_scalar_sort_key(value)
+        if (
+            value_identity is not None
+            and value_identity[0] == "number"
+            and is_bson_number(value)
+            and is_bson_number(operand)
+            and (
+                bson_number_decimal(value).is_nan()
+                != bson_number_decimal(operand).is_nan()
+            )
+        ):
+            continue
         if (
             value_identity is not None
             and value_order is not None
@@ -583,7 +611,9 @@ def _apply_update_document(item, update_doc):
         elif operator == "$inc":
             for path, value in changes.items():
                 current = _get_nested(updated, path, 0)
-                _set_nested(updated, path, current + value)
+                if not is_bson_number(current) or not is_bson_number(value):
+                    _raise_write_error("$inc requires numeric values", code=14)
+                _set_nested(updated, path, add_bson_numbers(current, value))
         elif operator == "$push":
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
@@ -613,6 +643,23 @@ def _apply_update_document(item, update_doc):
 
     updated["_id"] = item["_id"]
     return updated
+
+
+def _update_document_modified(original, updated, update_doc):
+    """Report MongoDB's write result for one applied update document."""
+
+    if not storage_values_equal(updated, original):
+        return True
+    if _DECIMAL128 is None or "$inc" not in update_doc:
+        return False
+
+    # MongoDB reports an executed arithmetic update on a quiet Decimal128 NaN
+    # as modified even though the resulting BID is byte-for-byte unchanged.
+    return any(
+        isinstance(current, _DECIMAL128) and current.to_decimal().is_qnan()
+        for path in update_doc["$inc"]
+        for current in (_get_nested(original, path),)
+    )
 
 
 def _tinydb_replace_document(replacement):
@@ -1387,12 +1434,43 @@ class TinyMongoCollection(object):
 
     def _validate_index_compatibility(self, spec):
         by_name = self._index_specs.get(spec.name)
-        existing = by_name
-        if existing is not None and existing != spec:
+        if by_name is not None and by_name != spec:
             raise OperationFailure(
                 "An index with the same name or key has different options"
             )
-        return existing
+        if by_name is not None:
+            # Preserve idempotent retries for legacy catalogs which may still
+            # contain an equivalent index under another name.
+            return by_name
+        equivalent = next(
+            (
+                current
+                for current in self._index_specs.values()
+                if index_spec_signature(current) == index_spec_signature(spec)
+            ),
+            None,
+        )
+        if equivalent is not None and equivalent.name != spec.name:
+            raise OperationFailure(
+                "An index with the same key and options already exists under "
+                "a different name",
+                code=85,
+            )
+        return None
+
+    def _current_index_specs(self):
+        """Return refreshed user-created index specs for batch planning."""
+        if self.parent.engine is not None:
+            return tuple(self.parent.engine.get_index_specs(self.tablename))
+
+        rlock, portalocker_lock = self._acquire_collection_lock()
+        try:
+            if self.table is None:
+                self.build_table()
+            self._refresh_table()
+            return tuple(self._index_specs.values())
+        finally:
+            self._release_collection_lock(rlock, portalocker_lock)
 
     def _validate_unique_post_image(self, documents, extra_specs=()):
         specs = list(self._index_specs.values()) + list(extra_specs)
@@ -1436,21 +1514,61 @@ class TinyMongoCollection(object):
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
+    @_engine_write_locked
     def create_indexes(self, indexes, *args, **kwargs):
         """Create a validated batch of PyMongo-style index models."""
         if args:
             raise TypeError("create_indexes accepts one iterable of index models")
         _reject_session(kwargs)
         batch = plan_index_models(indexes)
+        if self.parent.engine is not None:
+            return self._create_indexes_locked(batch)
+
+        rlock, portalocker_lock = self._acquire_collection_lock()
+        try:
+            return self._create_indexes_locked(batch)
+        finally:
+            self._release_collection_lock(rlock, portalocker_lock)
+
+    def _create_indexes_locked(self, batch):
+        """Plan and create a validated batch while holding its storage lock."""
+        effective = {
+            index_spec_signature(spec): spec for spec in self._current_index_specs()
+        }
+        resolved_entries = []
+        names = []
         for entry in batch:
             if entry.spec is None:
+                resolved_entries.append(entry)
+                names.append(entry.name)
+                continue
+            signature = index_spec_signature(entry.spec)
+            existing = effective.get(signature)
+            if (
+                existing is not None
+                and existing.name != entry.spec.name
+                and entry.degraded_features
+            ):
+                resolved_entries.append(
+                    replace(
+                        entry,
+                        warning=degraded_index_reuse_warning(entry, existing),
+                    )
+                )
+                names.append(existing.name)
                 continue
             options = {"name": entry.spec.name}
             if entry.spec.unique:
                 options["unique"] = True
-            self.create_index([(entry.spec.field, ASCENDING)], **options)
-        emit_index_plan_warnings(batch, stacklevel=3)
-        return list(batch.names)
+            name = self.create_index([(entry.spec.field, ASCENDING)], **options)
+            effective[signature] = replace(entry.spec, name=name)
+            resolved_entries.append(entry)
+            names.append(name)
+        emit_index_plan_warnings(
+            IndexBatchPlan(tuple(resolved_entries)),
+            stacklevel=3,
+        )
+        return names
 
     @_engine_write_locked
     def drop_index(self, key):
@@ -2056,7 +2174,7 @@ class TinyMongoCollection(object):
                 return UpdateResult(raw_result=[], matched_count=0, modified_count=0)
             updated = self.parent.engine.apply_update(matches[0], doc)
             self._validate_storage_document(updated)
-            modified = not bson_values_equal(updated, matches[0])
+            modified = _update_document_modified(matches[0], updated, doc)
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
                 [
@@ -2124,7 +2242,7 @@ class TinyMongoCollection(object):
 
             updated = _apply_update_document(item, doc)
             self._validate_storage_document(updated)
-            modified = not bson_values_equal(updated, item)
+            modified = _update_document_modified(item, updated, doc)
             if modified:
                 post_image = [
                     (
@@ -2189,7 +2307,8 @@ class TinyMongoCollection(object):
             for _original, updated in updates:
                 self._validate_storage_document(updated)
             modified_count = sum(
-                not bson_values_equal(updated, item) for item, updated in updates
+                _update_document_modified(item, updated, doc)
+                for item, updated in updates
             )
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
@@ -2272,7 +2391,7 @@ class TinyMongoCollection(object):
             result = []
             modified_count = 0
             for item, updated in updates:
-                if not bson_values_equal(updated, item):
+                if _update_document_modified(item, updated, doc):
                     modified_count += 1
                     result.extend(
                         self.table.update(
@@ -2320,10 +2439,14 @@ class TinyMongoCollection(object):
                         upserted_id=inserted["_id"],
                     )
                 return UpdateResult(raw_result=[])
-            updated = copy.deepcopy(replacement)
+            # MongoDB stores ``_id`` first even when the replacement omitted it.
+            # Keep that canonical order so a later equivalent replacement is
+            # not misreported as a field-order-only modification.
+            updated = {"_id": item["_id"]}
+            updated.update(copy.deepcopy(replacement))
             updated["_id"] = item["_id"]
             self._validate_storage_document(updated)
-            modified = updated != item
+            modified = not storage_values_equal(updated, item)
             if modified:
                 self.parent.engine.validate_unique_post_image(
                     self.tablename,
@@ -2387,10 +2510,11 @@ class TinyMongoCollection(object):
                     )
                 return UpdateResult(raw_result=[])
 
-            updated = copy.deepcopy(replacement)
+            updated = {"_id": item["_id"]}
+            updated.update(copy.deepcopy(replacement))
             updated["_id"] = item["_id"]
             self._validate_storage_document(updated)
-            modified = updated != item
+            modified = not storage_values_equal(updated, item)
             if modified:
                 post_image = [
                     (
@@ -2523,7 +2647,14 @@ class TinyMongoCollection(object):
         projection = normalize_projection(projection)
         sort = kwargs.get("sort")
         if self.parent.engine is not None:
-            result = self.parent.engine.find(self.tablename, _filter)
+            projected_find = getattr(self.parent.engine, "find_projected", None)
+            projection_applied = (
+                projection is not None and not sort and callable(projected_find)
+            )
+            if projection_applied:
+                result = projected_find(self.tablename, _filter, projection)
+            else:
+                result = self.parent.engine.find(self.tablename, _filter)
             return TinyMongoCursor(
                 result,
                 sort=sort,
@@ -2532,6 +2663,7 @@ class TinyMongoCollection(object):
                 collection=self,
                 projection=projection,
                 query=_filter,
+                source_projected=projection_applied,
             )
 
         rlock, portalocker_lock = self._acquire_collection_lock()
@@ -2727,6 +2859,7 @@ class TinyMongoCursor(object):
         collection=None,
         projection=None,
         query=None,
+        source_projected=False,
     ):
         """Initialize the mongo iterable cursor with data"""
         self._source_data = list(cursordat)
@@ -2734,6 +2867,7 @@ class TinyMongoCursor(object):
         self.collection = collection
         self.projection = projection
         self.query = copy.deepcopy(query)
+        self._source_projected = source_projected
         self._sort_spec = None
         self._skip = 0
         self._limit = 0
@@ -2793,7 +2927,7 @@ class TinyMongoCursor(object):
         if warning_key in self._unsupported_sort_warnings:
             return
         self._unsupported_sort_warnings.add(warning_key)
-        warnings.warn(
+        emit_warning(
             "Sorting field '{0}' encountered unsupported value type '{1}'; "
             "values of this type compare as null.".format(
                 field,
@@ -2876,6 +3010,14 @@ class TinyMongoCursor(object):
             )
 
         self._sort_spec = (copy.deepcopy(key_or_list), direction)
+
+        if self._source_projected:
+            # A chained sort can name a field omitted by the projection.  Load
+            # complete post-filter documents before ordering so projection
+            # pushdown never changes cursor semantics.
+            source = self.collection.find(copy.deepcopy(self.query))
+            self._source_data = list(source._source_data)
+            self._source_projected = False
 
         self._source_data = sort_documents(
             self._source_data,

@@ -154,6 +154,7 @@ def test_cli_export_import_and_migrate_preserve_supported_bson_values(tmp_path, 
     document = {
         "_id": object_id,
         "created": created,
+        "price": bson.Decimal128("19.950"),
         "raw": b"\x00\x01\xff",
         "buffer": bytearray(b"mutable"),
         "binary": bson.Binary(b"0123456789abcdef", subtype=4),
@@ -177,6 +178,7 @@ def test_cli_export_import_and_migrate_preserve_supported_bson_values(tmp_path, 
     exported_json = json.loads(export_file.read_text(encoding="utf-8"))
     assert exported_json[0]["_id"]["__tinymongo_type_v1__"] == "objectid"
     assert exported_json[0]["created"]["__tinymongo_type_v1__"] == "datetime"
+    assert exported_json[0]["price"]["__tinymongo_type_v1__"] == "decimal128"
     assert exported_json[0]["raw"]["__tinymongo_type_v1__"] == "binary"
     assert exported_json[0]["binary"]["value"]["subtype"] == 4
 
@@ -199,6 +201,7 @@ def test_cli_export_import_and_migrate_preserve_supported_bson_values(tmp_path, 
     assert imported == {
         "_id": object_id,
         "created": created,
+        "price": bson.Decimal128("19.950"),
         "raw": b"\x00\x01\xff",
         "buffer": b"mutable",
         "binary": bson.Binary(b"0123456789abcdef", subtype=4),

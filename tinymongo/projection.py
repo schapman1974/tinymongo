@@ -2,8 +2,8 @@
 
 import copy
 from collections.abc import Mapping, Sequence, Set
-from numbers import Number
 
+from .bson_types import bson_number_truth, is_bson_number
 from .errors import OperationFailure, TinyMongoNotSupportedError
 
 
@@ -55,8 +55,11 @@ def _flatten_mapping(mapping, prefix=None):
                     "Empty and expression projection mappings are not supported"
                 )
             flattened.extend(_flatten_mapping(value, path))
-        elif isinstance(value, Number):
-            flattened.append((path, bool(value)))
+        elif isinstance(value, bool) or is_bson_number(value):
+            include = (
+                bool(value) if isinstance(value, bool) else bson_number_truth(value)
+            )
+            flattened.append((path, include))
         else:
             raise TinyMongoNotSupportedError(
                 "Only numeric inclusion and exclusion projection flags are supported"

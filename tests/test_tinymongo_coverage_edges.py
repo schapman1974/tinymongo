@@ -77,7 +77,7 @@ def test_create_indexes_skip_and_duplicate_field_drop_branches():
     assert collection.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
 
     collection.create_index("email", name="email_a")
-    collection.create_index("email", name="email_b")
+    collection.create_index("email", name="email_b", unique=True)
     collection.drop_index("email_a")
     assert "email" in collection._indexes
     assert {item["name"] for item in collection.list_indexes()} == {

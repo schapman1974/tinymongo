@@ -85,6 +85,34 @@ with the follow-up audit of his
   migration reports, avoid unused nonlocal-storage directories, reject invalid
   backends eagerly with the complete alias list, and guard client metadata and
   listing methods after close.
+- [x] Complete Mike's second-application aggregation acceptance rerun: all 9 of
+  9 real application call sites pass against the current `master` aggregation
+  subset, including projection edge cases and computed-field stages.
+- [x] **TM-011:** Apply normalized projections during unsorted SQLite scans so
+  complete source rows are released one at a time, with an `_id`-only SQL path
+  that never transfers large unrequested payloads into Python. A deterministic
+  public sweep regression now verifies materially lower peak memory; Mike's
+  attached 400-document, 200,000-character reproduction dropped from 160.26 MB
+  to 0.26 MB locally. Sorted SQLite cursors and non-SQLite backends explicitly
+  retain the full-document fallback needed by their current ordering and scan
+  implementations. Mike's private 559-transcript rerun remains an external
+  acceptance check.
+- [x] **TM-001:** When a degraded index resolves to an effective key
+  specification that already exists, warn once and skip the duplicate native
+  index instead of creating redundant metadata or storage work.
+- [x] **TM-002:** Document that `tinymongo.patch()` replaces PyMongo module
+  attributes and therefore cannot replace client names imported before the
+  patch scope begins.
+- [x] **TM-012:** Document SQLite's measured multi-process behavior: writes are
+  safe but store-wide and serialized, use a 30-second lock timeout, and allow
+  concurrent WAL reads; describe the differing Parquet lock scope separately.
+- [x] **TM-005:** Preserve application-level caller attribution for warnings
+  emitted by synchronous work dispatched through the async executor.
+- [ ] **Remote SQL numeric uniqueness:** Persist canonical BSON numeric tokens
+  for remote unique indexes so native constraints can enforce exact
+  cross-process equality for every int/float representation; Decimal128
+  remains fail-closed there until the same token can be derived safely from its
+  BID representation.
 - [ ] Update Mike's agent guide against the `v1.2.1` tag and describe the
   expanded API as available from PyPI.
   Correct its list-only `insert_many()` signature
@@ -135,7 +163,8 @@ Application-compatibility work:
 - [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
 - [ ] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
   - [x] Milestone 1 ObjectId, datetime, and Binary storage/query support.
-  - [ ] Add UUID, Decimal128, and regular-expression round trips.
+  - [x] **TM-014:** Add Decimal128 round trips and numeric behavior.
+  - [ ] Add UUID and regular-expression round trips.
 - [ ] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
   - [x] Talk Python query slice: scalar-to-array equality, combined `$nin`,
     `$not`, `$regex`, case-insensitive `$options`, and Mongo-correct
@@ -360,7 +389,8 @@ Exit criteria:
      across synchronous and asynchronous APIs.
    - [x] Add the measured `$project`/`$size`/`$ifNull` slice.
    - [x] Complete the basic `$sort`, `$skip`, `$limit`, and `$count` stages.
-   - [ ] Complete the second-application acceptance rerun with Mike.
+   - [x] Complete the second-application acceptance rerun with Mike: all 9 of 9
+     real application aggregation call sites pass.
 6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
    compatibility gaps.
 7. [ ] Implement GridFS on stable BSON, index, and cursor foundations.

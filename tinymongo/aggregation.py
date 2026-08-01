@@ -9,26 +9,32 @@ from __future__ import absolute_import
 
 import copy
 from collections.abc import Mapping
+from decimal import Decimal, localcontext
 from itertools import islice
-import math
-from numbers import Number
-import warnings
 
 from .bson_types import (
     binary_components,
     binary_type,
+    bson_number_decimal,
+    bson_number_truth,
     bson_value_identity_key,
     bson_value_sort_key,
+    decimal128_context,
+    decimal128_from_decimal,
+    decimal128_type,
+    is_bson_number,
 )
 from .errors import OperationFailure, TinyMongoNotSupportedError
 from .indexes import TinyMongoUnsupportedWarning
 from .projection import normalize_projection, project_document
 from .sorting import sort_documents
 from .table_backends import matches_filter, validate_filter_operators
+from .warning_context import emit_warning
 
 
 _MISSING = object()
 _BINARY = binary_type()
+_DECIMAL128 = decimal128_type()
 _PROJECT_LEAF = object()
 _PROJECT_INCLUDE = object()
 _PROJECT_COMPUTED = object()
@@ -60,14 +66,61 @@ _SUPPORTED_STAGES = (
 )
 
 
-def _sum_value(value):
-    """Return the numeric contribution MongoDB's group ``$sum`` would use."""
+class _SumAccumulator(object):
+    """Preserve MongoDB's numeric promotion and mixed-double precision."""
 
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, (int, float)):
-        return value
-    return 0
+    __slots__ = (
+        "_decimal_total",
+        "_float_total",
+        "_has_decimal",
+        "_has_non_integer",
+        "_int_total",
+    )
+
+    def __init__(self):
+        self._int_total = 0
+        self._decimal_total = None
+        self._float_total = None
+        self._has_non_integer = False
+        self._has_decimal = False
+
+    def add(self, value):
+        if not is_bson_number(value):
+            return
+
+        if _DECIMAL128 is None:
+            if self._float_total is None and isinstance(value, int):
+                self._int_total += value
+                return
+            if self._float_total is None:
+                self._float_total = float(Decimal(self._int_total))
+            self._float_total += value
+            self._has_non_integer = True
+            return
+
+        is_decimal = _DECIMAL128 is not None and isinstance(value, _DECIMAL128)
+        if self._decimal_total is None and isinstance(value, int):
+            self._int_total += value
+            return
+
+        with localcontext(decimal128_context()):
+            if self._decimal_total is None:
+                self._decimal_total = Decimal(self._int_total)
+                # Decimal converts an oversized integer to infinity instead of
+                # raising OverflowError, matching MongoDB's double promotion.
+                self._float_total = float(self._decimal_total)
+            self._decimal_total += bson_number_decimal(value)
+        if not self._has_decimal and not is_decimal:
+            self._float_total += value
+        self._has_non_integer = True
+        self._has_decimal = self._has_decimal or is_decimal
+
+    def value(self):
+        if not self._has_non_integer:
+            return self._int_total
+        if self._has_decimal:
+            return decimal128_from_decimal(self._decimal_total)
+        return self._float_total
 
 
 def aggregation_capabilities():
@@ -150,8 +203,11 @@ def _flatten_stage_specification(specification, project, prefix=None):
                     "An empty sub-projection is not a valid $project expression",
                     code=51270,
                 )
-        if project and isinstance(value, Number):
-            flattened.append((path, "flag", bool(value)))
+        if project and (isinstance(value, bool) or is_bson_number(value)):
+            include = (
+                bool(value) if isinstance(value, bool) else bson_number_truth(value)
+            )
+            flattened.append((path, "flag", include))
         else:
             flattened.append((path, "computed", copy.deepcopy(value)))
     return flattened
@@ -596,20 +652,19 @@ class AggregationEngine(object):
                     "Aggregation $sort $meta expressions are not supported by "
                     "TinyMongo"
                 )
-            if isinstance(direction, bool) or not isinstance(direction, (int, float)):
+            if isinstance(direction, bool) or not is_bson_number(direction):
                 raise OperationFailure(
                     "Illegal key in $sort specification: {0}".format(field),
                     code=15974,
                 )
-            if (
-                isinstance(direction, float) and not math.isfinite(direction)
-            ) or direction not in (-1, 1):
+            numeric_direction = bson_number_decimal(direction)
+            if not numeric_direction.is_finite() or numeric_direction not in (-1, 1):
                 raise OperationFailure(
                     "$sort key ordering must be 1 (for ascending) or -1 "
                     "(for descending)",
                     code=15975,
                 )
-            prepared.append((field, int(direction)))
+            prepared.append((field, int(numeric_direction)))
         return tuple(prepared)
 
     def _warn_unsupported_sort_value(self, field, value):
@@ -617,7 +672,7 @@ class AggregationEngine(object):
         if warning_key in self._unsupported_sort_warnings:
             return
         self._unsupported_sort_warnings.add(warning_key)
-        warnings.warn(
+        emit_warning(
             "Sorting field '{0}' encountered unsupported value type '{1}'; "
             "values of this type compare as null.".format(
                 field,
@@ -636,20 +691,22 @@ class AggregationEngine(object):
 
     @staticmethod
     def _validate_integral_stage_number(value, stage, code):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not is_bson_number(value):
             raise OperationFailure(
                 "invalid argument to {0} stage: Expected a number".format(stage),
                 code=code,
             )
-        if isinstance(value, float) and (
-            not math.isfinite(value) or not value.is_integer()
+        numeric_value = bson_number_decimal(value)
+        if (
+            not numeric_value.is_finite()
+            or numeric_value != numeric_value.to_integral_value()
         ):
             raise OperationFailure(
                 "invalid argument to {0} stage: Expected an integer".format(stage),
                 code=code,
             )
 
-        normalized = int(value)
+        normalized = int(numeric_value)
         if normalized < 0 or normalized > (2**63 - 1):
             raise OperationFailure(
                 "invalid argument to {0} stage: Expected a non-negative "
@@ -880,7 +937,9 @@ class AggregationEngine(object):
                 group = {
                     "key": copy.deepcopy(group_value),
                     "states": {
-                        output_field: 0 if operator == "$sum" else _MISSING
+                        output_field: (
+                            _SumAccumulator() if operator == "$sum" else _MISSING
+                        )
                         for output_field, operator, _operand in accumulators
                     },
                 }
@@ -890,7 +949,7 @@ class AggregationEngine(object):
             for output_field, operator, operand in accumulators:
                 value = self.context.evaluate(document, operand)
                 if operator == "$sum":
-                    group["states"][output_field] += _sum_value(value)
+                    group["states"][output_field].add(value)
                     continue
 
                 # MongoDB ignores both null and missing values for min/max when
@@ -912,11 +971,12 @@ class AggregationEngine(object):
             result = {"_id": copy.deepcopy(group["key"])}
             for output_field, operator, _operand in accumulators:
                 value = group["states"][output_field]
-                result[output_field] = (
-                    None
-                    if operator != "$sum" and value is _MISSING
-                    else copy.deepcopy(value)
-                )
+                if operator == "$sum":
+                    result[output_field] = value.value()
+                else:
+                    result[output_field] = (
+                        None if value is _MISSING else copy.deepcopy(value)
+                    )
             results.append(result)
         return results
 
@@ -925,8 +985,8 @@ class AggregationEngine(object):
         candidate_key = bson_value_sort_key(candidate)
         current_key = bson_value_sort_key(current)
         if operator == "$min":
-            return candidate_key < current_key
-        return candidate_key > current_key
+            return candidate_key <= current_key
+        return candidate_key >= current_key
 
     def _validate_group(self, specification):
         if not isinstance(specification, Mapping):

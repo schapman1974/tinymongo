@@ -27,6 +27,7 @@ from .errors import InvalidDocument
 # ``bson_types``.
 _ObjectId = bson_types.object_id_type()
 _Binary = bson_types.binary_type()
+_Decimal128 = bson_types.decimal128_type()
 
 
 _TYPE_MARKER = "__tinymongo_type_v1__"
@@ -36,12 +37,13 @@ _BINARY_VALUE = "binary"
 _BINARY_DATA = "base64"
 _BINARY_SUBTYPE = "subtype"
 _NONFINITE_FLOAT = "float"
+_DECIMAL128_VALUE = "decimal128"
 _ROOT_UNSET = object()
 
 
 def bson_available():
     """Return whether the optional BSON implementation can be used."""
-    return object_id_available() and binary_available()
+    return object_id_available() and binary_available() and decimal128_available()
 
 
 def object_id_available():
@@ -54,6 +56,12 @@ def binary_available():
     """Return whether non-generic PyMongo ``Binary`` values can be restored."""
 
     return _Binary is not None
+
+
+def decimal128_available():
+    """Return whether PyMongo ``Decimal128`` values can be restored."""
+
+    return _Decimal128 is not None
 
 
 def _nested_path(path, key):
@@ -82,6 +90,10 @@ def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
     if storage_tag == _BINARY_VALUE:
         raw, subtype = bson_types.binary_components(value)
         return _encode_binary(raw, subtype)
+    if storage_tag == _DECIMAL128_VALUE:
+        # Store the raw IEEE-754 BID bytes. ``str(value)`` loses the distinction
+        # between quiet and signaling NaN and would not be an exact round trip.
+        return {_TYPE_MARKER: _DECIMAL128_VALUE, _VALUE_MARKER: value.bid.hex()}
     if isinstance(value, float) and not math.isfinite(value):
         if math.isnan(value):
             payload = "nan"
@@ -210,6 +222,16 @@ def decode_value(value):
                     # Preserve malformed or future-shaped tags just like an
                     # unknown tag rather than turning user data into a value.
                     return value
+            if kind == _DECIMAL128_VALUE:
+                raw = _decimal128_payload(payload)
+                if raw is not None:
+                    if _Decimal128 is None:
+                        raise ImportError(
+                            "Reading BSON Decimal128 values requires the optional "
+                            "'pymongo' package. Install it with: "
+                            "pip install 'tinymongo[bson]'"
+                        )
+                    return _Decimal128.from_bid(raw)
             if kind == _NONFINITE_FLOAT:
                 if payload == "nan":
                     return float("nan")
@@ -251,6 +273,19 @@ def clone(value):
     return loads(dumps(value, ensure_ascii=False))
 
 
+def storage_values_equal(left, right):
+    """Compare the exact representations TinyMongo would persist.
+
+    Query equality intentionally treats numeric BSON types as one family. A
+    write decision cannot: replacing integer ``1`` with double ``1.0`` or with
+    ``Decimal128('1.00')`` changes the stored BSON representation and must not
+    be optimized away.
+    """
+
+    options = {"ensure_ascii": False, "separators": (",", ":")}
+    return dumps(left, **options) == dumps(right, **options)
+
+
 def contains_extended_value(value):
     """Return whether a filter contains a value requiring Python comparison."""
     if isinstance(value, float) and not math.isfinite(value):
@@ -275,3 +310,15 @@ def _valid_object_id_payload(payload):
     except ValueError:
         return False
     return len(decoded) == 12
+
+
+def _decimal128_payload(payload):
+    """Return a valid 16-byte Decimal128 BID payload, or ``None``."""
+
+    if not isinstance(payload, str) or len(payload) != 32:
+        return None
+    try:
+        decoded = bytes.fromhex(payload)
+    except ValueError:
+        return None
+    return decoded if len(decoded) == 16 else None
