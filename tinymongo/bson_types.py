@@ -3,7 +3,9 @@
 The JSON codec, query comparison, and cursor sorting all consume this registry
 so type recognition and subclass precedence cannot drift between them. PyMongo
 is optional: its bundled :mod:`bson` implementation is enabled atomically only
-when ``ObjectId``, ``Binary``, and ``Decimal128`` can all be imported.
+when ``ObjectId``, ``Binary``, ``Decimal128``, and ``Regex`` can all be
+imported. Native UUID and compiled regular-expression values remain available
+without PyMongo.
 """
 
 from __future__ import absolute_import
@@ -13,7 +15,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 import math
+import re
 from typing import Any, Callable, Optional
+from uuid import UUID
 
 
 try:
@@ -24,6 +28,7 @@ try:
         Decimal128 as _Decimal128,
         create_decimal128_context as _create_decimal128_context,
     )
+    from bson.regex import Regex as _Regex
 except ImportError:  # pragma: no cover - environment without optional bson
     # Treat the optional implementation as one capability. This avoids
     # accidentally accepting the unrelated third-party ``bson`` distribution
@@ -31,7 +36,11 @@ except ImportError:  # pragma: no cover - environment without optional bson
     _ObjectId = None  # type: ignore[misc,assignment]
     _Binary = None  # type: ignore[misc,assignment]
     _Decimal128 = None  # type: ignore[misc,assignment]
+    _Regex = None  # type: ignore[misc,assignment]
     _create_decimal128_context = None  # type: ignore[misc,assignment]
+
+
+_NATIVE_REGEX_TYPE = type(re.compile(""))
 
 
 @dataclass(frozen=True)
@@ -173,9 +182,12 @@ def binary_components(value):
     """Return a binary value as ``(bytes, subtype)``.
 
     Native ``bytes`` and ``bytearray`` use BSON's generic subtype 0. PyMongo's
-    ``Binary`` retains its explicit subtype.
+    ``Binary`` retains its explicit subtype. UUID values use MongoDB's standard
+    UUID representation, binary subtype 4 with RFC-4122 byte order.
     """
 
+    if isinstance(value, UUID):
+        return value.bytes, 4
     raw = bytes(value)
     subtype = (
         int(value.subtype) if _Binary is not None and isinstance(value, _Binary) else 0
@@ -192,6 +204,79 @@ def _binary_sort_key(value):
 def _binary_identity_key(value):
     raw, subtype = binary_components(value)
     return subtype, raw
+
+
+def _regex_pattern(value):
+    """Return the UTF-8 pattern text represented by a BSON regex value."""
+
+    pattern = value.pattern
+    if isinstance(pattern, bytes):
+        return pattern.decode("utf8")
+    return pattern
+
+
+def regex_flags_text(flags):
+    """Return MongoDB's canonical, ordered BSON regex option string."""
+
+    rendered = []
+    for letter, flag in (
+        ("i", re.IGNORECASE),
+        ("l", re.LOCALE),
+        ("m", re.MULTILINE),
+        ("s", re.DOTALL),
+        ("u", re.UNICODE),
+        ("x", re.VERBOSE),
+    ):
+        if int(flags) & int(flag):
+            rendered.append(letter)
+    return "".join(rendered)
+
+
+def regex_components(value):
+    """Return a regex value as canonical BSON ``(pattern, options)`` text."""
+
+    if not is_bson_regex(value):
+        raise TypeError(
+            "Unsupported BSON regular-expression type: {0}".format(type(value).__name__)
+        )
+    return _regex_pattern(value), regex_flags_text(value.flags)
+
+
+def regex_compile_components(value):
+    """Return the original pattern and BSON-supported flags for matching."""
+
+    if not is_bson_regex(value):
+        raise TypeError(
+            "Unsupported BSON regular-expression type: {0}".format(type(value).__name__)
+        )
+    known_flags = sum(
+        int(flag)
+        for flag in (
+            re.IGNORECASE,
+            re.LOCALE,
+            re.MULTILINE,
+            re.DOTALL,
+            re.UNICODE,
+            re.VERBOSE,
+        )
+    )
+    return _regex_pattern(value), int(value.flags) & known_flags
+
+
+def _regex_key(value):
+    return regex_components(value)
+
+
+def is_native_regex(value):
+    """Return whether ``value`` is a compiled :mod:`re` pattern."""
+
+    return isinstance(value, _NATIVE_REGEX_TYPE)
+
+
+def is_bson_regex(value):
+    """Return whether ``value`` can be represented as a BSON regex."""
+
+    return is_native_regex(value) or (_Regex is not None and isinstance(value, _Regex))
 
 
 def _object_id_key(value):
@@ -258,18 +343,38 @@ _DATETIME = BSONTypeSpec(
     storage_tag="datetime",
     requires_python_comparison=True,
 )
+_UUID = BSONTypeSpec(
+    "binary",
+    5,
+    _binary_sort_key,
+    _binary_identity_key,
+    storage_tag="uuid",
+    requires_python_comparison=True,
+)
+_REGEX = BSONTypeSpec(
+    "regex",
+    9,
+    _regex_key,
+    _regex_key,
+    storage_tag="regex",
+    requires_python_comparison=True,
+)
 
 
 def bson_capabilities():
     """Return the optional PyMongo BSON capabilities available at import time."""
 
     available = (
-        _ObjectId is not None and _Binary is not None and _Decimal128 is not None
+        _ObjectId is not None
+        and _Binary is not None
+        and _Decimal128 is not None
+        and _Regex is not None
     )
     return {
         "objectid": available,
         "binary": available,
         "decimal128": available,
+        "regex": available,
     }
 
 
@@ -291,6 +396,12 @@ def decimal128_type():
     return _Decimal128
 
 
+def regex_type():
+    """Return PyMongo's ``Regex`` class, or ``None`` when unavailable."""
+
+    return _Regex
+
+
 def bson_type_spec(value) -> Optional[BSONTypeSpec]:
     """Return sorting metadata for a supported scalar, or ``None``.
 
@@ -304,10 +415,14 @@ def bson_type_spec(value) -> Optional[BSONTypeSpec]:
         return _BINARY
     if isinstance(value, (bytes, bytearray)):
         return _BINARY
+    if isinstance(value, UUID):
+        return _UUID
     if _ObjectId is not None and isinstance(value, _ObjectId):
         return _OBJECT_ID
     if _Decimal128 is not None and isinstance(value, _Decimal128):
         return _DECIMAL_NUMBER
+    if is_bson_regex(value):
+        return _REGEX
     if isinstance(value, datetime):
         return _DATETIME
     if isinstance(value, bool):

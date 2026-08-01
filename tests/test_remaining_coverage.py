@@ -1,5 +1,6 @@
 """Focused coverage for small compatibility and backend branches."""
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -16,17 +17,23 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
     monkeypatch.setattr(bson_types, "_ObjectId", marker)
     monkeypatch.setattr(bson_types, "_Binary", marker)
     monkeypatch.setattr(bson_types, "_Decimal128", marker)
+    monkeypatch.setattr(bson_types, "_Regex", marker)
     assert bson_types.bson_capabilities() == {
         "objectid": True,
         "binary": True,
         "decimal128": True,
+        "regex": True,
     }
 
+    monkeypatch.setattr(bson_types, "_Regex", None)
+    assert not any(bson_types.bson_capabilities().values())
+    monkeypatch.setattr(bson_types, "_Regex", marker)
     monkeypatch.setattr(bson_types, "_Binary", None)
     assert bson_types.bson_capabilities() == {
         "objectid": False,
         "binary": False,
         "decimal128": False,
+        "regex": False,
     }
 
     monkeypatch.setattr(bson_types, "_ObjectId", None)
@@ -35,6 +42,7 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
         "objectid": False,
         "binary": False,
         "decimal128": False,
+        "regex": False,
     }
 
 
@@ -254,6 +262,9 @@ def test_persistent_native_insert_rejection_returns_bulk_errors(ordered):
 def test_direct_id_and_cached_match_helpers_cover_operator_routes():
     assert core._direct_id_equality({"_id": {"$eq": 1}}) == 1
     assert core._direct_id_equality({"_id": {"$in": [1]}}) is core._MISSING
+    expression = re.compile("id")
+    assert core._direct_id_equality({"_id": expression}) is core._MISSING
+    assert core._direct_id_equality({"_id": {"$eq": expression}}) is core._MISSING
     assert core._cached_value_matches(1.0, 1, ("number", 1)) is True
 
 

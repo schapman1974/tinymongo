@@ -161,10 +161,10 @@ Application-compatibility work:
   - [x] Complete the write-heavy admin and multi-worker SQLite follow-up: all
     21 admin checks passed with no errors, lost writes, or torn reads.
 - [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
-- [ ] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
+- [x] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
   - [x] Milestone 1 ObjectId, datetime, and Binary storage/query support.
   - [x] **TM-014:** Add Decimal128 round trips and numeric behavior.
-  - [ ] Add UUID and regular-expression round trips.
+  - [x] Add UUID and regular-expression round trips.
 - [ ] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
   - [x] Talk Python query slice: scalar-to-array equality, combined `$nin`,
     `$not`, `$regex`, case-insensitive `$options`, and Mongo-correct
@@ -201,7 +201,7 @@ Exit criteria:
 
 [View milestone](https://github.com/schapman1974/tinymongo/milestone/2)
 
-- [ ] [#82: Shared aggregation pipeline engine](https://github.com/schapman1974/tinymongo/issues/82)
+- [x] [#82: Shared aggregation pipeline engine](https://github.com/schapman1974/tinymongo/issues/82)
   - [x] Land the first shared sync/async engine slice with pipeline validation,
     compatible cursors, structured capability reporting, and clear unsupported
     feature errors.
@@ -213,10 +213,11 @@ Exit criteria:
   - [x] Add the application-required `$project`, `$size`, and `$ifNull` slice.
   - [x] Complete the initial projection scope with full `$project` modes,
     `$set`, `$addFields`, `$unset`, `$literal`, and `$$REMOVE`.
-- [ ] [#91: Grouping and accumulators](https://github.com/schapman1974/tinymongo/issues/91)
+- [x] [#91: Grouping and accumulators](https://github.com/schapman1974/tinymongo/issues/91)
   - [x] Support field-path and `None` group keys with `$min`, `$max`, and
     `$sum`.
-  - [ ] Complete the remaining accumulator scope.
+  - [x] Complete the remaining accumulator scope with `$avg`, `$first`,
+    `$last`, `$push`, and `$addToSet`.
 
 Exit criteria:
 
@@ -384,7 +385,7 @@ Exit criteria:
    - [x] Add deterministic reporting and an external application test runner.
    - [x] Complete the real application run with Mike and record every difference.
    - [ ] Rerun the three follow-up cases and publish the dimensioned baseline.
-5. [ ] Build aggregation core after the real-application acceptance path works.
+5. [x] Build aggregation core after the real-application acceptance path works.
    - [x] Deliver the shared `$match` plus `$group`/`$min`/`$max`/`$sum` slice
      across synchronous and asynchronous APIs.
    - [x] Add the measured `$project`/`$size`/`$ifNull` slice.

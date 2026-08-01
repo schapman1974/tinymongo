@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from datetime import datetime
 import json
 import math
+import re
+from uuid import UUID
 
 from . import bson_types
 from .errors import InvalidDocument
@@ -28,6 +30,7 @@ from .errors import InvalidDocument
 _ObjectId = bson_types.object_id_type()
 _Binary = bson_types.binary_type()
 _Decimal128 = bson_types.decimal128_type()
+_Regex = bson_types.regex_type()
 
 
 _TYPE_MARKER = "__tinymongo_type_v1__"
@@ -38,12 +41,27 @@ _BINARY_DATA = "base64"
 _BINARY_SUBTYPE = "subtype"
 _NONFINITE_FLOAT = "float"
 _DECIMAL128_VALUE = "decimal128"
+_UUID_VALUE = "uuid"
+_REGEX_VALUE = "regex"
+_REGEX_PATTERN = "pattern"
+_REGEX_FLAGS = "flags"
+_REGEX_REPRESENTATION = "representation"
+_REGEX_PATTERN_TYPE = "pattern_type"
+_REGEX_NATIVE = "python"
+_REGEX_BSON = "bson"
+_REGEX_TEXT = "string"
+_REGEX_BYTES = "bytes"
 _ROOT_UNSET = object()
 
 
 def bson_available():
     """Return whether the optional BSON implementation can be used."""
-    return object_id_available() and binary_available() and decimal128_available()
+    return (
+        object_id_available()
+        and binary_available()
+        and decimal128_available()
+        and regex_available()
+    )
 
 
 def object_id_available():
@@ -62,6 +80,12 @@ def decimal128_available():
     """Return whether PyMongo ``Decimal128`` values can be restored."""
 
     return _Decimal128 is not None
+
+
+def regex_available():
+    """Return whether PyMongo ``Regex`` values can be restored."""
+
+    return _Regex is not None
 
 
 def _nested_path(path, key):
@@ -94,6 +118,26 @@ def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
         # Store the raw IEEE-754 BID bytes. ``str(value)`` loses the distinction
         # between quiet and signaling NaN and would not be an exact round trip.
         return {_TYPE_MARKER: _DECIMAL128_VALUE, _VALUE_MARKER: value.bid.hex()}
+    if storage_tag == _UUID_VALUE:
+        return {_TYPE_MARKER: _UUID_VALUE, _VALUE_MARKER: str(value)}
+    if storage_tag == _REGEX_VALUE:
+        try:
+            return {
+                _TYPE_MARKER: _REGEX_VALUE,
+                _VALUE_MARKER: _encode_regex(value),
+            }
+        except (UnicodeDecodeError, ValueError) as error:
+            context = " for {0}".format(_context) if _context else ""
+            raise InvalidDocument(
+                "Invalid document{0} at {1!r}: cannot encode regular "
+                "expression {2}: {3}".format(
+                    context,
+                    _path,
+                    _bounded_repr(value),
+                    error,
+                ),
+                document=_root,
+            ) from error
     if isinstance(value, float) and not math.isfinite(value):
         if math.isnan(value):
             payload = "nan"
@@ -193,6 +237,61 @@ def _decode_binary(payload):
     return _Binary(raw, subtype=subtype)
 
 
+def _encode_regex(value):
+    pattern = value.pattern
+    pattern_type = _REGEX_BYTES if isinstance(pattern, bytes) else _REGEX_TEXT
+    if isinstance(pattern, bytes):
+        pattern = pattern.decode("utf8")
+    if "\x00" in pattern:
+        raise ValueError("BSON regular-expression patterns cannot contain NUL")
+    return {
+        _REGEX_PATTERN: pattern,
+        _REGEX_FLAGS: int(value.flags),
+        _REGEX_REPRESENTATION: (
+            _REGEX_NATIVE if bson_types.is_native_regex(value) else _REGEX_BSON
+        ),
+        _REGEX_PATTERN_TYPE: pattern_type,
+    }
+
+
+def _decode_regex(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Regex payload must be a mapping")
+    expected = {
+        _REGEX_PATTERN,
+        _REGEX_FLAGS,
+        _REGEX_REPRESENTATION,
+        _REGEX_PATTERN_TYPE,
+    }
+    if set(payload) != expected:
+        raise ValueError("Regex payload has an unexpected shape")
+
+    pattern = payload[_REGEX_PATTERN]
+    flags = payload[_REGEX_FLAGS]
+    representation = payload[_REGEX_REPRESENTATION]
+    pattern_type = payload[_REGEX_PATTERN_TYPE]
+    if not isinstance(pattern, str) or "\x00" in pattern:
+        raise ValueError("Regex pattern must be NUL-free text")
+    if isinstance(flags, bool) or not isinstance(flags, int):
+        raise ValueError("Regex flags must be an integer")
+    if representation not in (_REGEX_NATIVE, _REGEX_BSON):
+        raise ValueError("Regex representation is not supported")
+    if pattern_type not in (_REGEX_TEXT, _REGEX_BYTES):
+        raise ValueError("Regex pattern type is not supported")
+
+    decoded_pattern = (
+        pattern.encode("utf8") if pattern_type == _REGEX_BYTES else pattern
+    )
+    if representation == _REGEX_NATIVE:
+        return re.compile(decoded_pattern, flags)
+    if _Regex is None:
+        raise ImportError(
+            "Reading BSON Regex values requires the optional 'pymongo' "
+            "package. Install it with: pip install 'tinymongo[bson]'"
+        )
+    return _Regex(decoded_pattern, flags)
+
+
 def decode_value(value):
     """Recursively restore values previously produced by :func:`encode_value`."""
     if isinstance(value, dict):
@@ -232,6 +331,17 @@ def decode_value(value):
                             "pip install 'tinymongo[bson]'"
                         )
                     return _Decimal128.from_bid(raw)
+            if kind == _UUID_VALUE:
+                parsed = _uuid_payload(payload)
+                if parsed is not None:
+                    return parsed
+            if kind == _REGEX_VALUE:
+                try:
+                    return _decode_regex(payload)
+                except ImportError:
+                    raise
+                except (OverflowError, TypeError, ValueError, re.error):
+                    return value
             if kind == _NONFINITE_FLOAT:
                 if payload == "nan":
                     return float("nan")
@@ -322,3 +432,15 @@ def _decimal128_payload(payload):
     except ValueError:
         return None
     return decoded if len(decoded) == 16 else None
+
+
+def _uuid_payload(payload):
+    """Return a canonical RFC-4122 UUID payload, or ``None``."""
+
+    if not isinstance(payload, str) or len(payload) != 36:
+        return None
+    try:
+        parsed = UUID(payload)
+    except (AttributeError, ValueError):
+        return None
+    return parsed if str(parsed) == payload.lower() else None

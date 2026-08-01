@@ -2,7 +2,8 @@ import asyncio
 from collections import UserDict
 import os
 import math
-from uuid import uuid4
+import re
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -104,6 +105,80 @@ def test_remote_sql_backend_round_trip(backend, env_name):
 
 
 @pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_uuid_regex_roundtrip_query_and_unique_fail_closed(
+    backend, env_name
+):
+    bson = pytest.importorskip("bson")
+    dsn, database, prefix = _remote_target(backend, env_name)
+    client = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = client[database][prefix + "_bson_values"]
+    protected = client[database][prefix + "_bson_unique"]
+    value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+    native = re.compile("remote", re.IGNORECASE)
+    try:
+        docs.insert_many(
+            [
+                {"_id": "uuid", "value": value},
+                {"_id": "native", "value": native},
+                {"_id": "bson", "value": bson.Regex("remote", "i")},
+                {"_id": "text", "value": "REMOTE"},
+            ]
+        )
+
+        assert docs.find_one({"value": bson.Binary(value.bytes, 4)})["_id"] == "uuid"
+        assert {item["_id"] for item in docs.find({"value": native})} == {
+            "native",
+            "text",
+        }
+        assert type(docs.find_one({"_id": "uuid"})["value"]) is UUID
+        assert isinstance(docs.find_one({"_id": "native"})["value"], type(native))
+        assert isinstance(docs.find_one({"_id": "bson"})["value"], bson.Regex)
+
+        protected.create_index("value", unique=True)
+        for extended in (value, native):
+            with pytest.raises(TinyMongoNotSupportedError, match="Remote SQL"):
+                protected.insert_one({"value": extended})
+        assert protected.count_documents({}) == 0
+    finally:
+        docs.drop()
+        protected.drop()
+        client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_async_uuid_regex_roundtrip_and_query(backend, env_name):
+    bson = pytest.importorskip("bson")
+    dsn, database, prefix = _remote_target(backend, env_name)
+    collection = prefix + "_async_bson_values"
+    value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+    native = re.compile("remote", re.IGNORECASE)
+
+    async def scenario():
+        client = AsyncTinyMongoClient(backend=backend, dsn=dsn)
+        docs = client[database][collection]
+        try:
+            await docs.insert_many(
+                [
+                    {"_id": "uuid", "value": value},
+                    {"_id": "native", "value": native},
+                    {"_id": "text", "value": "REMOTE"},
+                ]
+            )
+            assert (await docs.find_one({"value": bson.Binary(value.bytes, 4)}))[
+                "_id"
+            ] == "uuid"
+            rows = await docs.find({"value": native}).to_list()
+            assert {item["_id"] for item in rows} == {"native", "text"}
+            restored = await docs.find_one({"_id": "native"})
+            assert isinstance(restored["value"], type(native))
+        finally:
+            await docs.drop()
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
 def test_remote_sql_aggregation_core(backend, env_name):
     dsn, database, prefix = _remote_target(backend, env_name)
     collection = prefix + "_aggregation"
@@ -135,11 +210,17 @@ def test_remote_sql_aggregation_core(backend, env_name):
                         "item_count": 1,
                     }
                 },
+                {"$sort": {"_id": 1}},
                 {
                     "$group": {
                         "_id": "$team",
+                        "average": {"$avg": "$score"},
+                        "first": {"$first": "$score"},
+                        "last": {"$last": "$score"},
                         "minimum": {"$min": "$score"},
                         "maximum": {"$max": "$score"},
+                        "pushed": {"$push": "$score"},
+                        "unique": {"$addToSet": "$score"},
                         "total": {"$sum": "$score"},
                         "items": {"$sum": "$item_count"},
                     }
@@ -147,11 +228,17 @@ def test_remote_sql_aggregation_core(backend, env_name):
             ]
         ).to_list()
 
+        unique = rows[0].pop("unique")
+        assert set(unique) == {2, 5}
         assert rows == [
             {
                 "_id": "alpha",
+                "average": 3.5,
+                "first": 2,
+                "last": 5,
                 "minimum": 2,
                 "maximum": 5,
+                "pushed": [2, 5],
                 "total": 7,
                 "items": 2,
             }
@@ -209,15 +296,33 @@ def test_remote_sql_async_aggregation_projection(backend, env_name):
                             "count": 1,
                         }
                     },
+                    {"$sort": {"_id": 1}},
                     {
                         "$group": {
                             "_id": "$course_id",
+                            "average": {"$avg": "$count"},
+                            "first": {"$first": "$count"},
+                            "last": {"$last": "$count"},
+                            "pushed": {"$push": "$count"},
+                            "unique": {"$addToSet": "$count"},
                             "total": {"$sum": "$count"},
                         }
                     },
                 ]
             )
-            assert await cursor.to_list() == [{"_id": "python", "total": 2}]
+            rows = await cursor.to_list()
+            unique = rows[0].pop("unique")
+            assert set(unique) == {0, 2}
+            assert rows == [
+                {
+                    "_id": "python",
+                    "average": 2.0 / 3.0,
+                    "first": 2,
+                    "last": 0,
+                    "pushed": [2, 0, 0],
+                    "total": 2,
+                }
+            ]
 
             page = await docs.aggregate(
                 [

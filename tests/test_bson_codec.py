@@ -1,6 +1,7 @@
 import json
+import re
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -13,6 +14,7 @@ bson = pytest.importorskip("bson")
 ObjectId = bson.ObjectId
 Binary = bson.Binary
 Decimal128 = bson.Decimal128
+Regex = bson.Regex
 
 
 def test_invalid_document_matches_tinymongo_bson_and_pymongo_hierarchies():
@@ -141,6 +143,62 @@ def test_codec_round_trips_exact_decimal128_bid_values(value):
     assert restored.bid == value.bid
 
 
+def test_codec_round_trips_uuid_without_pymongo_specific_state():
+    value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+
+    encoded = bson_codec.encode_value(value)
+    restored = bson_codec.decode_value(encoded)
+
+    assert encoded == {
+        "__tinymongo_type_v1__": "uuid",
+        "value": "00112233-4455-6677-8899-aabbccddeeff",
+    }
+    assert restored == value
+    assert type(restored) is UUID
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        re.compile("Ab.c", re.IGNORECASE | re.MULTILINE),
+        re.compile(b"bytes", re.IGNORECASE),
+        Regex("Ab.c", "im"),
+        Regex(b"bytes", "i"),
+    ],
+)
+def test_codec_round_trips_regex_representation_pattern_and_flags(value):
+    encoded = bson_codec.encode_value(value)
+    restored = bson_codec.decode_value(encoded)
+
+    assert encoded["__tinymongo_type_v1__"] == "regex"
+    assert encoded["value"]["pattern"] in ("Ab.c", "bytes")
+    assert restored.pattern == value.pattern
+    assert int(restored.flags) == int(value.flags)
+    assert type(restored) is type(value)
+
+
+def test_bson_regex_decode_explains_optional_dependency(monkeypatch):
+    encoded = bson_codec.encode_value(Regex("optional", "im"))
+    monkeypatch.setattr(bson_codec, "_Regex", None)
+
+    assert bson_codec.bson_available() is False
+    with pytest.raises(ImportError, match=r"Regex values.*tinymongo\[bson\]"):
+        bson_codec.decode_value(encoded)
+
+
+def test_uuid_and_native_regex_decode_without_optional_bson(monkeypatch):
+    value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+    expression = re.compile("native", re.IGNORECASE)
+    encoded_uuid = bson_codec.encode_value(value)
+    encoded_regex = bson_codec.encode_value(expression)
+    monkeypatch.setattr(bson_codec, "_Regex", None)
+
+    assert bson_codec.decode_value(encoded_uuid) == value
+    restored = bson_codec.decode_value(encoded_regex)
+    assert restored.pattern == expression.pattern
+    assert restored.flags == expression.flags
+
+
 def test_decimal128_decode_explains_optional_dependency(monkeypatch):
     value = Decimal128("19.95")
     encoded = {
@@ -162,6 +220,92 @@ def test_codec_preserves_malformed_decimal128_tags(payload):
     }
 
     assert bson_codec.decode_value(tagged) == tagged
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        1,
+        "00112233445566778899aabbccddeeff",
+        "00112233-4455-6677-8899-aabbccddeezz",
+        "{00112233-4455-6677-8899-aabbccddeeff}",
+    ],
+)
+def test_codec_preserves_malformed_uuid_tags(payload):
+    tagged = {"__tinymongo_type_v1__": "uuid", "value": payload}
+
+    assert bson_codec.decode_value(tagged) == tagged
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        "not-a-mapping",
+        {"pattern": "x", "flags": 0},
+        {
+            "pattern": 1,
+            "flags": 0,
+            "representation": "python",
+            "pattern_type": "string",
+        },
+        {
+            "pattern": "x",
+            "flags": True,
+            "representation": "python",
+            "pattern_type": "string",
+        },
+        {
+            "pattern": "x\x00y",
+            "flags": 0,
+            "representation": "python",
+            "pattern_type": "string",
+        },
+        {
+            "pattern": "x",
+            "flags": 0,
+            "representation": "future",
+            "pattern_type": "string",
+        },
+        {
+            "pattern": "x",
+            "flags": 0,
+            "representation": "python",
+            "pattern_type": "future",
+        },
+        {
+            "pattern": "x",
+            "flags": int(re.LOCALE),
+            "representation": "python",
+            "pattern_type": "string",
+        },
+        {
+            "pattern": "x",
+            "flags": 1 << 100,
+            "representation": "python",
+            "pattern_type": "string",
+        },
+    ],
+)
+def test_codec_preserves_malformed_regex_tags(payload):
+    tagged = {"__tinymongo_type_v1__": "regex", "value": payload}
+
+    assert bson_codec.decode_value(tagged) == tagged
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        Regex("nul\x00pattern"),
+        Regex(b"\xff"),
+    ],
+)
+def test_codec_rejects_regex_patterns_bson_cannot_encode(value):
+    with pytest.raises(InvalidDocument, match="regular expression") as caught:
+        bson_codec.dumps({"value": value})
+
+    assert caught.value.document == {"value": value}
 
 
 def test_codec_loads_legacy_plain_json_without_changing_it():
@@ -200,7 +344,17 @@ def test_codec_preserves_malformed_escaped_mapping_tags(payload):
 
 
 @pytest.mark.parametrize(
-    "kind", ["datetime", "objectid", "binary", "mapping", "future-type"]
+    "kind",
+    [
+        "datetime",
+        "objectid",
+        "binary",
+        "decimal128",
+        "uuid",
+        "regex",
+        "mapping",
+        "future-type",
+    ],
 )
 def test_codec_escapes_user_mappings_that_look_like_internal_tags(kind):
     tagged = {
@@ -327,6 +481,9 @@ def test_codec_preserves_malformed_binary_tags(payload):
         bytearray(b"mutable"),
         Binary(bytes(range(16)), subtype=4),
         Decimal128("12.50"),
+        UUID("00112233-4455-6677-8899-aabbccddeeff"),
+        re.compile("extended"),
+        Regex("extended"),
         {"nested": [b"raw"]},
     ],
 )

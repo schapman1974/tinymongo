@@ -26,7 +26,12 @@ from .bson_types import (
     bson_scalar_sort_key,
     bson_values_equal,
     decimal128_type,
+    is_bson_regex,
     is_bson_number,
+    is_native_regex,
+    regex_compile_components,
+    regex_components,
+    regex_flags_text,
 )
 from .errors import (
     DuplicateKeyError,
@@ -525,6 +530,14 @@ def _reject_remote_unique_values(documents, specs):
                     "values; its native JSON constraint cannot guarantee "
                     "cross-process MongoDB numeric uniqueness".format(spec.name)
                 )
+            identity = bson_identity_key(value)
+            if identity is not None and identity[0] in ("binary", "regex"):
+                raise TinyMongoNotSupportedError(
+                    "Remote SQL unique index {0!r} does not support UUID, "
+                    "Binary, or regular-expression values; its native JSON "
+                    "constraint cannot guarantee cross-process BSON "
+                    "identity".format(spec.name)
+                )
 
 
 def _comparison_matches(actual, operand, comparison):
@@ -561,20 +574,35 @@ def _comparison_matches(actual, operand, comparison):
 
 
 def _regex_matches(actual, pattern, options=""):
+    if not isinstance(options, str) or any(option not in "imsxu" for option in options):
+        raise OperationFailure("$options supports only i, m, s, u, and x")
     flags = 0
+    if is_bson_regex(pattern):
+        if options and regex_flags_text(pattern.flags):
+            raise OperationFailure(
+                "$options cannot be combined with flags embedded in $regex"
+            )
+        pattern, flags = regex_compile_components(pattern)
     for option, flag in (
         ("i", re.IGNORECASE),
         ("m", re.MULTILINE),
         ("s", re.DOTALL),
+        ("u", re.UNICODE),
         ("x", re.VERBOSE),
     ):
         if option in str(options):
             flags |= flag
+    regex_identity = ("regex", (pattern, regex_flags_text(flags)))
+    values = actual if isinstance(actual, list) else [actual]
+    if any(
+        is_bson_regex(value) and bson_identity_key(value) == regex_identity
+        for value in values
+    ):
+        return True
     try:
         expression = re.compile(pattern, flags)
     except (TypeError, ValueError, re.error):
         return False
-    values = actual if isinstance(actual, list) else [actual]
     return any(
         isinstance(value, str) and expression.search(value) is not None
         for value in values
@@ -587,6 +615,8 @@ def _field_matches(actual, expected, exact=False):
     if not isinstance(expected, dict) or not any(
         str(key).startswith("$") for key in expected
     ):
+        if is_bson_regex(expected):
+            return exists and _regex_matches(actual, expected)
         return exists and equality(actual, expected)
 
     options = expected.get("$options", "")
@@ -624,24 +654,52 @@ def _field_matches(actual, expected, exact=False):
                 return False
         elif operator == "$in":
             values = operand if isinstance(operand, (list, tuple)) else [operand]
-            if not exists or not any(equality(actual, item) for item in values):
+            if not exists or not any(
+                (
+                    _regex_matches(actual, item)
+                    if is_bson_regex(item)
+                    else equality(actual, item)
+                )
+                for item in values
+            ):
                 return False
         elif operator == "$nin":
             values = operand if isinstance(operand, (list, tuple)) else [operand]
             if (not exists and any(item is None for item in values)) or (
-                exists and any(equality(actual, item) for item in values)
+                exists
+                and any(
+                    (
+                        _regex_matches(actual, item)
+                        if is_bson_regex(item)
+                        else equality(actual, item)
+                    )
+                    for item in values
+                )
             ):
                 return False
         elif operator == "$all":
-            if not isinstance(actual, list) or not all(
-                any(_values_equal(item, value) for value in actual) for item in operand
+            actual_values = actual if isinstance(actual, list) else [actual]
+            if not operand or not all(
+                any(
+                    (
+                        _regex_matches(item, value)
+                        if is_bson_regex(value)
+                        else _values_equal(item, value)
+                    )
+                    for item in actual_values
+                )
+                for value in operand
             ):
                 return False
         elif operator == "$regex":
             if not exists or not _regex_matches(actual, operand, options):
                 return False
         elif operator == "$not":
-            nested = operand if isinstance(operand, dict) else {"$eq": operand}
+            nested = (
+                operand
+                if isinstance(operand, dict)
+                else {("$regex" if is_bson_regex(operand) else "$eq"): operand}
+            )
             if exists and _field_matches(actual, nested, exact=exact):
                 return False
         elif operator == "$eq":
@@ -675,6 +733,76 @@ def matches_filter(doc, filter_doc):
     return True
 
 
+def _validate_regex_literal(value):
+    """Reject regex values that cannot cross a BSON persistence boundary."""
+
+    try:
+        pattern, options = regex_components(value)
+    except (TypeError, UnicodeDecodeError) as error:
+        raise OperationFailure(
+            "Regular-expression patterns must be valid UTF-8 BSON text"
+        ) from error
+    if "\x00" in pattern:
+        raise OperationFailure("Regular-expression patterns cannot contain NUL")
+    if is_native_regex(value) or "l" in options:
+        return
+    compile_pattern, flags = regex_compile_components(value)
+    try:
+        re.compile(compile_pattern, flags)
+    except (TypeError, ValueError, re.error) as error:
+        raise OperationFailure(
+            "Regular expression is not valid for TinyMongo's Python regex engine"
+        ) from error
+
+
+def _validate_regex_literals(value):
+    if is_bson_regex(value):
+        _validate_regex_literal(value)
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            _validate_regex_literals(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_regex_literals(item)
+
+
+def _regex_query_flags(options):
+    if not isinstance(options, str) or any(option not in "imsxu" for option in options):
+        raise OperationFailure("$options supports only i, m, s, u, and x")
+    flags = 0
+    for option, flag in (
+        ("i", re.IGNORECASE),
+        ("m", re.MULTILINE),
+        ("s", re.DOTALL),
+        ("u", re.UNICODE),
+        ("x", re.VERBOSE),
+    ):
+        if option in options:
+            flags |= flag
+    return flags
+
+
+def _validate_regex_query_operand(operand, options=""):
+    flags = _regex_query_flags(options)
+    if is_bson_regex(operand):
+        _validate_regex_literal(operand)
+        if options and regex_flags_text(operand.flags):
+            raise OperationFailure(
+                "$options cannot be combined with flags embedded in $regex"
+            )
+        return
+    if not isinstance(operand, str):
+        raise OperationFailure("$regex requires a string or compiled regex value")
+    if "\x00" in operand:
+        raise OperationFailure("Regular-expression patterns cannot contain NUL")
+    try:
+        re.compile(operand, flags)
+    except (TypeError, ValueError, re.error) as error:
+        raise OperationFailure(
+            "$regex pattern is not valid for TinyMongo's Python regex engine"
+        ) from error
+
+
 def _validate_field_filter_operators(expression):
     """Validate one field's operator document, including nested ``$not``."""
 
@@ -687,12 +815,25 @@ def _validate_field_filter_operators(expression):
             raise OperationFailure(
                 "Field query documents cannot mix operators and literal fields"
             )
+        _validate_regex_literals(operand)
         if operator in ("$all", "$in", "$nin") and not isinstance(
             operand, (list, tuple)
         ):
             raise OperationFailure("{0} requires an array".format(operator))
+        if operator in ("$all", "$in", "$nin"):
+            if any(isinstance(item, Mapping) and "$regex" in item for item in operand):
+                raise OperationFailure(
+                    "{0} accepts regex values, not $regex operator documents".format(
+                        operator
+                    )
+                )
+            _validate_regex_literals(operand)
+        if operator == "$regex":
+            _validate_regex_query_operand(operand, expression.get("$options", ""))
         if operator == "$options" and "$regex" not in expression:
             raise OperationFailure("$options requires $regex in the same query")
+        if operator == "$options":
+            _validate_regex_query_operand(expression["$regex"], operand)
         if (
             operator == "$not"
             and isinstance(operand, Mapping)
@@ -727,6 +868,52 @@ def validate_filter_operators(filter_doc):
             str(operator).startswith("$") for operator in expected
         ):
             _validate_field_filter_operators(expected)
+        else:
+            _validate_regex_literals(expected)
+
+
+def _validate_regex_field_expression(expression):
+    """Validate only regex-specific shapes without widening query policy."""
+
+    if "$regex" in expression:
+        _validate_regex_query_operand(
+            expression["$regex"], expression.get("$options", "")
+        )
+    for operator in ("$all", "$in", "$nin"):
+        operand = expression.get(operator)
+        if not isinstance(operand, (list, tuple)):
+            continue
+        if any(isinstance(item, Mapping) and "$regex" in item for item in operand):
+            raise OperationFailure(
+                "{0} accepts regex values, not $regex operator documents".format(
+                    operator
+                )
+            )
+        _validate_regex_literals(operand)
+    not_operand = expression.get("$not")
+    if isinstance(not_operand, Mapping) and any(
+        str(key).startswith("$") for key in not_operand
+    ):
+        _validate_regex_field_expression(not_operand)
+    else:
+        _validate_regex_literals(not_operand)
+
+
+def validate_regex_filter(filter_doc):
+    """Preflight regex operands without changing other legacy query behavior."""
+
+    if not isinstance(filter_doc, Mapping):
+        return
+    for key, expected in filter_doc.items():
+        if key in _LOGICAL_FILTER_OPERATORS and isinstance(expected, (list, tuple)):
+            for specification in expected:
+                validate_regex_filter(specification)
+        elif isinstance(expected, Mapping) and any(
+            str(operator).startswith("$") for operator in expected
+        ):
+            _validate_regex_field_expression(expected)
+        else:
+            _validate_regex_literals(expected)
 
 
 def _filter_references_id(filter_doc):
@@ -2756,6 +2943,7 @@ class RemoteSQLTableBackend(TableBackend):
             isinstance(filter_doc, dict)
             and set(filter_doc.keys()) == {"_id"}
             and not isinstance(filter_doc["_id"], dict)
+            and not is_bson_regex(filter_doc["_id"])
         ):
             doc = self._find_by_id(collection, filter_doc["_id"])
             return [doc] if doc else []

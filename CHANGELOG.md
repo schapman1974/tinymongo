@@ -6,8 +6,9 @@
 - A shared, backend-independent aggregation engine for `$match`, `$sort`,
   `$skip`, `$limit`, `$count`, `$project`, `$set`, `$addFields`, `$unset`, and
   `$group`, with `$ifNull`, `$literal`, and `$size` projection expressions,
-  `$$REMOVE`, field-path or null group keys, and `$min`, `$max`, and `$sum`
-  accumulators across synchronous and asynchronous clients.
+  `$$REMOVE`, field-path or null group keys, and `$addToSet`, `$avg`, `$first`,
+  `$last`, `$max`, `$min`, `$push`, and `$sum` accumulators across synchronous
+  and asynchronous clients.
 - Cross-backend and real-MongoDB aggregation contracts based on production
   application pipelines, including full inclusion/exclusion and computed
   projection modes, dotted array writes and sorts, BSON ordering, pagination,
@@ -18,6 +19,11 @@
 - Exact optional Decimal128 persistence plus numeric equality, range queries,
   sorting, embedded unique indexes, `$inc`, and `$group` accumulators across
   backends.
+- Native UUID and compiled-regex persistence plus optional `bson.Regex`
+  round trips, BSON-aware querying, sorting, distinct values, IDs, and embedded
+  unique-index identity across synchronous and asynchronous backends. UUIDs
+  use standard subtype-4 BinData identity, and native or BSON regex values use
+  their pattern plus canonical MongoDB options.
 
 ### Changed
 - Aggregation capability reporting now describes the exact supported stages,
@@ -28,6 +34,9 @@
 - Remote SQL unique indexes fail closed for Decimal128 values, as they already
   do for arrays, when their native JSON constraints cannot guarantee exact
   MongoDB numeric identity across concurrent writers.
+- Remote SQL unique indexes also fail closed for Binary, UUID, and regex values
+  whose exact cross-process BSON identity cannot be enforced by the native JSON
+  constraint.
 
 ### Fixed
 - Aggregation field references no longer cross a raw array nested directly
