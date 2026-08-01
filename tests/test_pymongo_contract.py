@@ -143,7 +143,16 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
             "$unset",
             "$group",
         ),
-        "accumulators": ("$max", "$min", "$sum"),
+        "accumulators": (
+            "$addToSet",
+            "$avg",
+            "$first",
+            "$last",
+            "$max",
+            "$min",
+            "$push",
+            "$sum",
+        ),
         "expressions": ("$ifNull", "$literal", "$size"),
     }
     assert capabilities["sessions"] is False

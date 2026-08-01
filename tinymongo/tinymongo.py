@@ -22,9 +22,11 @@ from .bson_types import (
     bson_identity_key,
     bson_number_decimal,
     bson_scalar_sort_key,
+    bson_value_identity_key,
     bson_value_sort_key,
     bson_values_equal,
     decimal128_type,
+    is_bson_regex,
     is_bson_number,
     object_id_type,
 )
@@ -74,6 +76,7 @@ from .table_backends import (
     _value_matches,
     matches_filter,
     requires_python_filter,
+    validate_regex_filter,
 )
 
 basestring = str
@@ -684,10 +687,15 @@ def _direct_id_equality(filter_doc):
     if not isinstance(filter_doc, dict) or set(filter_doc) != {"_id"}:
         return _MISSING
     expected = filter_doc["_id"]
+    if is_bson_regex(expected):
+        return _MISSING
     if isinstance(expected, dict) and any(str(key).startswith("$") for key in expected):
         if set(expected) != {"$eq"}:
             return _MISSING
-        return expected["$eq"]
+        expected = expected["$eq"]
+        if is_bson_regex(expected):
+            return _MISSING
+        return expected
     return expected
 
 
@@ -728,7 +736,7 @@ def _simple_equality_filter(_filter):
     if not isinstance(_filter, dict) or len(_filter) != 1:
         return None
     field, value = next(iter(_filter.items()))
-    if field.startswith("$") or isinstance(value, (dict, list)):
+    if field.startswith("$") or isinstance(value, (dict, list)) or is_bson_regex(value):
         return None
     return field, value
 
@@ -1813,9 +1821,16 @@ class TinyMongoCollection(object):
                 self.build_table()
             self._refresh_table()
 
-            existing = self.find_one({"_id": _id})
+            # A bare regex is a query predicate, but an ``_id`` collision is
+            # always exact BSON identity. Looking it up through ``find_one``
+            # could otherwise confuse a regex ID with a matching string ID.
+            documents = self.table.all()
+            existing = next(
+                (item for item in documents if bson_values_equal(item.get("_id"), _id)),
+                None,
+            )
             if existing is None:
-                self._validate_unique_post_image(self.table.all() + [doc])
+                self._validate_unique_post_image(documents + [doc])
                 eid = self.table.insert(doc)
             else:
                 raise DuplicateKeyError(
@@ -2150,6 +2165,7 @@ class TinyMongoCollection(object):
         :return: UpdateResult
         """
         _reject_session(kwargs)
+        validate_regex_filter(query)
         _validate_update_document(doc)
         self._validate_storage_document(doc)
         upsert = kwargs.get("upsert") is True
@@ -2281,6 +2297,7 @@ class TinyMongoCollection(object):
         :return: UpdateResult
         """
         _reject_session(kwargs)
+        validate_regex_filter(query)
         _validate_update_document(doc)
         self._validate_storage_document(doc)
         upsert = kwargs.get("upsert") is True
@@ -2416,6 +2433,7 @@ class TinyMongoCollection(object):
         Replaces one document matching the query with the replacement document.
         """
         _reject_session(kwargs)
+        validate_regex_filter(query)
         if not isinstance(replacement, dict):
             raise TypeError('"replacement" must be a dict')
         self._validate_storage_document(replacement)
@@ -2644,6 +2662,7 @@ class TinyMongoCollection(object):
         _reject_session(kwargs)
         if _filter is None and "filter" in kwargs:
             _filter = kwargs["filter"]
+        validate_regex_filter({} if _filter is None else _filter)
         projection = normalize_projection(projection)
         sort = kwargs.get("sort")
         if self.parent.engine is not None:
@@ -2764,17 +2783,27 @@ class TinyMongoCollection(object):
         """Return unique values for a field among matching documents."""
         _reject_session(kwargs)
         values = []
+        identities = set()
+        unsupported_values = []
         for document in self.find(filter or {}):
             value = _get_nested(document, key)
             if value is _MISSING:
                 continue
             candidates = value if isinstance(value, list) else [value]
             for candidate in candidates:
-                if not any(
-                    type(candidate) is type(existing) and candidate == existing
-                    for existing in values
-                ):
-                    values.append(copy.deepcopy(candidate))
+                identity = bson_value_identity_key(candidate)
+                if identity is not None:
+                    if identity in identities:
+                        continue
+                    identities.add(identity)
+                else:
+                    if any(
+                        type(candidate) is type(existing) and candidate == existing
+                        for existing in unsupported_values
+                    ):
+                        continue
+                    unsupported_values.append(candidate)
+                values.append(copy.deepcopy(candidate))
         return values
 
     def remove(self, spec_or_id, multi=True, *args, **kwargs):
@@ -2792,6 +2821,7 @@ class TinyMongoCollection(object):
         :return: DeleteResult
         """
         _reject_session(kwargs)
+        validate_regex_filter(query)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=False)
             return DeleteResult(raw_result=result)
@@ -2821,6 +2851,7 @@ class TinyMongoCollection(object):
         :return: DeleteResult
         """
         _reject_session(kwargs)
+        validate_regex_filter(query)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=True)
             return DeleteResult(raw_result=result)

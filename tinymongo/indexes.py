@@ -7,7 +7,7 @@ from decimal import Decimal, localcontext
 from typing import Mapping, Optional
 
 from .errors import DuplicateKeyError, TinyMongoNotSupportedError
-from .bson_types import bson_number_decimal, decimal128_type
+from .bson_types import bson_identity_key, bson_number_decimal, decimal128_type
 from .warning_context import emit_warning
 
 
@@ -470,6 +470,19 @@ def _scalar_token(value):
     if isinstance(value, str):
         return "string:{0}".format(
             json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        )
+    identity = bson_identity_key(value)
+    if identity is not None and identity[0] == "binary":
+        subtype, raw = identity[1]
+        return "binary:{0}:{1}".format(subtype, raw.hex())
+    if identity is not None and identity[0] == "regex":
+        pattern, options = identity[1]
+        return "regex:{0}".format(
+            json.dumps(
+                [pattern, options],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         )
     if isinstance(value, Mapping):
         _unsupported("Object values cannot be indexed")

@@ -11,6 +11,7 @@ import copy
 from collections.abc import Mapping
 from decimal import Decimal, localcontext
 from itertools import islice
+import math
 
 from .bson_types import (
     binary_components,
@@ -50,7 +51,16 @@ _ALLOWED_DOLLAR_PREFIXED_FIELDS = frozenset(
         "$sortKey",
     )
 )
-_SUPPORTED_ACCUMULATORS = ("$max", "$min", "$sum")
+_SUPPORTED_ACCUMULATORS = (
+    "$addToSet",
+    "$avg",
+    "$first",
+    "$last",
+    "$max",
+    "$min",
+    "$push",
+    "$sum",
+)
 _SUPPORTED_EXPRESSIONS = ("$ifNull", "$literal", "$size")
 _SUPPORTED_STAGES = (
     "$match",
@@ -121,6 +131,140 @@ class _SumAccumulator(object):
         if self._has_decimal:
             return decimal128_from_decimal(self._decimal_total)
         return self._float_total
+
+
+class _AverageAccumulator(object):
+    """Average values with MongoDB's compensated numeric promotion."""
+
+    __slots__ = (
+        "_count",
+        "_decimal_total",
+        "_has_decimal",
+        "_has_double",
+        "_non_decimal_total",
+    )
+
+    def __init__(self):
+        self._count = 0
+        self._decimal_total = Decimal(0)
+        self._has_decimal = False
+        self._has_double = False
+        self._non_decimal_total = _DoubleDoubleSummation()
+
+    def add(self, value):
+        if not is_bson_number(value):
+            return
+
+        if _DECIMAL128 is not None and isinstance(value, _DECIMAL128):
+            with localcontext(decimal128_context()):
+                self._decimal_total += value.to_decimal()
+            self._has_decimal = True
+        elif isinstance(value, int):
+            self._non_decimal_total.add_int(value)
+        else:
+            self._non_decimal_total.add_double(value)
+            self._has_double = True
+        self._count += 1
+
+    def value(self):
+        if not self._count:
+            return None
+
+        if self._has_decimal:
+            with localcontext(decimal128_context()) as context:
+                average = (
+                    self._decimal_total + self._non_decimal_total.decimal_value(context)
+                ) / Decimal(self._count)
+            return decimal128_from_decimal(average)
+        return self._non_decimal_total.value(
+            include_addend=not self._has_double
+        ) / float(self._count)
+
+
+class _DoubleDoubleSummation(object):
+    """Port MongoDB's two-double accumulator for accurate numeric totals."""
+
+    __slots__ = ("_addend", "_special", "_sum")
+
+    def __init__(self):
+        self._sum = 0.0
+        self._addend = 0.0
+        self._special = 0.0
+
+    @staticmethod
+    def _fast_two_sum(left, right):
+        total = left + right
+        rounded_left = total - left
+        return total, right - rounded_left
+
+    @staticmethod
+    def _two_sum(left, right):
+        total = left + right
+        left_prime = total - right
+        right_prime = total - left_prime
+        return total, (left - left_prime) + (right - right_prime)
+
+    def add_double(self, value):
+        self._special += value
+        value, self._addend = self._fast_two_sum(value, self._addend)
+        self._sum, value = self._two_sum(self._sum, value)
+        self._addend += value
+
+    def add_int(self, value):
+        # MongoDB adds signed 64-bit integers as two exactly representable
+        # doubles. Small integers need only the low component.
+        if -(2**31) <= value <= (2**31 - 1):
+            self.add_double(float(value))
+            return
+        divisor = 2**32
+        high = (abs(value) // divisor) * divisor
+        if value < 0:
+            high = -high
+        self.add_double(float(value - high))
+        self.add_double(float(high))
+
+    def value(self, include_addend=False):
+        if math.isnan(self._sum):
+            return self._special
+        if include_addend and math.isfinite(self._sum):
+            return self._sum + self._addend
+        return self._sum
+
+    def decimal_value(self, context):
+        if not math.isfinite(self._sum):
+            return context.create_decimal_from_float(self._special)
+        return context.create_decimal_from_float(
+            self._sum
+        ) + context.create_decimal_from_float(self._addend)
+
+
+class _AddToSetAccumulator(object):
+    """Retain the first instance of each recursive BSON value identity."""
+
+    __slots__ = ("_keys", "_values")
+
+    def __init__(self):
+        self._keys = set()
+        self._values = []
+
+    def add(self, value):
+        # A missing expression contributes no element. An explicit null is a
+        # normal BSON value and is therefore retained once.
+        if value is _MISSING:
+            return
+        key = bson_value_identity_key(value)
+        if key is None:
+            raise TinyMongoNotSupportedError(
+                "$addToSet cannot compare values of type {0}".format(
+                    type(value).__name__
+                )
+            )
+        if key not in self._keys:
+            self._keys.add(key)
+            self._values.append(copy.deepcopy(value))
+
+    def value(self):
+        return copy.deepcopy(self._values)
 
 
 def aggregation_capabilities():
@@ -937,9 +1081,7 @@ class AggregationEngine(object):
                 group = {
                     "key": copy.deepcopy(group_value),
                     "states": {
-                        output_field: (
-                            _SumAccumulator() if operator == "$sum" else _MISSING
-                        )
+                        output_field: self._new_accumulator_state(operator)
                         for output_field, operator, _operand in accumulators
                     },
                 }
@@ -947,8 +1089,36 @@ class AggregationEngine(object):
                 groups_by_key[group_key] = group
 
             for output_field, operator, operand in accumulators:
-                value = self.context.evaluate(document, operand)
-                if operator == "$sum":
+                value = self.context.evaluate(
+                    document,
+                    operand,
+                    allowed_operators=_SUPPORTED_EXPRESSIONS,
+                )
+                if operator in ("$avg", "$sum"):
+                    group["states"][output_field].add(value)
+                    continue
+
+                if operator == "$first":
+                    if group["states"][output_field] is not _MISSING:
+                        continue
+                    group["states"][output_field] = (
+                        None if value is _MISSING else copy.deepcopy(value)
+                    )
+                    continue
+
+                if operator == "$last":
+                    group["states"][output_field] = (
+                        None if value is _MISSING else copy.deepcopy(value)
+                    )
+                    continue
+
+                if operator == "$push":
+                    if value is _MISSING:
+                        continue
+                    group["states"][output_field].append(copy.deepcopy(value))
+                    continue
+
+                if operator == "$addToSet":
                     group["states"][output_field].add(value)
                     continue
 
@@ -971,14 +1141,28 @@ class AggregationEngine(object):
             result = {"_id": copy.deepcopy(group["key"])}
             for output_field, operator, _operand in accumulators:
                 value = group["states"][output_field]
-                if operator == "$sum":
+                if operator in ("$addToSet", "$avg", "$sum"):
                     result[output_field] = value.value()
+                elif operator == "$push":
+                    result[output_field] = copy.deepcopy(value)
                 else:
                     result[output_field] = (
                         None if value is _MISSING else copy.deepcopy(value)
                     )
             results.append(result)
         return results
+
+    @staticmethod
+    def _new_accumulator_state(operator):
+        if operator == "$sum":
+            return _SumAccumulator()
+        if operator == "$avg":
+            return _AverageAccumulator()
+        if operator == "$addToSet":
+            return _AddToSetAccumulator()
+        if operator == "$push":
+            return []
+        return _MISSING
 
     @staticmethod
     def _is_better(operator, candidate, current):
@@ -1011,27 +1195,57 @@ class AggregationEngine(object):
         for output_field, accumulator in specification.items():
             if output_field == "_id":
                 continue
-            if (
-                not isinstance(output_field, str)
-                or output_field.startswith("$")
-                or "." in output_field
-            ):
+            if not isinstance(output_field, str):
                 raise OperationFailure(
                     "$group output field names must be plain strings"
                 )
-            if not isinstance(accumulator, Mapping) or len(accumulator) != 1:
+            if not isinstance(accumulator, Mapping) or not accumulator:
                 raise OperationFailure(
-                    "$group output field {0!r} must contain one accumulator".format(
+                    "The field {0!r} must be an accumulator object".format(
                         output_field
-                    )
+                    ),
+                    code=40234,
                 )
-            operator, operand = next(iter(accumulator.items()))
+            operator = next(iter(accumulator))
+            if not isinstance(operator, str) or not operator.startswith("$"):
+                raise OperationFailure(
+                    "The field {0!r} must be an accumulator object".format(
+                        output_field
+                    ),
+                    code=40234,
+                )
+            if "." in output_field:
+                raise OperationFailure(
+                    "The field name {0!r} cannot contain '.'".format(output_field),
+                    code=40235,
+                )
+            if output_field.startswith("$"):
+                raise OperationFailure(
+                    "The field name {0!r} cannot be an operator name".format(
+                        output_field
+                    ),
+                    code=40236,
+                )
+            if len(accumulator) != 1:
+                raise OperationFailure(
+                    "The field {0!r} must specify one accumulator".format(output_field),
+                    code=40238,
+                )
+            operand = accumulator[operator]
+            if isinstance(operand, (list, tuple)):
+                raise OperationFailure(
+                    "The {0} accumulator is a unary operator".format(operator),
+                    code=40237,
+                )
             if operator not in _SUPPORTED_ACCUMULATORS:
                 raise TinyMongoNotSupportedError(
                     "Aggregation accumulator {0} is not supported by TinyMongo".format(
                         operator
                     )
                 )
-            self.context.validate_expression(operand)
+            self.context.validate_expression(
+                operand,
+                allowed_operators=_SUPPORTED_EXPRESSIONS,
+            )
             accumulators.append((output_field, operator, operand))
         return group_expression, accumulators

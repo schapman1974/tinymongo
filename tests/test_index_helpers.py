@@ -1,4 +1,6 @@
 import json
+import re
+from uuid import UUID
 
 import pytest
 
@@ -169,6 +171,48 @@ def test_scalar_tokens_are_deterministic_and_type_aware():
     assert tokens[-1] == 'string:"café"'
 
 
+def test_uuid_binary_and_regex_tokens_follow_bson_identity():
+    bson = pytest.importorskip("bson")
+    value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+
+    assert index_tokens({"value": value}, "value") == index_tokens(
+        {"value": bson.Binary(value.bytes, subtype=4)}, "value"
+    )
+    assert index_tokens({"value": value}, "value") != index_tokens(
+        {"value": bson.Binary(value.bytes, subtype=3)}, "value"
+    )
+    assert index_tokens(
+        {"value": re.compile("same", re.IGNORECASE)}, "value"
+    ) == index_tokens({"value": bson.Regex("same", "iu")}, "value")
+    assert index_tokens({"value": bson.Regex("same", "iz")}, "value") == (
+        'regex:["same","i"]',
+    )
+
+
+def test_unique_validation_uses_uuid_and_regex_bson_identity():
+    bson = pytest.importorskip("bson")
+    value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+    spec = parse_index_spec("value", unique=True)
+
+    with pytest.raises(DuplicateKeyError):
+        validate_unique_documents(
+            [
+                {"_id": 1, "value": value},
+                {"_id": 2, "value": bson.Binary(value.bytes, subtype=4)},
+            ],
+            [spec],
+        )
+
+    with pytest.raises(DuplicateKeyError):
+        validate_unique_documents(
+            [
+                {"_id": 1, "value": re.compile("same", re.IGNORECASE)},
+                {"_id": 2, "value": bson.Regex("same", "iu")},
+            ],
+            [spec],
+        )
+
+
 def test_arrays_fan_out_and_deduplicate_within_one_document():
     assert index_tokens({"tags": ["a", "b", "a", None]}, "tags") == (
         'string:"a"',
@@ -198,7 +242,7 @@ def test_unique_validation_treats_equivalent_numbers_as_duplicates():
         {"nested": "object"},
         [["nested", "array"]],
         ("tuple",),
-        b"bytes",
+        object(),
         float("inf"),
         float("nan"),
     ],

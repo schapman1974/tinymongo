@@ -2,10 +2,11 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 import subprocess
 import sys
 import textwrap
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -73,6 +74,9 @@ def test_registry_is_the_encoding_metadata_source():
         (b"native", "binary"),
         (bytearray(b"mutable"), "binary"),
         (uuid_binary, "binary"),
+        (UUID("00112233-4455-6677-8899-aabbccddeeff"), "uuid"),
+        (re.compile("native"), "regex"),
+        (bson.Regex("bson", "im"), "regex"),
     ]
 
     for value, expected_tag in values:
@@ -112,6 +116,60 @@ def test_binary_and_numeric_identity_keys_follow_bson_equality():
     assert bson_types.bson_identity_key(float("nan")) == bson_types.bson_identity_key(
         float("nan")
     )
+
+
+def test_uuid_and_regex_identity_keys_match_their_bson_wire_values():
+    bson = pytest.importorskip("bson")
+    value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+
+    assert bson_types.bson_identity_key(value) == bson_types.bson_identity_key(
+        bson.Binary(value.bytes, subtype=4)
+    )
+    assert bson_types.bson_values_equal(
+        re.compile("same", re.IGNORECASE),
+        bson.Regex("same", "iu"),
+    )
+    assert not bson_types.bson_values_equal(
+        re.compile("same", re.IGNORECASE),
+        bson.Regex("same", "i"),
+    )
+    assert bson_types.bson_identity_key(bson.Regex("same", "iz")) == (
+        "regex",
+        ("same", "i"),
+    )
+    assert bson_types.bson_identity_key(bson.Regex(b"same", "im")) == (
+        "regex",
+        ("same", "im"),
+    )
+    assert bson_types.regex_components(bson.Regex("flags", "ilmsux")) == (
+        "flags",
+        "ilmsux",
+    )
+
+    with pytest.raises(TypeError, match="Unsupported BSON regular-expression"):
+        bson_types.regex_components("not-regex")
+    with pytest.raises(TypeError, match="Unsupported BSON regular-expression"):
+        bson_types.regex_compile_components("not-regex")
+
+
+def test_uuid_and_regex_follow_mongodb_scalar_sort_order():
+    bson = pytest.importorskip("bson")
+    first = UUID("00112233-4455-6677-8899-aabbccddeefe")
+    second = UUID("00112233-4455-6677-8899-aabbccddeeff")
+    values = [
+        bson.Regex("same", "u"),
+        bson.Regex("same", "iu"),
+        bson.Regex("same", "im"),
+        bson.Regex("same", "i"),
+        bson.Regex("same", ""),
+    ]
+
+    assert bson_types.bson_scalar_sort_key(first) < bson_types.bson_scalar_sort_key(
+        second
+    )
+    assert [
+        value.flags for value in sorted(values, key=bson_types.bson_scalar_sort_key)
+    ] == [bson.Regex("same", flags).flags for flags in ("", "i", "im", "iu", "u")]
 
 
 def test_numeric_sort_places_nan_below_all_other_numbers():
@@ -280,11 +338,13 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
             "objectid": False,
             "binary": False,
             "decimal128": False,
+            "regex": False,
         }
         assert bson_codec.bson_available() is False
         assert bson_codec.object_id_available() is False
         assert bson_codec.binary_available() is False
         assert bson_codec.decimal128_available() is False
+        assert bson_codec.regex_available() is False
         assert bson_codec.loads(bson_codec.dumps(b"core")) == b"core"
         assert issubclass(InvalidDocument, TinyMongoError)
 
@@ -327,6 +387,30 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
         moment = datetime(2026, 7, 29, 12, 30)
         assert bson_codec.loads(bson_codec.dumps(moment)) == moment
 
+        from uuid import UUID
+        import re
+
+        native_uuid = UUID("00112233-4455-6677-8899-aabbccddeeff")
+        assert bson_codec.loads(bson_codec.dumps(native_uuid)) == native_uuid
+        native_regex = re.compile("native", re.IGNORECASE)
+        restored_regex = bson_codec.loads(bson_codec.dumps(native_regex))
+        assert restored_regex.pattern == native_regex.pattern
+        assert restored_regex.flags == native_regex.flags
+
+        client = tinymongo.TinyMongoClient(backend="memory")
+        values = client.core.native_values
+        values.insert_many(
+            [
+                {"_id": native_uuid, "value": native_regex},
+                {"_id": "text", "value": "NATIVE"},
+            ]
+        )
+        assert values.find_one({"_id": native_uuid})["value"].pattern == "native"
+        assert {
+            item["_id"] for item in values.find({"value": native_regex})
+        } == {native_uuid, "text"}
+        client.close()
+
         generic = {
             "__tinymongo_type_v1__": "binary",
             "value": {"base64": "Y29yZQ==", "subtype": 0},
@@ -362,6 +446,92 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
 
     completed = subprocess.run(
         [sys.executable, "-c", script],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_sync_and_async_sqlite_uuid_regex_work_without_pymongo(tmp_path):
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import builtins
+        import re
+        import sys
+        from uuid import UUID
+
+        real_import = builtins.__import__
+
+        def without_pymongo(name, *args, **kwargs):
+            if name == "pymongo" or name.startswith("pymongo."):
+                raise ModuleNotFoundError("No module named 'pymongo'", name="pymongo")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = without_pymongo
+
+        import tinymongo
+        from tinymongo.asyncio import AsyncTinyMongoClient
+
+        value = UUID("00112233-4455-6677-8899-aabbccddeeff")
+        expression = re.compile("native", re.IGNORECASE)
+
+        client = tinymongo.TinyMongoClient(sys.argv[1], backend="sqlite")
+        collection = client.app.values
+        collection.insert_many(
+            [
+                {"_id": value, "value": expression},
+                {"_id": "text", "value": "NATIVE"},
+            ]
+        )
+        client.close()
+
+        client = tinymongo.TinyMongoClient(sys.argv[1], backend="sqlite")
+        collection = client.app.values
+        restored = collection.find_one({"_id": value})
+        assert restored["value"].pattern == expression.pattern
+        assert restored["value"].flags == expression.flags
+        assert {item["_id"] for item in collection.find({"value": expression})} == {
+            value,
+            "text",
+        }
+        client.close()
+
+        async def async_scenario():
+            client = AsyncTinyMongoClient(sys.argv[2], backend="sqlite")
+            collection = client.app.values
+            await collection.insert_many(
+                [
+                    {"_id": value, "value": expression},
+                    {"_id": "text", "value": "NATIVE"},
+                ]
+            )
+            await client.close()
+
+            client = AsyncTinyMongoClient(sys.argv[2], backend="sqlite")
+            collection = client.app.values
+            restored = await collection.find_one({"_id": value})
+            assert restored["value"].pattern == expression.pattern
+            assert restored["value"].flags == expression.flags
+            rows = await collection.find({"value": expression}).to_list()
+            assert {item["_id"] for item in rows} == {value, "text"}
+            await client.close()
+
+        asyncio.run(async_scenario())
+        """
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(tmp_path / "sync"),
+            str(tmp_path / "async"),
+        ],
         cwd=str(Path(__file__).resolve().parents[1]),
         check=False,
         capture_output=True,

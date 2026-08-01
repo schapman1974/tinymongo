@@ -354,12 +354,12 @@ def test_project_size_rejects_non_array_runtime_values(document):
                 {
                     "$group": {
                         "_id": None,
-                        "total": {"$sum": {"$size": "$items"}},
+                        "total": {"$sum": {"$add": [1, 2]}},
                     }
                 }
             ],
             TinyMongoNotSupportedError,
-            r"\$size",
+            r"\$add",
         ),
         (
             [{"$group": {"_id": "$a.", "total": {"$sum": 1}}}],
@@ -389,7 +389,10 @@ def test_project_validation_fails_before_storage_read(pipeline, error, message):
     ("pipeline", "message"),
     [
         ([{"$lookup": {}}], r"\$lookup"),
-        ([{"$group": {"_id": "$key", "mean": {"$avg": "$value"}}}], r"\$avg"),
+        (
+            [{"$group": {"_id": "$key", "value": {"$madeUp": "$value"}}}],
+            r"\$madeUp",
+        ),
         ([{"$group": {"_id": "literal"}}], "field path or None"),
         ([{"$group": {"_id": "$$ROOT"}}], "field path or None"),
         (
@@ -485,6 +488,36 @@ def test_supported_stage_arguments_are_validated(pipeline):
         _collection("aggregation-stage-arguments").aggregate(pipeline)
 
 
+@pytest.mark.parametrize(
+    ("group", "code"),
+    [
+        ({"_id": None, "value": []}, 40234),
+        ({"_id": None, "value": {}}, 40234),
+        ({"_id": None, "value": {"notAnAccumulator": 1}}, 40234),
+        ({"_id": None, "value": {1: 1}}, 40234),
+        ({"_id": None, "bad.name": {"$sum": 1}}, 40235),
+        ({"_id": None, "value": {"$sum": 1, "$max": 1}}, 40238),
+        ({"_id": None, "$value": {"$sum": 1}}, 40236),
+        ({"_id": None, "$value": []}, 40234),
+        ({"_id": None, "bad.name": []}, 40234),
+        ({"_id": None, "value": {"$sum": [1, 2]}}, 40237),
+        ({"_id": None, "value": {"$madeUp": [1, 2]}}, 40237),
+    ],
+)
+def test_group_validation_reports_mongodb_error_codes(group, code):
+    with pytest.raises(OperationFailure) as caught:
+        _collection("aggregation-group-validation-codes").aggregate([{"$group": group}])
+
+    assert caught.value.code == code
+
+
+def test_group_rejects_non_string_output_fields():
+    with pytest.raises(OperationFailure, match="plain strings"):
+        _collection("aggregation-group-non-string-output").aggregate(
+            [{"$group": {"_id": None, 1: {"$sum": 1}}}]
+        )
+
+
 def test_sessions_options_and_unsupported_comparison_values_fail_loudly():
     collection = _collection("aggregation-options")
     collection.insert_one({"_id": 1, "value": 2})
@@ -523,6 +556,16 @@ def test_capability_descriptions_are_fresh_and_supports_is_true():
         "$group",
     )
     assert second["expressions"] == ("$ifNull", "$literal", "$size")
+    assert second["accumulators"] == (
+        "$addToSet",
+        "$avg",
+        "$first",
+        "$last",
+        "$max",
+        "$min",
+        "$push",
+        "$sum",
+    )
     assert client.capabilities()["aggregation"]["stages"] == (
         "$match",
         "$sort",
@@ -607,6 +650,14 @@ def test_sum_ignores_every_supported_non_numeric_value():
     assert collection.aggregate(
         [{"$group": {"_id": None, "total": {"$sum": "$value"}}}]
     ).to_list() == [{"_id": None, "total": 0}]
+
+
+def test_add_to_set_rejects_values_without_a_bson_identity():
+    with pytest.raises(TinyMongoNotSupportedError, match=r"\$addToSet.*object"):
+        AggregationEngine().run(
+            [{"_id": 1}],
+            [{"$group": {"_id": None, "values": {"$addToSet": object()}}}],
+        )
 
 
 def test_async_aggregate_returns_async_cursor():

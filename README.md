@@ -480,13 +480,14 @@ leading-field prefix. Sparse membership is not honored and TTL expiration is
 not performed; both are reported explicitly. A semantically unsafe unique
 declaration is rejected before any batch entry is created.
 
-Unique indexes support scalar values and flat arrays on embedded backends;
-missing and `null` share one unique key. Object values, nested arrays,
-non-finite numbers, and array traversal inside a dotted index path are not
-supported for unique indexes yet. Remote SQL uses native constraints for
-ordinary JSON scalar races. It rejects array and `Decimal128` values under
-unique indexes because its native JSON indexes cannot yet guarantee
-cross-process MongoDB multikey or exact numeric uniqueness.
+Unique indexes support JSON scalar values, Decimal128, UUID/Binary, regex, and
+flat arrays on embedded backends; missing and `null` share one unique key.
+Object values, ObjectId, datetime, nested arrays, non-finite numbers, and array
+traversal inside a dotted index path are not supported for unique indexes yet.
+Remote SQL uses native constraints for ordinary JSON scalar races. It rejects
+array, Decimal128, UUID/Binary, and regex values under unique indexes because
+its native JSON indexes cannot yet guarantee cross-process MongoDB multikey,
+numeric, or BSON identity.
 
 SQL, DuckDB, and Parquet storage uses typed physical `_id` keys for new rows.
 Existing databases with older stringified keys remain readable and mutable.
@@ -509,7 +510,8 @@ supports inclusion, exclusion, renamed or computed fields, nested
 specifications, dotted output paths through arrays, and MongoDB's special
 `_id` rules. The available projection expressions are `$ifNull`, `$literal`,
 and `$size`; `$$REMOVE` conditionally omits or removes a field. `$group` accepts
-a field-path or `None` `_id` and the `$min`, `$max`, and `$sum` accumulators:
+a field-path or `None` `_id` and the `$addToSet`, `$avg`, `$first`, `$last`,
+`$max`, `$min`, `$push`, and `$sum` accumulators:
 
 ```python
 activity = events.aggregate(
@@ -549,8 +551,16 @@ list of field names and follows exclusion projection behavior. Numeric
 array-index paths remain unsupported for projection output.
 
 `$min` and `$max` ignore null and missing inputs unless every input is null or
-missing, in which case they return null. `$sum` ignores missing and nonnumeric
-values, and an empty input produces no groups, including for `_id: None`.
+missing, in which case they return null. `$sum` and `$avg` ignore missing and
+nonnumeric values; `$avg` returns null when it sees no numbers and returns a
+`Decimal128` result when any input is Decimal128. `$first` and `$last` follow
+the incoming document order and turn a selected missing value into null.
+`$push` retains input order, skips missing values, and keeps explicit nulls;
+`$addToSet` applies recursive BSON equality while making no output-order
+promise. Accumulator operands may use TinyMongo's supported expressions; wrap
+a literal array in `$literal` because a direct array is parsed as an invalid
+argument list, matching MongoDB. An empty input produces no groups, including
+for `_id: None`.
 TinyMongo keeps first-seen group order for repeatable local results, but—as with
 MongoDB—`$group` output order is not a public guarantee.
 
@@ -562,12 +572,13 @@ any aggregation subset is available. In particular, `$replaceRoot`,
 `$replaceWith`, `$meta` sort expressions, variables other than `$$REMOVE`, and
 MongoDB's broader expression language are not part of this slice yet.
 
-## ObjectId, datetime, binary, and Decimal128 values
+## ObjectId, datetime, binary, Decimal128, UUID, and regex values
 
-`datetime` and `bytes` values round-trip through every backend. `bytearray` is
-accepted and reads back as `bytes`. Install the optional BSON extra to use
-`bson.ObjectId`, `bson.Decimal128`, or non-generic `bson.Binary` subtypes
-without making PyMongo a core dependency:
+`datetime`, `bytes`, native `uuid.UUID`, and compiled `re.Pattern` values
+round-trip through every backend. `bytearray` is accepted and reads back as
+`bytes`. Install the optional BSON extra to use `bson.ObjectId`,
+`bson.Decimal128`, `bson.Regex`, or non-generic `bson.Binary` subtypes without
+making PyMongo a core dependency:
 
 ```bash
 pip install "tinymongo[bson]"
@@ -583,7 +594,10 @@ string and integer IDs remain readable and are never rewritten.
 
 ```python
 from datetime import datetime
-from bson import Binary, Decimal128, ObjectId
+import re
+from uuid import UUID
+
+from bson import Binary, Decimal128, ObjectId, Regex
 
 episode_id = ObjectId()
 episodes.insert_one(
@@ -593,6 +607,9 @@ episodes.insert_one(
         "price": Decimal128("19.95"),
         "image": b"\x89PNG\r\n\x1a\n",
         "asset_id": Binary(bytes(range(16)), subtype=4),
+        "session_id": UUID("00112233-4455-6677-8899-aabbccddeeff"),
+        "topic_pattern": Regex("python|mongodb", "i"),
+        "local_pattern": re.compile("async", re.IGNORECASE),
         "title": "Async Python",
     }
 )
@@ -608,9 +625,23 @@ subtypes preserve `bson.Binary.subtype`. The exact two-key mapping shape using
 codec; new user mappings with that shape are escaped automatically. If an
 older database already contains that valid tag shape as ordinary data, whether
 written through an earlier API or edited manually, rename one of those keys
-before upgrading so it is not interpreted as the tagged value. UUID and
-regular-expression round trips remain
-tracked in [#75](https://github.com/schapman1974/tinymongo/issues/75).
+before upgrading so it is not interpreted as the tagged value. UUID values use
+the RFC-4122 byte order and share BSON identity with subtype-4 `Binary` values.
+TinyMongo consistently uses this standard UUID representation; unlike a
+default PyMongo client, it does not require a per-client UUID representation
+setting for native UUID values.
+Native compiled patterns retain their Python representation; `bson.Regex`
+values retain their BSON representation, pattern, and flags. Regex identity is
+the pattern plus MongoDB's canonical option string. Preserving a native
+`re.Pattern` on read is a TinyMongo convenience extension; PyMongo decodes the
+same wire value as `bson.Regex`. An implicit regex filter,
+`$regex`, `$in`, `$nin`, `$all`, or `$not` pattern-matches strings and exact
+stored regex values, while explicit `$eq` compares only stored regex identity.
+TinyMongo evaluates patterns with Python's `re` engine rather than MongoDB's
+PCRE2 engine, so a pattern must be valid Python syntax and some advanced syntax
+or matching details can differ between the two engines. A stored BSON regex
+using the locale flag can still be retrieved by exact regex identity even when
+Python cannot apply that flag to a Unicode string predicate.
 Non-finite floats (`NaN`, positive infinity, and negative infinity) also use
 strict JSON-safe tags. Remote SQL keeps the encoded document as a normal,
 indexable object in its existing JSON/JSONB `data` column and stores a second
@@ -619,10 +650,11 @@ field order. Older rows without that copy remain readable through `data`;
 rewriting one populates its ordered copy.
 
 Sorts normalize naive datetimes as UTC and convert aware datetimes to UTC.
-BinData sorts by length, subtype, and then unsigned bytes, matching MongoDB.
-Numeric `NaN` sorts below every other numeric value, matching MongoDB.
-TinyMongo retains Python microseconds, so it can distinguish two datetimes that
-MongoDB would store in the same millisecond.
+BinData—including UUID—sorts by length, subtype, and then unsigned bytes,
+matching MongoDB. Regex values sort by pattern and canonical options after the
+other supported scalar families. Numeric `NaN` sorts below every other numeric
+value, matching MongoDB. TinyMongo retains Python microseconds, so it can
+distinguish two datetimes that MongoDB would store in the same millisecond.
 
 Decimal128 values retain their exact BSON representation and participate in
 numeric equality and range queries, sorting, embedded-backend unique indexes,
