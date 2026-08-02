@@ -157,6 +157,19 @@ with the follow-up audit of his
 - [x] **TM-029:** Accept and ignore `$comment` in document-form `$elemMatch`
   filters, and reject it as a field operator with `OperationFailure` code `2`.
 
+#### Mike's [TM-019 / TM-030 final fidelity follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5159617517)
+
+- [x] **TM-019:** Store and return datetimes with BSON's signed UTC
+  millisecond precision, including correct pre-epoch flooring and no-op write
+  results for changes within one millisecond.
+- [x] **TM-030:** Honor `document_class` recursively and apply `tz_aware` plus
+  optional `tzinfo` across synchronous and asynchronous result paths.
+- [x] Derive accepted connection option names from the installed PyMongo
+  validator catalog, with a dependency-free fallback pinned in TinyMongo.
+- [x] Match MongoDB error code `2` for unknown or misplaced operators inside
+  `$elemMatch`, while preserving explicit unsupported errors for valid MongoDB
+  predicates outside TinyMongo's subset.
+
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
   indexes. Native constraints now enforce exact cross-process equality for
@@ -214,6 +227,8 @@ Application-compatibility work:
     MongoDB and TinyMongo SQLite each passed 597 tests.
   - [x] Complete the write-heavy admin and multi-worker SQLite follow-up: all
     21 admin checks passed with no errors, lost writes, or torn reads.
+  - [x] Close the TM-019/TM-030 returned-value gaps for recursive document
+    classes and MongoDB-compatible datetime decoding.
 - [x] [#73: Common client, collection, and cursor API](https://github.com/schapman1974/tinymongo/issues/73)
 - [x] [#75: Optional BSON serialization](https://github.com/schapman1974/tinymongo/issues/75)
   - [x] Milestone 1 ObjectId, datetime, and Binary storage/query support.
@@ -229,6 +244,8 @@ Application-compatibility work:
     failures, including the `$min` and `$max` update modifiers.
 - [ ] [#102: Optional PyMongo-version adaptation](https://github.com/schapman1974/tinymongo/issues/102)
   - [x] TinyMongo errors conditionally inherit matching PyMongo errors.
+  - [x] Derive accepted connection option names from the installed PyMongo
+    validator catalog while retaining a dependency-free fallback.
   - [ ] Add version-matrix CI plus broader signature and result adaptation.
 - [ ] [#72: Real MongoDB and application contract suite](https://github.com/schapman1974/tinymongo/issues/72)
   - [x] Generate deterministic, dimensioned compatibility reports from the

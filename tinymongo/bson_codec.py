@@ -110,7 +110,11 @@ def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
     if storage_tag == "objectid":
         return {_TYPE_MARKER: "objectid", _VALUE_MARKER: str(value)}
     if storage_tag == "datetime":
-        return {_TYPE_MARKER: "datetime", _VALUE_MARKER: value.isoformat()}
+        canonical = bson_types.canonicalize_datetime(value)
+        return {
+            _TYPE_MARKER: "datetime",
+            _VALUE_MARKER: canonical.isoformat(timespec="milliseconds"),
+        }
     if storage_tag == _BINARY_VALUE:
         raw, subtype = bson_types.binary_components(value)
         return _encode_binary(raw, subtype)
@@ -301,8 +305,10 @@ def decode_value(value):
             if kind == "datetime":
                 if isinstance(payload, str):
                     try:
-                        return datetime.fromisoformat(payload)
-                    except ValueError:
+                        return bson_types.canonicalize_datetime(
+                            datetime.fromisoformat(payload)
+                        )
+                    except (OverflowError, ValueError):
                         # Preserve malformed or future-shaped tags below.
                         pass
             if kind == "objectid":

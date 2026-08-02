@@ -5,7 +5,7 @@ import re
 import pytest
 
 from tinymongo import table_backends as backends
-from tinymongo.errors import OperationFailure
+from tinymongo.errors import OperationFailure, TinyMongoNotSupportedError
 
 
 @pytest.mark.parametrize(
@@ -103,6 +103,20 @@ def test_malformed_query_shapes_use_mongodb_parse_error_code(query, message):
         backends.validate_filter_operators(query)
 
     assert caught.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"$expr": {"$eq": ["$value", 1]}},
+        {"$jsonSchema": {"required": ["value"]}},
+        {"values": {"$elemMatch": {"$jsonSchema": {"required": ["score"]}}}},
+        {"values": {"$elemMatch": {"$bitsAllSet": 1}}},
+    ],
+)
+def test_known_mongodb_operators_remain_honestly_unsupported(query):
+    with pytest.raises(TinyMongoNotSupportedError):
+        backends.validate_filter_operators(query)
 
 
 def test_empty_elem_match_matches_only_container_array_members():

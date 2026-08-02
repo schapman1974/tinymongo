@@ -198,14 +198,15 @@ def test_cli_export_import_and_migrate_preserve_supported_bson_values(tmp_path, 
     imported = tm.TinyMongoClient(str(imported_target)).app.events.find_one(
         {"_id": object_id}
     )
-    assert imported == {
+    canonical_document = {
         "_id": object_id,
-        "created": created,
+        "created": created.replace(tzinfo=None),
         "price": bson.Decimal128("19.950"),
         "raw": b"\x00\x01\xff",
         "buffer": b"mutable",
         "binary": bson.Binary(b"0123456789abcdef", subtype=4),
     }
+    assert imported == canonical_document
 
     assert (
         cli.main(
@@ -223,7 +224,7 @@ def test_cli_export_import_and_migrate_preserve_supported_bson_values(tmp_path, 
     migrated = tm.TinyMongoClient(
         str(migrated_target), backend="sqlite"
     ).app.events.find_one({"_id": object_id})
-    assert migrated == document
+    assert migrated == canonical_document
 
 
 def test_cli_import_from_stdin_and_replace_mode(tmp_path, monkeypatch, capsys):

@@ -172,6 +172,14 @@ backend-specific locking and durability, the full object-storage environment
 table, portable capability and duplicate-error examples, and the fact that CLI
 migration does not copy source index metadata.
 
+Mike's final TM-019/TM-030 fidelity pass is also captured as shared contracts.
+PyMongo-shaped synchronous and asynchronous clients recursively honor
+`document_class`, `tz_aware`, and `tzinfo`; persisted datetimes now use BSON's
+signed UTC millisecond representation. The option-name allowlist follows the
+installed PyMongo validator catalog when available, and malformed operators
+inside `$elemMatch` report MongoDB error code `2` without disguising valid but
+unsupported predicates as malformed input.
+
 ## Handling failures
 
 For each difference found in the real application:

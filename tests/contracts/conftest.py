@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 import tinymongo
-from tinymongo.asyncio import AsyncTinyMongoClient
+from tinymongo.asyncio import AsyncMongoClient, AsyncTinyMongoClient
 
 from .support import ContractTarget
 
@@ -99,13 +99,17 @@ class _AsyncCollectionAdapter:
         return call
 
 
-def _mongo_client(uri):
+def _mongo_client(uri, client_options=None):
     try:
         from pymongo import MongoClient
     except ImportError:  # pragma: no cover - guarded by dev requirements
         pytest.fail("Real MongoDB contracts require PyMongo; run `pip install pymongo`")
 
-    client = MongoClient(uri, serverSelectionTimeoutMS=1000)
+    client = MongoClient(
+        uri,
+        serverSelectionTimeoutMS=1000,
+        **dict(client_options or {}),
+    )
     deadline = time.monotonic() + 15
     last_error = None
     while time.monotonic() < deadline:
@@ -119,13 +123,17 @@ def _mongo_client(uri):
     raise RuntimeError("MongoDB did not become ready: {0}".format(last_error))
 
 
-def _async_mongo_client(uri, runner):
+def _async_mongo_client(uri, runner, client_options=None):
     try:
         from pymongo import AsyncMongoClient
     except ImportError:  # pragma: no cover - guarded by dev requirements
         pytest.fail("Real MongoDB contracts require PyMongo; run `pip install pymongo`")
 
-    client = AsyncMongoClient(uri, serverSelectionTimeoutMS=1000)
+    client = AsyncMongoClient(
+        uri,
+        serverSelectionTimeoutMS=1000,
+        **dict(client_options or {}),
+    )
     deadline = time.monotonic() + 15
     last_error = None
     while time.monotonic() < deadline:
@@ -144,6 +152,8 @@ def _contract_suite(request):
         return "talkpython"
     if "test_bson_comparison_contract.py" in request.node.nodeid:
         return "bson-comparison"
+    if "test_client_read_fidelity_contract.py" in request.node.nodeid:
+        return "client-read-fidelity"
     return "core"
 
 
@@ -152,6 +162,8 @@ def contract_target(request, tmp_path, monkeypatch):
     """Yield an isolated collection for a TinyMongo backend or real MongoDB."""
 
     api, target_name = request.param
+    options_marker = request.node.get_closest_marker("client_options")
+    client_options = dict(options_marker.kwargs) if options_marker else {}
     database_name = "tinymongo_contract_{0}".format(uuid4().hex)
     request.node.user_properties.extend(
         [
@@ -173,9 +185,9 @@ def contract_target(request, tmp_path, monkeypatch):
         try:
             if api == "async":
                 runner = _AsyncRunner()
-                client = _async_mongo_client(uri, runner)
+                client = _async_mongo_client(uri, runner, client_options)
             else:
-                client = _mongo_client(uri)
+                client = _mongo_client(uri, client_options)
         except RuntimeError as error:
             if runner is not None:
                 runner.close()
@@ -223,9 +235,13 @@ def contract_target(request, tmp_path, monkeypatch):
     runner = None
     if api == "async":
         runner = _AsyncRunner()
-        client = AsyncTinyMongoClient(*arguments, **options)
+        client_class = AsyncMongoClient if client_options else AsyncTinyMongoClient
+        client = client_class(*arguments, **options, **client_options)
     else:
-        client = tinymongo.TinyMongoClient(*arguments, **options)
+        client_class = (
+            tinymongo.MongoClient if client_options else tinymongo.TinyMongoClient
+        )
+        client = client_class(*arguments, **options, **client_options)
     database = client[database_name]
     collection = database["items"]
     if runner is not None:

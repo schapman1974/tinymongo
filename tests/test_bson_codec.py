@@ -90,15 +90,33 @@ def _extended_document():
     }
 
 
-def test_codec_round_trips_nested_object_ids_and_aware_datetimes():
+def _canonical_extended_document(document):
+    return {
+        "_id": document["_id"],
+        "created": bson_types.canonicalize_datetime(document["created"]),
+        "nested": {
+            "owner_id": document["nested"]["owner_id"],
+            "history": [
+                {
+                    "at": bson_types.canonicalize_datetime(
+                        document["nested"]["history"][0]["at"]
+                    )
+                },
+                document["nested"]["history"][1],
+            ],
+        },
+    }
+
+
+def test_codec_round_trips_nested_object_ids_and_canonical_datetimes():
     document = _extended_document()
 
     restored = bson_codec.loads(bson_codec.dumps(document))
 
-    assert restored == document
+    assert restored == _canonical_extended_document(document)
     assert isinstance(restored["_id"], ObjectId)
-    assert restored["created"].tzinfo is not None
-    assert restored["created"].utcoffset() == timedelta(hours=-4)
+    assert restored["created"].tzinfo is None
+    assert restored["created"].microsecond == 123000
     assert isinstance(restored["nested"]["owner_id"], ObjectId)
     assert isinstance(restored["nested"]["history"][0]["at"], datetime)
     assert isinstance(restored["nested"]["history"][1], ObjectId)
@@ -117,8 +135,52 @@ def test_codec_tags_are_valid_readable_json():
     }
     assert encoded["created"] == {
         "__tinymongo_type_v1__": "datetime",
-        "value": document["created"].isoformat(),
+        "value": "2026-07-19T13:30:45.123",
     }
+
+
+def test_codec_canonicalizes_legacy_aware_datetime_tags():
+    tagged = {
+        "__tinymongo_type_v1__": "datetime",
+        "value": "2026-07-19T09:30:45.123999-04:00",
+    }
+
+    assert bson_codec.decode_value(tagged) == datetime(2026, 7, 19, 13, 30, 45, 123000)
+
+
+def test_codec_canonicalizes_pre_epoch_datetimes_without_float_rounding():
+    value = datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+    assert bson_types.datetime_milliseconds(value) == -1
+    assert bson_types.canonicalize_datetime(value) == datetime(
+        1969, 12, 31, 23, 59, 59, 999000
+    )
+    assert bson_codec.loads(bson_codec.dumps(value)) == datetime(
+        1969, 12, 31, 23, 59, 59, 999000
+    )
+
+
+def test_canonical_datetime_supports_aware_and_requested_timezone_results():
+    value = datetime(2026, 7, 19, 13, 30, 45, 123999)
+    eastern = timezone(timedelta(hours=-4))
+
+    assert bson_types.canonicalize_datetime(value, tz_aware=True) == datetime(
+        2026, 7, 19, 13, 30, 45, 123000, tzinfo=timezone.utc
+    )
+    assert bson_types.canonicalize_datetime(
+        value,
+        tz_aware=True,
+        tzinfo=eastern,
+    ) == datetime(2026, 7, 19, 9, 30, 45, 123000, tzinfo=eastern)
+
+
+def test_storage_equality_uses_canonical_bson_datetime_milliseconds():
+    first = datetime(2026, 7, 19, 9, 30, 45, 123001, tzinfo=timezone.utc)
+    same_millisecond = first.replace(microsecond=123999)
+    next_millisecond = first.replace(microsecond=124000)
+
+    assert bson_codec.storage_values_equal(first, same_millisecond)
+    assert not bson_codec.storage_values_equal(first, next_millisecond)
 
 
 @pytest.mark.parametrize(
@@ -582,8 +644,9 @@ def test_extended_values_round_trip_through_public_backends(tmp_path, backend):
     try:
         restored = reader.app.events.find_one({"_id": document["_id"]})
 
-        assert restored == document
-        assert reader.app.events.find_one({"created": document["created"]}) == document
+        expected = _canonical_extended_document(document)
+        assert restored == expected
+        assert reader.app.events.find_one({"created": document["created"]}) == expected
     finally:
         reader.close()
 
@@ -642,4 +705,4 @@ def test_json_backend_persists_readable_tags(tmp_path):
     assert '"__tinymongo_type_v1__": "objectid"' in raw
     assert '"__tinymongo_type_v1__": "datetime"' in raw
     assert str(document["_id"]) in raw
-    assert document["created"].isoformat() in raw
+    assert "2026-07-19T13:30:45.123" in raw

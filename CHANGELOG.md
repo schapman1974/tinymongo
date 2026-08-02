@@ -29,6 +29,13 @@
   operand validation across synchronous and asynchronous clients.
 
 ### Changed
+- Datetimes now persist in MongoDB's canonical signed UTC millisecond form.
+  Naive inputs are interpreted as UTC, aware inputs are converted to UTC, and
+  PyMongo-shaped clients return naive UTC by default or timezone-aware values
+  when configured with `tz_aware` and optional `tzinfo`.
+- When PyMongo is installed, recognized connection option names are derived
+  from that version's validator catalog; dependency-free use retains the
+  bundled fallback set.
 - Aggregation capability reporting now describes the exact supported stages,
   accumulators, and expressions instead of reporting a blanket unsupported
   value. The value therefore changed from falsey `False` to a truthy structured
@@ -49,6 +56,13 @@
   constraint.
 
 ### Fixed
+- **TM-019 / TM-030:** `MongoClient` and `AsyncMongoClient` now honor
+  `document_class` recursively across finds, projections, aggregation,
+  document-valued `distinct()` results, and find-and-modify returns. The same
+  paths also honor `tz_aware` and `tzinfo`, with eager option validation.
+- Unknown or misplaced `$` operators in document-form `$elemMatch` now raise
+  `OperationFailure` code `2`, while valid but unsupported MongoDB predicates
+  continue to raise `TinyMongoNotSupportedError`.
 - **#94:** `$gt`, `$gte`, `$lt`, and `$lte` now share recursive BSON
   type-bracketed comparison semantics across queries, aggregation `$match`,
   and `$pull`, including direct array-member matching. Datetimes compare at

@@ -35,6 +35,7 @@ jobs:
         run: >-
           pytest -o addopts='' -q
           tests/test_bson_registry_hardening.py tests/test_cli.py
+          tests/test_client_configuration.py
 
   test:
     runs-on: ubuntu-latest
@@ -410,4 +411,5 @@ jobs:
           pytest -o addopts='' -q
           tests/test_patching.py tests/test_bson_codec.py
           tests/test_insert_many_semantics.py tests/test_talkpython_regressions.py
+          tests/test_client_configuration.py tests/test_client_read_fidelity.py
           -k 'not duckdb and not parquet'

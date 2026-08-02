@@ -51,6 +51,7 @@ minversion = "6.0"
 addopts = "-q -m 'not integration and not mongodb and not legacy_mongodb'"
 markers = [
   "contract: shared application-facing compatibility contracts",
+  "client_options: configure PyMongo-shaped clients for a shared contract",
   "integration: opt-in integration and stress tests that may be slower or resource intensive",
   "legacy_mongodb: quarantined MongoDB comparisons retained only during contract migration",
   "mongodb: requires a real MongoDB server selected through TINYMONGO_MONGODB_URI",

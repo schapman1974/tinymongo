@@ -461,6 +461,28 @@ def test_recognized_query_operators_reject_malformed_operands(contract_target):
             list(collection.find(query))
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"numbers": {"$elemMatch": {"$nonsense": 1}}},
+        {"numbers": {"$elemMatch": {"$gt": 4, "$nonsense": 1}}},
+        {"numbers": {"$elemMatch": {"$and": [{"$gt": 4}]}}},
+    ],
+    ids=("unknown", "unknown-beside-field-operator", "misplaced-logical-clause"),
+)
+def test_elem_match_unknown_or_misplaced_operators_report_code_2(
+    contract_target,
+    query,
+):
+    collection = contract_target.collection
+    collection.insert_one({"_id": "original", "numbers": [1, 5, 10]})
+
+    with pytest.raises(_OPERATION_ERRORS) as caught:
+        list(collection.find(query))
+
+    assert caught.value.code == 2
+
+
 def test_comment_is_accepted_and_ignored_while_matching(contract_target):
     collection = contract_target.collection
     collection.insert_many(

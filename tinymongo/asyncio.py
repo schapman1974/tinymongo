@@ -21,6 +21,8 @@ from .tinymongo import (
     TinyMongoClient,
     TinyMongoCollection,
     TinyMongoCursor,
+    _normalize_read_options,
+    _pop_case_insensitive_option,
     _resolve_tiny_client_folder,
     _validate_mongo_client_kwargs,
 )
@@ -225,9 +227,34 @@ class AsyncMongoClient(_AsyncClientBase):
     _sync_client_class = MongoClient
     _backend_position = None
 
-    def __init__(self, *args: Any, **kwargs: Any):
+    def __init__(
+        self,
+        host: Any = None,
+        port: Any = None,
+        document_class: Any = None,
+        tz_aware: Any = None,
+        connect: Any = None,
+        type_registry: Any = None,
+        **kwargs: Any,
+    ):
         _validate_mongo_client_kwargs(kwargs)
-        super().__init__(*args, **kwargs)
+        tzinfo = _pop_case_insensitive_option(kwargs, "tzinfo")
+        document_class, tz_aware, tzinfo = _normalize_read_options(
+            document_class,
+            tz_aware,
+            tzinfo,
+        )
+        if tzinfo is not None:
+            kwargs["tzinfo"] = tzinfo
+        super().__init__(
+            host,
+            port,
+            document_class,
+            tz_aware,
+            connect,
+            type_registry,
+            **kwargs,
+        )
 
 
 class AsyncTinyMongoDatabase:
