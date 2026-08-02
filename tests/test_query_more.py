@@ -197,9 +197,9 @@ def test_update_operator_support():
             "$set": {"meta.active": True},
             "$unset": {"meta.old": ""},
             "$push": {"tags": "b"},
-            "$addToSet": {"tags": "b"},
         },
     )
+    c.update_one({"_id": 1}, {"$addToSet": {"tags": "b"}})
     c.update_one({"_id": 1}, {"$pull": {"tags": "a"}})
 
     doc = c.find_one({"_id": 1})

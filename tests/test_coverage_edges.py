@@ -776,8 +776,9 @@ def test_update_operator_error_edges(tmp_path):
         c.update_one({"_id": 1}, {})
     with pytest.raises(ValueError, match="update only works with \\$ operators"):
         c.update_one({"_id": 1}, {"$set": {"x": 1}, "plain": 2})
-    with pytest.raises(ValueError, match="requires a dict"):
+    with pytest.raises(WriteError, match="requires a document") as malformed:
         c.update_one({"_id": 1}, {"$set": "not-a-dict"})
+    assert malformed.value.code == 9
     with pytest.raises(WriteError, match="\\$inc requires numeric values") as one:
         c.update_one({"_id": 1}, {"$inc": {"count": 1}})
     assert one.value.code == 14

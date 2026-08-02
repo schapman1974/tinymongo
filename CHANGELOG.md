@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-02
+
 ### Added
 - A shared, backend-independent aggregation engine for `$match`, `$sort`,
   `$skip`, `$limit`, `$count`, `$project`, `$set`, `$addFields`, `$unset`, and
@@ -27,6 +29,14 @@
 - MongoDB-style `$size`, `$elemMatch`, `$type`, and `$mod` query operators,
   including array-member behavior, BSON type aliases and numeric codes, and
   operand validation across synchronous and asynchronous clients.
+- MongoDB-style `$rename`, `$min`, `$max`, and `$pop` update operators across
+  synchronous and asynchronous clients and every backend. They support dotted
+  paths, and the applicable operators traverse numeric array paths while
+  preserving MongoDB's missing-field, comparison-order, and array-end behavior.
+- Shared real-MongoDB update contracts cover upserts, multi-document and
+  find-and-modify writes, immutable `_id` handling, path conflicts, blocked
+  paths, invalid targets, and single-document atomic failure behavior for the
+  expanded update operator set.
 
 ### Changed
 - Datetimes now persist in MongoDB's canonical signed UTC millisecond form.
@@ -46,6 +56,14 @@
   a Boolean to a structured mapping of dependency-free `native` families and
   installed optional `pymongo` types; inspect its `pymongo` tuple when detecting
   optional BSON support.
+- Update capability reporting now exposes a structured `update_operators`
+  mapping containing the exact supported operator names plus the accepted
+  `$push` and `$addToSet` modifiers. Use `client.supports("update_operators")`
+  for a Boolean check.
+- Update validation now reports PyMongo-compatible `WriteError` codes for
+  malformed operator documents, empty or conflicting paths, non-viable
+  traversal, immutable `_id` changes, and invalid update targets before a
+  document is partially changed.
 - Remote SQL unique indexes now materialize versioned canonical BSON token
   digests protected by native constraints, preserving exact int/float identity
   across concurrent PostgreSQL and MariaDB/MySQL writers. Decimal128 and arrays

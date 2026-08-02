@@ -17,21 +17,17 @@ supported at the beta level for the backends described below.
 
 # Installation
 
-The latest stable release is 1.2.1 and can be installed from PyPI:
+The latest stable release is 1.3.0 and can be installed from PyPI:
 
 ```bash
-pip install "tinymongo==1.2.1"
+pip install "tinymongo==1.3.0"
 ```
 
 For development, clone this repository and run `pip install -e .` from its
-root. Use the `v1.2.1` tag when you need source and documentation that match
-the current stable package exactly; `master` may contain unreleased changes.
-This README follows `master`: the aggregation core, advanced array-update
-modifiers, Decimal128, UUID, and regex support, and the additional query
-operators described below were added after `v1.2.1` and are not part of the
-1.2.1 package on PyPI. See
+root. Use the `v1.3.0` tag when you need source and documentation that match
+the current stable package exactly; `master` may contain later changes. See
 [`CHANGELOG.md`](https://github.com/schapman1974/tinymongo/blob/master/CHANGELOG.md)
-for the complete unreleased list.
+for the complete release history and any unreleased work.
 
 The default JSON backend has a small dependency set. Optional database backends
 may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
@@ -467,13 +463,27 @@ documents where `field` is missing, while `$ne` and `$nin` with only non-null
 values continue to include missing fields. The same rule applies to dotted
 paths and array members across TinyMongo backends.
 
-Update support includes `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
-`$addToSet`, including `upsert=True`. As in PyMongo, `update_one()` and
-`update_many()` require update operators; use `replace_one()` for full-document
-replacement. `$push` accepts `$each`, `$position`, `$sort`, and `$slice`;
-`$addToSet` accepts `$each`; and `$pull` accepts literal, query, and document
-operands. Applying `$addToSet` to an existing null or non-array field raises a
-PyMongo-compatible `WriteError` with code `2`, and the update remains atomic.
+Update support includes `$set`, `$unset`, `$inc`, `$min`, `$max`, `$rename`,
+`$push`, `$pop`, `$pull`, and `$addToSet`, including `upsert=True`. As in
+PyMongo, `update_one()` and `update_many()` require update operators; use
+`replace_one()` for full-document replacement. `$push` accepts `$each`,
+`$position`, `$sort`, and `$slice`; `$addToSet` accepts `$each`; and `$pull`
+accepts literal, query, and document operands.
+
+`$min` and `$max` set a missing field or replace an existing value only when
+the candidate is lower or higher in TinyMongo's MongoDB-compatible BSON order.
+`$rename` moves an existing field without creating a value for a missing
+source. `$pop` removes the first array item for `-1` or the last for `1`, and is
+a no-op for a missing or empty array. Dotted paths are supported; the new
+operators also follow numeric array positions where MongoDB permits them, while
+`$rename` rejects array-element source and destination paths.
+
+Update documents are validated before any change is stored. Non-document
+operator operands, invalid or conflicting paths, traversal through a scalar,
+non-array `$pop` targets, and attempts to change `_id` raise
+PyMongo-compatible `WriteError` exceptions with the applicable MongoDB code,
+and the complete update remains atomic. Applying `$addToSet` to an existing
+null or non-array field similarly raises `WriteError` code `2`.
 
 `find()` and `find_one()` accept Mongo-style inclusion and exclusion
 projections. Dotted paths project nested fields, `_id` follows MongoDB's special
@@ -564,10 +574,9 @@ order for ascending and descending sorts. TinyMongo uses its shared Python
 matcher whenever a backend-native or indexed predicate cannot guarantee these
 rules. Extending unique-index identity to the remaining supported BSON values
 is still tracked separately in the roadmap and continues to fail closed where
-exact enforcement is unavailable. The update `$min` and `$max` modifiers remain
-tracked under
-[#77](https://github.com/schapman1974/tinymongo/issues/77); aggregation `$min`
-and `$max` are already part of the supported aggregation subset.
+exact enforcement is unavailable. Update and aggregation `$min` and `$max`
+share this BSON comparison order, including recursive document and array
+comparisons and numeric equivalence across supported numeric representations.
 
 ## Aggregation core subset
 
@@ -818,15 +827,19 @@ capabilities = client.capabilities()
 print(capabilities)
 print(capabilities["query_operators"]["field"])
 print(capabilities["query_operators"]["ignored"])
+print(capabilities["update_operators"]["operators"])
+print(capabilities["update_operators"]["modifiers"])
 print(capabilities["bson_types"]["pymongo"])
 print(client.supports("multiprocess_writes"))
 ```
 
 The capability map covers persistence, remote and object storage, table-native
 storage, multiprocess writes, native indexes, projections, bulk writes,
-aggregation, query operators, BSON types, sessions, transactions, and change
-streams. `query_operators` separates top-level logical operators from field
-operators and accepted-but-ignored metadata operators such as `$comment`.
+aggregation, query and update operators, BSON types, sessions, transactions,
+and change streams. `query_operators` separates top-level logical operators
+from field operators and accepted-but-ignored metadata operators such as
+`$comment`. `update_operators` lists every supported update operator and maps
+`$push` and `$addToSet` to their accepted modifiers.
 `bson_types` separates dependency-free `native` families from the richer
 `pymongo` types available when the optional BSON extra is installed. These
 values are structured mappings; use `client.supports()` for a Boolean feature
