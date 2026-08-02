@@ -39,11 +39,13 @@
   a Boolean to a structured mapping of dependency-free `native` families and
   installed optional `pymongo` types; inspect its `pymongo` tuple when detecting
   optional BSON support.
-- Remote SQL unique indexes fail closed for Decimal128 values, as they already
-  do for arrays, when their native JSON constraints cannot guarantee exact
-  MongoDB numeric identity across concurrent writers.
+- Remote SQL unique indexes now materialize versioned canonical BSON token
+  digests protected by native constraints, preserving exact int/float identity
+  across concurrent PostgreSQL and MariaDB/MySQL writers. Decimal128 and arrays
+  remain fail-closed until their native token and multikey behavior can be
+  derived safely.
 - Remote SQL unique indexes also fail closed for Binary, UUID, and regex values
-  whose exact cross-process BSON identity cannot be enforced by the native JSON
+  whose exact cross-process BSON identity cannot be enforced by the native token
   constraint.
 
 ### Fixed
@@ -84,6 +86,10 @@
   doubles, and Decimal128 values, including large exactly equivalent integers
   and integral-looking doubles; SQLite attempts a one-time rebuild of legacy
   expression indexes when upgrading the token format.
+- Legacy remote SQL unique indexes now upgrade lazily under a per-collection
+  database lock. TinyMongo preflights and backfills exact tokens before swapping
+  the native index, retries safely across concurrent clients, and leaves a
+  conflicting catalog entry stale so later operations continue to fail closed.
 - If that SQLite rebuild discovers values an older unique token incorrectly
   treated as distinct, TinyMongo raises `DuplicateKeyError`, removes the unsafe
   native expression constraint, and retains fail-closed catalog enforcement so

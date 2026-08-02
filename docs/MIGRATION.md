@@ -64,6 +64,14 @@ pip install ".[all]"
   JSONB may already have normalized field order in legacy rows. TinyMongo can
   recover a literal container `_id` from its legacy physical row key; other
   normalized embedded documents retain the order returned by PostgreSQL.
+- Remote SQL unique indexes now use private materialized token columns so native
+  constraints preserve exact BSON int/float identity without SQL numeric
+  rounding. Existing unique indexes upgrade lazily under a collection lock. The
+  upgrade preflights and backfills current rows before replacing the native
+  index; exact legacy duplicates raise `DuplicateKeyError` and keep the catalog
+  version stale for a fail-closed retry. The database account needs `ALTER
+  TABLE`, index creation, and index removal privileges. Stop older TinyMongo
+  writers before allowing the upgraded client to migrate these indexes.
 - Remote SQL and object-storage Parquet no longer create the unused local path
   passed for API/CLI compatibility. Environment-only object-storage URIs and
   remote DSNs participate in CLI database discovery and migration summaries.

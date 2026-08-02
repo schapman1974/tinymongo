@@ -35,6 +35,8 @@ from tinymongo.table_backends import (
     _json_loads,
     _join_uri,
     _reject_remote_unique_values,
+    _remote_unique_token,
+    _REMOTE_UNIQUE_TOKEN_VERSION,
     _SQLITE_UNIQUE_TOKEN_VERSION,
     matches_filter,
     requires_python_filter,
@@ -114,6 +116,8 @@ class FakeRemoteStore:
         self.columns = {}
         self.metadata = set()
         self.indexes = {}
+        self.native_indexes = set()
+        self.tokens = {}
         self.index_ddl = []
         self.schema_ddl = []
 
@@ -128,7 +132,23 @@ class FakeRemoteCursor:
         upper = normalized.upper()
         if upper.startswith("CREATE TABLE"):
             table = self._table_from_create(normalized)
-            if "TINYMONGO_" not in table.upper():
+            if "TINYMONGO_INDEXES" in table.upper():
+                self.store.columns.setdefault(
+                    table,
+                    {
+                        "database_name",
+                        "collection_name",
+                        "index_name",
+                        "field_name",
+                        "unique_flag",
+                        "token_version",
+                    },
+                )
+            elif "TINYMONGO_COLLECTIONS" in table.upper():
+                self.store.columns.setdefault(
+                    table, {"database_name", "collection_name"}
+                )
+            else:
                 if table not in self.store.tables:
                     self.store.tables[table] = {}
                     self.store.columns[table] = {"_id", "data"}
@@ -136,34 +156,85 @@ class FakeRemoteCursor:
                         self.store.columns[table].add("data_ordered")
         elif upper.startswith(("CREATE INDEX", "CREATE UNIQUE INDEX")):
             self.store.index_ddl.append(normalized)
+            self.store.native_indexes.add(
+                (
+                    self._table_after(normalized, "ON"),
+                    self._index_from_create(normalized),
+                )
+            )
+        elif upper.startswith("LOCK TABLE"):
+            self.store.schema_ddl.append(normalized)
         elif upper.startswith("ALTER TABLE") and "DATA_ORDERED" in upper:
             table = self._table_after(normalized, "TABLE")
             self.store.columns.setdefault(table, {"_id", "data"}).add("data_ordered")
             self.store.schema_ddl.append(normalized)
-        elif upper.startswith(("ALTER TABLE", "DROP INDEX")):
+        elif upper.startswith("ALTER TABLE"):
+            table = self._table_after(normalized, "TABLE")
+            if " ADD COLUMN " in upper:
+                column = self._column_after(normalized, "ADD COLUMN")
+                self.store.columns.setdefault(table, set()).add(column)
+            for column in self._drop_columns(normalized):
+                self.store.columns.setdefault(table, set()).discard(column)
+                self.store.tokens = {
+                    key: value
+                    for key, value in self.store.tokens.items()
+                    if not (key[0] == table and key[1] == column)
+                }
+            for index in self._drop_indexes(normalized):
+                self.store.native_indexes.discard((table, index))
+            self.store.index_ddl.append(normalized)
+        elif upper.startswith("DROP INDEX"):
+            index = self._index_from_drop(normalized)
+            self.store.native_indexes = {
+                item for item in self.store.native_indexes if item[1] != index
+            }
             self.store.index_ddl.append(normalized)
         elif upper.startswith("INSERT") and "TINYMONGO_INDEXES" in upper:
-            database, collection, name, field, unique = params
-            self.store.indexes[(database, collection, name)] = (field, bool(unique))
+            database, collection, name, field, unique, token_version = params
+            self.store.indexes[(database, collection, name)] = (
+                field,
+                bool(unique),
+                token_version,
+            )
         elif upper.startswith("INSERT") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.add(tuple(params))
         elif upper.startswith("SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS"):
             table = params[0]
-            self.rows = (
-                [(1,)] if "data_ordered" in self.store.columns.get(table, set()) else []
-            )
+            if "COLUMN_NAME = 'TOKEN_VERSION'" in upper:
+                column = "token_version"
+            else:
+                column = params[1] if len(params) > 1 else "data_ordered"
+            self.rows = [(1,)] if column in self.store.columns.get(table, set()) else []
+        elif upper.startswith("SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS"):
+            self.rows = [(1,)] if tuple(params) in self.store.native_indexes else []
+        elif upper.startswith("SELECT GET_LOCK"):
+            self.rows = [(1,)]
+        elif upper.startswith("SELECT RELEASE_LOCK"):
+            self.rows = [(1,)]
         elif upper.startswith("SELECT DISTINCT"):
             self.rows = sorted({(database,) for database, _ in self.store.metadata})
         elif upper.startswith("SELECT INDEX_NAME"):
-            database, collection = params
-            self.rows = sorted(
-                (name, field, unique)
-                for (index_database, index_collection, name), (
-                    field,
-                    unique,
-                ) in self.store.indexes.items()
-                if index_database == database and index_collection == collection
-            )
+            database, collection = params[:2]
+            if "TOKEN_VERSION <" in upper:
+                target_version = params[3]
+                self.rows = sorted(
+                    (name, value[0])
+                    for (index_database, index_collection, name), value in (
+                        self.store.indexes.items()
+                    )
+                    if index_database == database
+                    and index_collection == collection
+                    and bool(value[1])
+                    and (value[2] if len(value) > 2 else 0) < target_version
+                )
+            else:
+                self.rows = sorted(
+                    (name, value[0], value[1])
+                    for (index_database, index_collection, name), value in (
+                        self.store.indexes.items()
+                    )
+                    if index_database == database and index_collection == collection
+                )
         elif upper.startswith("SELECT COLLECTION_NAME"):
             database = params[0]
             self.rows = sorted(
@@ -175,6 +246,11 @@ class FakeRemoteCursor:
             table = self._table_after(normalized, "TABLE IF EXISTS")
             self.store.tables.pop(table, None)
             self.store.columns.pop(table, None)
+            self.store.tokens = {
+                key: value
+                for key, value in self.store.tokens.items()
+                if key[0] != table
+            }
         elif upper.startswith("DELETE FROM") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.discard(tuple(params))
         elif upper.startswith("DELETE FROM") and "TINYMONGO_INDEXES" in upper:
@@ -191,9 +267,13 @@ class FakeRemoteCursor:
                 database, collection, name = params
                 self.store.indexes.pop((database, collection, name), None)
         elif upper.startswith("DELETE FROM"):
-            self.store.tables.setdefault(self._table_after(normalized, "FROM"), {}).pop(
-                params[0], None
-            )
+            table = self._table_after(normalized, "FROM")
+            self.store.tables.setdefault(table, {}).pop(params[0], None)
+            self.store.tokens = {
+                key: value
+                for key, value in self.store.tokens.items()
+                if not (key[0] == table and key[2] == params[0])
+            }
         elif upper.startswith("SELECT _ID, DATA_ORDERED, DATA"):
             table = self._table_after(normalized, "FROM")
             self.rows = [
@@ -229,10 +309,22 @@ class FakeRemoteCursor:
                 (self._payload_columns(value)[0],)
                 for value in self.store.tables.get(table, {}).values()
             ]
+        elif upper.startswith("UPDATE") and "TINYMONGO_INDEXES" in upper:
+            token_version, database, collection, name = params
+            key = (database, collection, name)
+            value = self.store.indexes[key]
+            self.store.indexes[key] = (value[0], value[1], token_version)
         elif upper.startswith("UPDATE"):
             table = self._table_after(normalized, "UPDATE")
-            if len(params) == 3:
-                data, ordered_data, doc_id = params
+            if len(params) >= 3:
+                data, ordered_data, doc_id = params[0], params[1], params[-1]
+                assignments = normalized.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+                token_columns = [
+                    self._clean(item.split("=", 1)[0].strip())
+                    for item in assignments.split(",")[2:]
+                ]
+                for column, token in zip(token_columns, params[2:-1]):
+                    self._store_unique_token(table, column, doc_id, token)
                 self.store.tables.setdefault(table, {})[doc_id] = (
                     data,
                     ordered_data,
@@ -243,15 +335,30 @@ class FakeRemoteCursor:
         return self
 
     def executemany(self, sql, rows):
-        if sql.upper().startswith("DELETE FROM"):
-            table = self._table_after(" ".join(sql.split()), "FROM")
+        normalized = " ".join(sql.split())
+        upper = normalized.upper()
+        if upper.startswith("DELETE FROM"):
+            table = self._table_after(normalized, "FROM")
             target = self.store.tables.setdefault(table, {})
             for (doc_id,) in rows:
                 target.pop(doc_id, None)
+                self.store.tokens = {
+                    key: value
+                    for key, value in self.store.tokens.items()
+                    if not (key[0] == table and key[2] == doc_id)
+                }
             return
 
-        table = self._table_after(" ".join(sql.split()), "INTO")
+        if upper.startswith("UPDATE"):
+            table = self._table_after(normalized, "UPDATE")
+            column = self._column_after(normalized, "SET")
+            for token, doc_id in rows:
+                self._store_unique_token(table, column, doc_id, token)
+            return
+
+        table = self._table_after(normalized, "INTO")
         target = self.store.tables.setdefault(table, {})
+        columns = self._insert_columns(normalized)
         for row in rows:
             doc_id, data = row[:2]
             if (
@@ -260,7 +367,9 @@ class FakeRemoteCursor:
                 and "REPLACE" not in sql.upper()
             ):
                 raise RuntimeError("duplicate key")
-            target[doc_id] = (data, row[2]) if len(row) == 3 else data
+            for column, token in zip(columns[3:], row[3:]):
+                self._store_unique_token(table, column, doc_id, token)
+            target[doc_id] = (data, row[2]) if len(row) >= 3 else data
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
@@ -285,6 +394,59 @@ class FakeRemoteCursor:
     def _clean(self, value):
         return value.strip().strip('"').strip("`")
 
+    def _index_from_create(self, sql):
+        return self._clean(sql.split("INDEX", 1)[1].strip().split()[0])
+
+    def _index_from_drop(self, sql):
+        remainder = sql.split("INDEX", 1)[1].strip()
+        if remainder.upper().startswith("IF EXISTS"):
+            remainder = remainder[len("IF EXISTS") :].strip()
+        return self._clean(remainder.split()[0])
+
+    def _column_after(self, sql, marker):
+        remainder = sql.split(marker, 1)[1].strip()
+        if remainder.upper().startswith("IF NOT EXISTS"):
+            remainder = remainder[len("IF NOT EXISTS") :].strip()
+        return self._clean(remainder.split()[0])
+
+    def _drop_columns(self, sql):
+        columns = []
+        for part in sql.split("DROP COLUMN")[1:]:
+            remainder = part.strip()
+            if remainder.upper().startswith("IF EXISTS"):
+                remainder = remainder[len("IF EXISTS") :].strip()
+            columns.append(self._clean(remainder.split()[0].rstrip(",")))
+        return columns
+
+    def _drop_indexes(self, sql):
+        return [
+            self._clean(part.strip().split()[0].rstrip(","))
+            for part in sql.split("DROP INDEX")[1:]
+        ]
+
+    def _insert_columns(self, sql):
+        values_at = sql.upper().index(" VALUES ")
+        before_values = sql[:values_at]
+        start = before_values.index("(") + 1
+        return [
+            self._clean(value.strip()) for value in before_values[start:].split(",")
+        ]
+
+    def _store_unique_token(self, table, column, doc_id, token):
+        for (
+            other_table,
+            other_column,
+            other_id,
+        ), other_token in self.store.tokens.items():
+            if (
+                other_table == table
+                and other_column == column
+                and other_id != doc_id
+                and other_token == token
+            ):
+                raise RuntimeError("duplicate key")
+        self.store.tokens[(table, column, doc_id)] = token
+
 
 class FakeRemoteConnection:
     def __init__(self, store):
@@ -296,6 +458,9 @@ class FakeRemoteConnection:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        pass
 
     def close(self):
         pass
@@ -1260,9 +1425,9 @@ def test_postgres_indexes_are_native_durable_unique_and_droppable(monkeypatch):
 
     spec = parse_index_spec("email", unique=True)
     assert backend.create_index("users", spec) == "email_1"
-    ddl_count = len(store.index_ddl)
+    ddl_count = sum("CREATE UNIQUE INDEX" in sql for sql in store.index_ddl)
     assert backend.create_index("users", spec) == "email_1"
-    assert len(store.index_ddl) == ddl_count
+    assert sum("CREATE UNIQUE INDEX" in sql for sql in store.index_ddl) == ddl_count
     assert backend.list_indexes("users") == [
         {"name": "_id_", "key": [("_id", 1)]},
         {"name": "email_1", "key": [("email", 1)], "unique": True},
@@ -1270,12 +1435,14 @@ def test_postgres_indexes_are_native_durable_unique_and_droppable(monkeypatch):
     assert _postgres_backend(monkeypatch, store).list_indexes("users") == (
         backend.list_indexes("users")
     )
+    token_column = backend._unique_token_column("users", spec)
     assert any(
         "CREATE UNIQUE INDEX" in sql
-        and "COALESCE(jsonb_extract_path(data, 'email'), 'null'::jsonb)" in sql
-        and "jsonb_typeof(data)" not in sql
+        and '"{0}"'.format(token_column) in sql
+        and "jsonb_extract_path" not in sql
         for sql in store.index_ddl
     )
+    assert token_column in store.columns[backend._table_name("users")]
 
     with pytest.raises(DuplicateKeyError):
         backend.insert_many("users", [{"_id": 3, "email": "one@example.com"}])
@@ -1304,7 +1471,8 @@ def test_remote_unique_creation_preflights_and_drop_cleans_catalog(monkeypatch):
     with pytest.raises(DuplicateKeyError):
         backend.create_index("users", parse_index_spec("email", unique=True))
     assert backend.list_indexes("users") == [{"name": "_id_", "key": [("_id", 1)]}]
-    assert not store.index_ddl
+    assert not any("CREATE UNIQUE INDEX" in sql for sql in store.index_ddl)
+    assert not store.native_indexes
 
     backend.create_index("users", parse_index_spec("email"))
     with pytest.raises(OperationFailure, match="different options") as conflict:
@@ -1370,10 +1538,12 @@ def test_remote_native_errors_are_mapped_without_hiding_other_failures(monkeypat
     with pytest.raises(RuntimeError, match="syntax error"):
         backend.create_index("users", spec)
 
-    def fail_insert(conn, collection, rows, bypass_document_validation):
+    def fail_insert(conn, collection, rows, unique_specs, bypass_document_validation):
         raise RuntimeError("insert syntax error")
 
-    def fail_duplicate_insert(conn, collection, rows, bypass_document_validation):
+    def fail_duplicate_insert(
+        conn, collection, rows, unique_specs, bypass_document_validation
+    ):
         raise RuntimeError("duplicate key")
 
     monkeypatch.setattr(backend, "_insert_rows", fail_duplicate_insert)
@@ -1385,7 +1555,67 @@ def test_remote_native_errors_are_mapped_without_hiding_other_failures(monkeypat
         backend.insert_many("users", [{"_id": 4, "email": "four@example.com"}])
 
 
-def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
+def test_remote_schema_races_and_cleanup_errors_preserve_original_failure(
+    monkeypatch,
+):
+    store = FakeRemoteStore()
+    backend = _postgres_backend(monkeypatch, store)
+    unique_spec = parse_index_spec("email", unique=True)
+    backend.create_collection("users")
+
+    def compatibility(_collection, spec, specs=None):
+        return spec if specs is not None else None
+
+    monkeypatch.setattr(backend, "_check_index_compatibility", compatibility)
+    assert backend.create_index("users", unique_spec) == unique_spec.name
+    assert not store.native_indexes
+
+    backend = _postgres_backend(monkeypatch, store)
+    monkeypatch.setattr(
+        backend,
+        "_create_native_index",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("create syntax error")),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_cleanup_failed_native_index_creation",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("cleanup syntax error")),
+    )
+    with pytest.raises(RuntimeError, match="create syntax error"):
+        backend.create_index("users", unique_spec)
+
+    with pytest.raises(RuntimeError, match="create syntax error"):
+        backend.create_index("users", parse_index_spec("lookup"))
+
+
+def test_remote_delete_and_drop_index_errors_roll_back(monkeypatch):
+    store = FakeRemoteStore()
+    backend = _postgres_backend(monkeypatch, store)
+    backend.insert_many("users", [{"_id": 1, "value": "one"}])
+    backend.create_index("users", parse_index_spec("value"))
+    backend.drop_index("users", "value_1")
+
+    monkeypatch.setattr(
+        backend,
+        "_executemany",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("delete syntax error")),
+    )
+    with pytest.raises(RuntimeError, match="delete syntax error"):
+        backend.delete_ids("users", [1])
+
+    monkeypatch.undo()
+    backend = _postgres_backend(monkeypatch, store)
+    backend.create_index("users", parse_index_spec("other"))
+    monkeypatch.setattr(
+        backend,
+        "_drop_native_index",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("drop syntax error")),
+    )
+    with pytest.raises(RuntimeError, match="drop syntax error"):
+        backend.drop_index("users", "other_1")
+
+
+def test_mysql_uses_materialized_unique_token_and_rejects_multikey_unique(
     monkeypatch,
 ):
     store = FakeRemoteStore()
@@ -1399,6 +1629,7 @@ def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
     )
 
     backend.create_index("items", parse_index_spec("value", unique=True))
+    backend.create_index("items", parse_index_spec("lookup"))
     with pytest.raises(TinyMongoNotSupportedError, match="does not support array"):
         backend.create_index(
             "items", parse_index_spec("tags", unique=True, name="unique_tags")
@@ -1406,16 +1637,23 @@ def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
 
     assert _mysql_backend(monkeypatch, store).list_indexes("items") == [
         {"name": "_id_", "key": [("_id", 1)]},
+        {"name": "lookup_1", "key": [("lookup", 1)]},
         {"name": "value_1", "key": [("value", 1)], "unique": True},
     ]
+    token_column = backend._unique_token_column(
+        "items", parse_index_spec("value", unique=True)
+    )
+    assert token_column in store.columns[backend._table_name("items")]
+    assert any(
+        "CREATE UNIQUE INDEX" in sql
+        and "`{0}`".format(token_column) in sql
+        and "JSON_EXTRACT" not in sql
+        for sql in store.index_ddl
+    )
     assert any(
         "GENERATED ALWAYS AS" in sql
-        and "JSON_TYPE(JSON_EXTRACT(data, '$.\"value\"'))" in sql
-        and "JSON_TYPE(data)" not in sql
-        and "CONCAT('bool:'" in sql
-        and "AS DECIMAL(65, 30)" in sql
+        and "JSON_TYPE(JSON_EXTRACT(data, '$.\"lookup\"'))" in sql
         and "SHA2(CASE" in sql
-        and "CHAR(64) CHARACTER SET ascii COLLATE ascii_bin" in sql
         for sql in store.index_ddl
     )
     assert sum("CREATE UNIQUE INDEX" in sql for sql in store.index_ddl) == 1
@@ -1426,10 +1664,251 @@ def test_mysql_uses_type_aware_generated_column_and_rejects_multikey_unique(
     backend.drop_index("items", "value_1")
     assert any(sql.startswith("DROP INDEX") for sql in store.index_ddl)
     assert any("DROP COLUMN" in sql for sql in store.index_ddl)
+    backend.drop_index("items", "lookup_1")
 
     backend.insert_many("numbers", [{"_id": 1, "value": 1}, {"_id": 2, "value": 1.0}])
     with pytest.raises(DuplicateKeyError):
         backend.create_index("numbers", parse_index_spec("value", unique=True))
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "same_token"),
+    [
+        (1, 1.0, True),
+        (0, -0.0, True),
+        (2**60, float(2**60), True),
+        (int(1e23), 1e23, True),
+        (2**53 + 1, float(2**53 + 1), False),
+        (10**23, 1e23, False),
+        (0, 5e-324, False),
+        (True, 1, False),
+    ],
+)
+def test_remote_unique_tokens_preserve_exact_bson_numeric_identity(
+    left, right, same_token
+):
+    spec = parse_index_spec("value", unique=True)
+
+    left_token = _remote_unique_token({"value": left}, spec)
+    right_token = _remote_unique_token({"value": right}, spec)
+
+    assert (left_token == right_token) is same_token
+    assert len(left_token) == len(right_token) == 64
+
+
+def test_remote_unique_token_rejects_future_multitoken_expansion(monkeypatch):
+    spec = parse_index_spec("value", unique=True)
+    monkeypatch.setattr(
+        "tinymongo.table_backends.index_tokens", lambda _document, _field: ["a", "b"]
+    )
+
+    with pytest.raises(TinyMongoNotSupportedError, match="exactly one scalar token"):
+        _remote_unique_token({"value": "scalar"}, spec)
+
+
+def test_remote_base_schema_hooks_and_migration_errors(monkeypatch):
+    backend = RemoteSQLTableBackend("", database="app", dsn="remote")
+    conn = FakeRemoteConnection(FakeRemoteStore())
+    spec = parse_index_spec("value", unique=True)
+    dropped = []
+
+    with backend._collection_schema_lock(conn, "items"):
+        pass
+    monkeypatch.setattr(
+        backend,
+        "_drop_native_index",
+        lambda active_conn, collection, active_spec: dropped.append(
+            (active_conn, collection, active_spec)
+        ),
+    )
+    backend._drop_legacy_native_index(conn, "items", spec)
+    assert dropped == [(conn, "items", spec)]
+
+    monkeypatch.setattr(backend, "_legacy_unique_specs", lambda *_args: [spec])
+    monkeypatch.setattr(
+        backend,
+        "_prepare_unique_token_column",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("migration syntax error")),
+    )
+    with pytest.raises(RuntimeError, match="migration syntax error"):
+        backend._migrate_legacy_unique_indexes(conn, "items")
+
+
+@pytest.mark.parametrize("backend_factory", [_postgres_backend, _mysql_backend])
+def test_remote_unique_tokens_handle_large_numeric_writes_and_replacements(
+    monkeypatch, backend_factory
+):
+    store = FakeRemoteStore()
+    backend = backend_factory(monkeypatch, store)
+    spec = parse_index_spec("value", unique=True)
+    backend.create_index("numbers", spec)
+
+    backend.insert_many(
+        "numbers",
+        [
+            {"_id": "integer", "value": 10**23},
+            {"_id": "double", "value": 1e23},
+            {"_id": "boolean", "value": True},
+            {"_id": "one", "value": 1},
+            {"_id": "zero", "value": 0},
+            {"_id": "subnormal", "value": 5e-324},
+        ],
+    )
+
+    with pytest.raises(DuplicateKeyError):
+        backend.insert_many("numbers", [{"_id": "exact-double", "value": int(1e23)}])
+    backend.replace_one("numbers", "integer", {"_id": "integer", "value": 2**53 + 1})
+    backend.insert_many("numbers", [{"_id": "rounded", "value": float(2**53 + 1)}])
+    with pytest.raises(DuplicateKeyError):
+        backend.replace_one(
+            "numbers", "rounded", {"_id": "rounded", "value": int(1e23)}
+        )
+
+    token_column = backend._unique_token_column("numbers", spec)
+    assert token_column in store.columns[backend._table_name("numbers")]
+    assert all(len(token) == 64 for token in store.tokens.values())
+
+
+@pytest.mark.parametrize("backend_factory", [_postgres_backend, _mysql_backend])
+def test_remote_unique_token_migration_backfills_and_advances_catalog(
+    monkeypatch, backend_factory
+):
+    store = FakeRemoteStore()
+    backend = backend_factory(monkeypatch, store)
+    collection = "legacy_numbers"
+    spec = parse_index_spec("value", unique=True)
+    backend.insert_many(collection, [{"_id": "double", "value": 1e23}])
+    catalog_key = (backend.database, collection, spec.name)
+    store.indexes[catalog_key] = (spec.field, True, 0)
+    store.native_indexes.add(
+        (
+            backend._table_name(collection),
+            backend._physical_index_name(collection, spec),
+        )
+    )
+    if backend.dialect == "mysql":
+        store.columns[backend._table_name(collection)].add(
+            backend._generated_index_column(collection, spec)
+        )
+
+    reopened = backend_factory(monkeypatch, store)
+    assert reopened.get_index_specs(collection) == [spec]
+
+    assert store.indexes[catalog_key][2] == _REMOTE_UNIQUE_TOKEN_VERSION
+    token_column = reopened._unique_token_column(collection, spec)
+    table_name = reopened._table_name(collection)
+    stored_id = next(iter(store.tables[table_name]))
+    assert token_column in store.columns[table_name]
+    assert store.tokens[(table_name, token_column, stored_id)] == _remote_unique_token(
+        {"_id": "double", "value": 1e23}, spec
+    )
+    with pytest.raises(DuplicateKeyError):
+        reopened.insert_many(collection, [{"_id": "integer", "value": int(1e23)}])
+    reopened.insert_many(collection, [{"_id": "decimal", "value": 10**23}])
+
+    assert backend_factory(monkeypatch, store).get_index_specs(collection) == [spec]
+
+
+@pytest.mark.parametrize("backend_factory", [_postgres_backend, _mysql_backend])
+def test_remote_unique_token_migration_retries_conflicts_fail_closed(
+    monkeypatch, backend_factory
+):
+    store = FakeRemoteStore()
+    backend = backend_factory(monkeypatch, store)
+    collection = "conflicting_numbers"
+    spec = parse_index_spec("value", unique=True)
+    backend.insert_many(
+        collection,
+        [
+            {"_id": "integer", "value": int(1e23)},
+            {"_id": "double", "value": 1e23},
+        ],
+    )
+    catalog_key = (backend.database, collection, spec.name)
+    store.indexes[catalog_key] = (spec.field, True, 0)
+
+    for _attempt in range(2):
+        reopened = backend_factory(monkeypatch, store)
+        with pytest.raises(DuplicateKeyError, match="exact BSON numeric identity"):
+            reopened.get_index_specs(collection)
+        assert store.indexes[catalog_key][2] == 0
+        assert len(store.tables[backend._table_name(collection)]) == 2
+        assert not any(
+            index == backend._physical_index_name(collection, spec)
+            for _table, index in store.native_indexes
+        )
+
+
+@pytest.mark.parametrize("backend_factory", [_postgres_backend, _mysql_backend])
+def test_remote_upgrades_legacy_catalog_token_version_column(
+    monkeypatch, backend_factory
+):
+    store = FakeRemoteStore()
+    store.columns["__tinymongo_indexes"] = {
+        "database_name",
+        "collection_name",
+        "index_name",
+        "field_name",
+        "unique_flag",
+    }
+    backend = backend_factory(monkeypatch, store)
+
+    assert backend.get_index_specs("items") == []
+    assert "token_version" in store.columns[backend.index_catalog_table]
+
+
+def test_mysql_token_schema_defensive_branches(monkeypatch):
+    store = FakeRemoteStore()
+    backend = _mysql_backend(monkeypatch, store)
+    conn = FakeRemoteConnection(store)
+    spec = parse_index_spec("value", unique=True)
+    original_execute = backend._execute
+
+    def lock_timeout(_conn, sql, params=None):
+        if sql.startswith("SELECT GET_LOCK"):
+            return FakeRemoteCursor(store)
+        return original_execute(_conn, sql, params)
+
+    monkeypatch.setattr(backend, "_execute", lock_timeout)
+    with pytest.raises(OperationFailure, match="collection lock"):
+        with backend._collection_schema_lock(conn, "items"):
+            pass
+
+    def release_failure(_conn, sql, params=None):
+        if sql.startswith("SELECT GET_LOCK"):
+            cursor = FakeRemoteCursor(store)
+            cursor.rows = [(1,)]
+            return cursor
+        if sql.startswith("SELECT RELEASE_LOCK"):
+            raise RuntimeError("connection closed")
+        return original_execute(_conn, sql, params)
+
+    monkeypatch.setattr(backend, "_execute", release_failure)
+    with backend._collection_schema_lock(conn, "items"):
+        pass
+    monkeypatch.setattr(backend, "_execute", original_execute)
+
+    monkeypatch.setattr(backend, "_mysql_column_exists", lambda *_args: False)
+
+    def duplicate_column(*_args):
+        raise RuntimeError(1060, "duplicate column")
+
+    monkeypatch.setattr(backend, "_execute", duplicate_column)
+    backend._ensure_index_catalog_token_version(conn)
+    backend._add_unique_token_column(conn, "items", spec)
+
+    def bad_column(*_args):
+        raise RuntimeError("bad alter")
+
+    monkeypatch.setattr(backend, "_execute", bad_column)
+    with pytest.raises(RuntimeError, match="bad alter"):
+        backend._ensure_index_catalog_token_version(conn)
+    with pytest.raises(RuntimeError, match="bad alter"):
+        backend._add_unique_token_column(conn, "items", spec)
+
+    monkeypatch.setattr(backend, "_execute", original_execute)
+    backend._drop_unique_token_column(conn, "items", spec)
+    backend._drop_legacy_native_index(conn, "items", spec)
 
 
 def test_remote_array_guard_ignores_nonunique_specs():
