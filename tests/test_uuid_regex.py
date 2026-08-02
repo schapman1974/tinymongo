@@ -64,17 +64,20 @@ def test_regex_options_validation_accepts_u_and_rejects_invalid_combinations():
         {"value": {"$regex": bson.Regex("x", 0), "$options": "i"}}
     )
 
-    for options in ("l", "z", 1):
-        with pytest.raises(OperationFailure, match="supports only"):
+    for options, code in (("l", 51108), ("z", 51108), (1, 2)):
+        with pytest.raises(OperationFailure, match="supports only") as caught:
             validate_filter_operators({"value": {"$regex": "x", "$options": options}})
+        assert caught.value.code == code
 
-    with pytest.raises(OperationFailure, match="embedded"):
+    with pytest.raises(OperationFailure, match="embedded") as caught:
         validate_filter_operators(
             {"value": {"$regex": bson.Regex("x", "i"), "$options": "m"}}
         )
-    with pytest.raises(OperationFailure, match="supports only"):
+    assert caught.value.code == 2
+    with pytest.raises(OperationFailure, match="supports only") as caught:
         matches_filter({"value": "x"}, {"value": {"$regex": "x", "$options": "z"}})
-    with pytest.raises(OperationFailure, match="embedded"):
+    assert caught.value.code == 51108
+    with pytest.raises(OperationFailure, match="embedded") as caught:
         matches_filter(
             {"value": "x"},
             {
@@ -84,6 +87,7 @@ def test_regex_options_validation_accepts_u_and_rejects_invalid_combinations():
                 }
             },
         )
+    assert caught.value.code == 2
 
 
 def test_regex_locale_flag_can_still_match_an_exact_stored_regex():
@@ -94,31 +98,39 @@ def test_regex_locale_flag_can_still_match_an_exact_stored_regex():
 
 
 @pytest.mark.parametrize(
-    "query",
+    ("query", "code"),
     [
-        {"value": {"$regex": 42}},
-        {"value": {"$regex": b"bytes"}},
-        {"value": {"$regex": "["}},
-        {"value": {"$regex": "nul\x00pattern"}},
-        {"value": bson.Regex("[")},
-        {"value": bson.Regex("nul\x00pattern")},
-        {"value": bson.Regex(b"\xff")},
-        {"value": {"$in": [bson.Regex("[")]}},
-        {"value": {"$nin": [bson.Regex("[")]}},
-        {"value": {"$all": [bson.Regex("[")]}},
-        {"value": {"$not": bson.Regex("[")}},
-        {"value": {"$not": {"$regex": None}}},
-        {"value": {"$in": [{"$regex": "valid"}]}},
-        {"value": {"$nin": [{"$regex": "valid"}]}},
-        {"value": {"$all": [{"$regex": "valid"}]}},
+        ({"value": {"$regex": 42}}, 2),
+        ({"value": {"$regex": b"bytes"}}, 2),
+        ({"value": {"$regex": "["}}, 51091),
+        ({"value": {"$regex": "nul\x00pattern"}}, 2),
+        ({"value": bson.Regex("[")}, 51091),
+        ({"value": bson.Regex("nul\x00pattern")}, 2),
+        ({"value": bson.Regex(b"\xff")}, 2),
+        ({"value": {"$in": [bson.Regex("[")]}}, 51091),
+        ({"value": {"$nin": [bson.Regex("[")]}}, 51091),
+        ({"value": {"$all": [bson.Regex("[")]}}, 51091),
+        ({"value": {"$not": bson.Regex("[")}}, 51091),
+        ({"value": {"$not": {"$regex": None}}}, 2),
+        ({"value": {"$in": [{"$regex": "valid"}]}}, 2),
+        ({"value": {"$nin": [{"$regex": "valid"}]}}, 2),
+        ({"value": {"$all": [{"$regex": "valid"}]}}, 2),
     ],
 )
-def test_malformed_regex_queries_fail_before_persistent_storage_reads(tmp_path, query):
+def test_malformed_regex_queries_fail_before_persistent_storage_reads(
+    tmp_path,
+    query,
+    code,
+):
     client = tinymongo.TinyMongoClient(str(tmp_path / "invalid"), backend="sqlite")
     collection = client.app.items
 
-    with pytest.raises(OperationFailure, match="(?i)regex|regular.expression"):
+    with pytest.raises(
+        OperationFailure,
+        match="(?i)regex|regular.expression",
+    ) as caught:
         collection.find(query)
+    assert caught.value.code == code
 
     assert client.app.list_collection_names() == []
     client.close()
@@ -147,8 +159,9 @@ def test_regex_only_preflight_ignores_non_query_documents():
 
 
 def test_full_filter_validation_rejects_operator_documents_inside_regex_arrays():
-    with pytest.raises(OperationFailure, match="accepts regex values"):
+    with pytest.raises(OperationFailure, match="accepts regex values") as caught:
         validate_filter_operators({"value": {"$in": [{"$regex": "valid"}]}})
+    assert caught.value.code == 2
 
 
 def test_remote_unique_indexes_fail_closed_for_extended_binary_identities():

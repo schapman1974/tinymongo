@@ -21,6 +21,7 @@ from .tinymongo import (
     TinyMongoClient,
     TinyMongoCollection,
     TinyMongoCursor,
+    _resolve_tiny_client_folder,
 )
 from .warning_context import (
     WarningOrigin,
@@ -194,6 +195,27 @@ class AsyncTinyMongoClient(_AsyncClientBase):
     """Async counterpart to :class:`~tinymongo.TinyMongoClient`."""
 
     _sync_client_class = TinyMongoClient
+
+    def __init__(
+        self,
+        foldername: Any = "tinydb",
+        backend: Any = "tinydb",
+        *,
+        tinymongo_folder: Any = None,
+        threads: Any = None,
+        storage_uri: Any = None,
+        duckdb_config: Any = None,
+        dsn: Any = None,
+    ):
+        foldername = _resolve_tiny_client_folder(foldername, tinymongo_folder)
+        super().__init__(
+            foldername,
+            backend,
+            threads=threads,
+            storage_uri=storage_uri,
+            duckdb_config=duckdb_config,
+            dsn=dsn,
+        )
 
 
 class AsyncMongoClient(_AsyncClientBase):

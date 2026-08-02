@@ -131,10 +131,12 @@ def test_index_metadata_is_collection_scoped_and_drop_persists(
         ]
     )
     assert audit.drop_index("created_at") is None
-    with pytest.raises(OperationFailure, match="not found"):
+    with pytest.raises(OperationFailure, match="not found") as missing:
         audit.drop_index("created_at")
-    with pytest.raises(OperationFailure, match="cannot be dropped"):
+    assert missing.value.code == 27
+    with pytest.raises(OperationFailure, match="cannot be dropped") as builtin:
         audit.drop_index("_id_")
+    assert builtin.value.code == 72
 
 
 def test_catalog_identity_cannot_collide_across_collection_and_index_names(
@@ -368,10 +370,14 @@ def test_index_creation_is_idempotent_and_rejects_conflicts(
     with pytest.raises(OperationFailure, match="different name") as different_name:
         users.create_index("email", name="other_name", unique=True)
     assert different_name.value.code == 85
-    with pytest.raises(OperationFailure, match="different options"):
+    with pytest.raises(OperationFailure, match="different options") as different_key:
         users.create_index("username", name="login_email", unique=True)
-    with pytest.raises(OperationFailure, match="different options"):
+    assert different_key.value.code == 86
+    with pytest.raises(
+        OperationFailure, match="different options"
+    ) as different_options:
         users.create_index("email", name="login_email", unique=False)
+    assert different_options.value.code == 85
 
     assert set(_indexes_by_name(users)) == {"_id_", "login_email"}
 
