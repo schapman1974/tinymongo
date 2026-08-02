@@ -24,9 +24,16 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
         "decimal128": True,
         "regex": True,
     }
+    assert bson_types.supported_bson_types()["pymongo"] == (
+        "binary",
+        "decimal128",
+        "objectid",
+        "regex",
+    )
 
     monkeypatch.setattr(bson_types, "_Regex", None)
     assert not any(bson_types.bson_capabilities().values())
+    assert bson_types.supported_bson_types()["pymongo"] == ()
     monkeypatch.setattr(bson_types, "_Regex", marker)
     monkeypatch.setattr(bson_types, "_Binary", None)
     assert bson_types.bson_capabilities() == {

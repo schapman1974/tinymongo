@@ -403,7 +403,7 @@ def contains_extended_value(value):
     spec = bson_types.bson_type_spec(value)
     if spec is not None and spec.requires_python_comparison:
         return True
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return any(contains_extended_value(item) for item in value.values())
     if isinstance(value, (list, tuple)):
         return any(contains_extended_value(item) for item in value)

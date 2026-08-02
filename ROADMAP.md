@@ -108,6 +108,18 @@ with the follow-up audit of his
   concurrent WAL reads; describe the differing Parquet lock scope separately.
 - [x] **TM-005:** Preserve application-level caller attribution for warnings
   emitted by synchronous work dispatched through the async executor.
+- [x] **TM-016:** Make `distinct()` collapse BSON-equivalent integers, doubles,
+  and Decimal128 values while keeping booleans distinct from numbers.
+- [x] **TM-018 / #77:** Reject unsupported or misspelled query operators before
+  storage access, and implement the application-prioritized `$size`,
+  `$elemMatch`, `$type`, and `$mod` query slices across CRUD entry points.
+- [x] Enumerate supported logical and field query operators plus dependency-free
+  and optional-PyMongo BSON type families through structured capabilities.
+- [x] **TM-020:** Report MongoDB duplicate-key code `11000` for duplicate `_id`
+  and unique-index failures.
+- [x] **TM-021:** Raise PyMongo-compatible `WriteError` code `2` when
+  `$addToSet` targets a null or non-array field, without partially applying the
+  update.
 - [ ] **Remote SQL numeric uniqueness:** Persist canonical BSON numeric tokens
   for remote unique indexes so native constraints can enforce exact
   cross-process equality for every int/float representation; Decimal128
@@ -130,13 +142,12 @@ with the follow-up audit of his
   capabilities-detection, portable-error-catching, index-migration wording,
   and the contradictory async `db.name` collection example identified by the
   guide audit.
-- [ ] Under [#77](https://github.com/schapman1974/tinymongo/issues/77), reject
+- [x] Under [#77](https://github.com/schapman1974/tinymongo/issues/77), reject
   unsupported query operators with `TinyMongoNotSupportedError` instead of
-  silently returning no matches; then implement the application-prioritized
-  `$size`, `$elemMatch`, `$type`, and `$mod` slices.
-- [ ] Under [#94](https://github.com/schapman1974/tinymongo/issues/94), replace
-  raw Python range comparisons with BSON-aware comparison contracts and reuse
-  BSON identity rules in `$pull`, `$addToSet`, and `distinct()`.
+  silently returning no matches, and implement `$size`, `$elemMatch`, `$type`,
+  and `$mod`.
+- [ ] Under [#94](https://github.com/schapman1974/tinymongo/issues/94), complete
+  the remaining BSON-aware range-comparison contracts.
 - [ ] Extend unique-index tokens to supported BSON values through
   [#75](https://github.com/schapman1974/tinymongo/issues/75) and
   [#76](https://github.com/schapman1974/tinymongo/issues/76).
@@ -169,8 +180,10 @@ Application-compatibility work:
   - [x] Talk Python query slice: scalar-to-array equality, combined `$nin`,
     `$not`, `$regex`, case-insensitive `$options`, and Mongo-correct
     null-versus-missing negation.
-  - [ ] Prioritize the remaining query and update candidates from measured
-    application failures.
+  - [x] Reject unsupported or misspelled query operators across CRUD filters and
+    add `$size`, `$elemMatch`, `$type`, and `$mod`.
+  - [ ] Prioritize the remaining update candidates from measured application
+    failures.
 - [ ] [#102: Optional PyMongo-version adaptation](https://github.com/schapman1974/tinymongo/issues/102)
   - [x] TinyMongo errors conditionally inherit matching PyMongo errors.
   - [ ] Add version-matrix CI plus broader signature and result adaptation.

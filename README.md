@@ -27,8 +27,9 @@ For development, clone this repository and run `pip install -e .` from its
 root. Use the `v1.2.1` tag when you need source and documentation that match
 the current stable package exactly; `master` may contain unreleased changes.
 This README follows `master`: the aggregation core, advanced array-update
-modifiers, and Decimal128 support described below were added after `v1.2.1`
-and are not part of the 1.2.1 package on PyPI. See
+modifiers, Decimal128, UUID, and regex support, and the additional query
+operators described below were added after `v1.2.1` and are not part of the
+1.2.1 package on PyPI. See
 [`CHANGELOG.md`](https://github.com/schapman1974/tinymongo/blob/master/CHANGELOG.md)
 for the complete unreleased list.
 
@@ -416,7 +417,16 @@ and `to_list()`; `limit(0)` means no limit.
 Query support includes equality (including scalar matches against array
 members), nested document paths, `$gt`, `$gte`, `$lt`, `$lte`, `$ne`,
 `$nin`, `$in`, `$all`, `$and`, `$or`, `$nor`, `$not`, `$regex`,
-case-insensitive `$options`, and `$exists`.
+case-insensitive `$options`, `$exists`, `$size`, `$elemMatch`, `$type`, and
+`$mod`. `$size` matches an exact array length, while `$elemMatch` requires one
+array member to satisfy the complete nested condition. `$type` accepts MongoDB
+type names, numeric codes, or a list of either; `$mod` follows MongoDB's
+integer-truncation and array-member matching rules.
+
+Every CRUD method that accepts a filter validates it before reading or changing
+storage. Unsupported or misspelled `$`-prefixed query operators raise
+`TinyMongoNotSupportedError` instead of silently returning no matches, and
+malformed operands for recognized operators raise `OperationFailure`.
 
 MongoDB treats missing fields differently depending on the negated value.
 `{"field": {"$ne": None}}` and `$nin` lists containing `None` exclude
@@ -429,7 +439,8 @@ Update support includes `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
 `update_many()` require update operators; use `replace_one()` for full-document
 replacement. `$push` accepts `$each`, `$position`, `$sort`, and `$slice`;
 `$addToSet` accepts `$each`; and `$pull` accepts literal, query, and document
-operands.
+operands. Applying `$addToSet` to an existing null or non-array field raises a
+PyMongo-compatible `WriteError` with code `2`, and the update remains atomic.
 
 `find()` and `find_one()` accept Mongo-style inclusion and exclusion
 projections. Dotted paths project nested fields, `_id` follows MongoDB's special
@@ -469,7 +480,8 @@ Index definitions and unique constraints survive client restarts on persistent
 backends. SQLite, PostgreSQL, and MariaDB/MySQL create native database indexes;
 JSON, DuckDB, and Parquet persist metadata and enforce unique constraints through
 TinyMongo. Named memory databases retain metadata while their process-local
-namespace exists.
+namespace exists. Duplicate `_id` and unique-index violations raise
+`DuplicateKeyError` with MongoDB-compatible code `11000`.
 
 Plural `create_indexes()` accepts duck-typed PyMongo `IndexModel` batches
 without importing PyMongo in TinyMongo's core. Unique indexes are enforced.
@@ -738,14 +750,22 @@ TinyMongo reports behavior that each configured backend can honor:
 
 ```python
 client = TinyMongoClient("./data", backend="sqlite")
-print(client.capabilities())
+capabilities = client.capabilities()
+print(capabilities)
+print(capabilities["query_operators"]["field"])
+print(capabilities["bson_types"]["pymongo"])
 print(client.supports("multiprocess_writes"))
 ```
 
 The capability map covers persistence, remote and object storage, table-native
 storage, multiprocess writes, native indexes, projections, bulk writes,
-aggregation, sessions, transactions, change streams, and installed BSON support.
-Unknown capability names raise `ValueError` so configuration mistakes are
+aggregation, query operators, BSON types, sessions, transactions, and change
+streams. `query_operators` separates top-level logical operators from field
+operators. `bson_types` separates dependency-free `native` families from the
+richer `pymongo` types available when the optional BSON extra is installed.
+These values are structured mappings; use `client.supports()` for a Boolean
+feature check or inspect their tuples when selecting a particular operator or
+type. Unknown capability names raise `ValueError` so configuration mistakes are
 visible.
 
 For local persistent backends, `multiprocess_writes=True` promises safe writes,

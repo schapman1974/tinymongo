@@ -349,6 +349,10 @@ def test_bulk_write_error_remains_available_without_pymongo(monkeypatch):
     assert error.details["writeErrors"][0]["index"] == 0
     assert error.timeout is False
 
+    duplicate = namespace["DuplicateKeyError"]("duplicate")
+    assert duplicate.code == 11000
+    assert duplicate.details is None
+
 
 def test_native_duplicate_race_is_replanned_as_a_bulk_write_error():
     class RacingEngine:

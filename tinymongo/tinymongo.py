@@ -16,7 +16,7 @@ import threading
 from uuid import uuid4
 
 from tinydb import Query, TinyDB, where  # type: ignore[attr-defined]
-from .bson_codec import bson_available, storage_values_equal
+from .bson_codec import storage_values_equal
 from .bson_types import (
     add_bson_numbers,
     bson_identity_key,
@@ -29,6 +29,7 @@ from .bson_types import (
     is_bson_regex,
     is_bson_number,
     object_id_type,
+    supported_bson_types,
 )
 from .aggregation import AggregationEngine, aggregation_capabilities
 from .sorting import bson_document_sort_value_key, sort_documents
@@ -75,8 +76,9 @@ from .table_backends import (
     _filter_references_id,
     _value_matches,
     matches_filter,
+    query_operator_capabilities,
     requires_python_filter,
-    validate_regex_filter,
+    validate_filter_operators,
 )
 
 basestring = str
@@ -639,7 +641,7 @@ def _apply_update_document(item, update_doc):
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
                 if not isinstance(current, list):
-                    raise ValueError("$addToSet target must be a list")
+                    _raise_write_error("Cannot apply $addToSet to non-array field")
                 current = list(current)
                 current = _apply_add_to_set(current, value)
                 _set_nested(updated, path, current)
@@ -684,12 +686,14 @@ def _tinydb_id_condition(value):
 def _direct_id_equality(filter_doc):
     """Return the operand for a direct exact ``_id`` query, if present."""
 
-    if not isinstance(filter_doc, dict) or set(filter_doc) != {"_id"}:
+    if not isinstance(filter_doc, Mapping) or set(filter_doc) != {"_id"}:
         return _MISSING
     expected = filter_doc["_id"]
     if is_bson_regex(expected):
         return _MISSING
-    if isinstance(expected, dict) and any(str(key).startswith("$") for key in expected):
+    if isinstance(expected, Mapping) and any(
+        str(key).startswith("$") for key in expected
+    ):
         if set(expected) != {"$eq"}:
             return _MISSING
         expected = expected["$eq"]
@@ -721,7 +725,7 @@ def _document_for_upsert(query, update_doc):
     for key, value in (query or {}).items():
         if key.startswith("$"):
             continue
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             if set(value) == {"$eq"}:
                 value = value["$eq"]
             else:
@@ -733,10 +737,15 @@ def _document_for_upsert(query, update_doc):
 
 
 def _simple_equality_filter(_filter):
-    if not isinstance(_filter, dict) or len(_filter) != 1:
+    if not isinstance(_filter, Mapping) or len(_filter) != 1:
         return None
     field, value = next(iter(_filter.items()))
-    if field.startswith("$") or isinstance(value, (dict, list)) or is_bson_regex(value):
+    if (
+        field.startswith("$")
+        or value is None
+        or isinstance(value, (Mapping, list, tuple))
+        or is_bson_regex(value)
+    ):
         return None
     return field, value
 
@@ -973,10 +982,11 @@ class TinyMongoClient(object):
             "projections": True,
             "bulk_writes": False,
             "aggregation": aggregation_capabilities(),
+            "query_operators": query_operator_capabilities(),
             "sessions": False,
             "transactions": False,
             "change_streams": False,
-            "bson_types": bson_available(),
+            "bson_types": supported_bson_types(),
         }
 
     def supports(self, feature):
@@ -2165,7 +2175,7 @@ class TinyMongoCollection(object):
         :return: UpdateResult
         """
         _reject_session(kwargs)
-        validate_regex_filter(query)
+        validate_filter_operators(query)
         _validate_update_document(doc)
         self._validate_storage_document(doc)
         upsert = kwargs.get("upsert") is True
@@ -2297,7 +2307,7 @@ class TinyMongoCollection(object):
         :return: UpdateResult
         """
         _reject_session(kwargs)
-        validate_regex_filter(query)
+        validate_filter_operators(query)
         _validate_update_document(doc)
         self._validate_storage_document(doc)
         upsert = kwargs.get("upsert") is True
@@ -2433,7 +2443,7 @@ class TinyMongoCollection(object):
         Replaces one document matching the query with the replacement document.
         """
         _reject_session(kwargs)
-        validate_regex_filter(query)
+        validate_filter_operators(query)
         if not isinstance(replacement, dict):
             raise TypeError('"replacement" must be a dict')
         self._validate_storage_document(replacement)
@@ -2662,7 +2672,7 @@ class TinyMongoCollection(object):
         _reject_session(kwargs)
         if _filter is None and "filter" in kwargs:
             _filter = kwargs["filter"]
-        validate_regex_filter({} if _filter is None else _filter)
+        validate_filter_operators({} if _filter is None else _filter)
         projection = normalize_projection(projection)
         sort = kwargs.get("sort")
         if self.parent.engine is not None:
@@ -2711,7 +2721,10 @@ class TinyMongoCollection(object):
                         projection=projection,
                         query=_filter,
                     )
+                python_filter = requires_python_filter(_filter)
                 simple = _simple_equality_filter(_filter)
+                if simple is not None and "." in simple[0]:
+                    simple = None
                 if simple is not None:
                     key, value = simple
                     index = self._get_index(key)
@@ -2731,7 +2744,7 @@ class TinyMongoCollection(object):
                             projection=projection,
                             query=_filter,
                         )
-                if _filter_references_id(_filter) or requires_python_filter(_filter):
+                if _filter_references_id(_filter) or python_filter:
                     result = [
                         document
                         for document in self.table.all()
@@ -2785,7 +2798,7 @@ class TinyMongoCollection(object):
         values = []
         identities = set()
         unsupported_values = []
-        for document in self.find(filter or {}):
+        for document in self.find({} if filter is None else filter):
             value = _get_nested(document, key)
             if value is _MISSING:
                 continue
@@ -2821,7 +2834,7 @@ class TinyMongoCollection(object):
         :return: DeleteResult
         """
         _reject_session(kwargs)
-        validate_regex_filter(query)
+        validate_filter_operators(query)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=False)
             return DeleteResult(raw_result=result)
@@ -2851,7 +2864,7 @@ class TinyMongoCollection(object):
         :return: DeleteResult
         """
         _reject_session(kwargs)
-        validate_regex_filter(query)
+        validate_filter_operators(query)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=True)
             return DeleteResult(raw_result=result)

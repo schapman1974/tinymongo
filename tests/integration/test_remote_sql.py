@@ -13,6 +13,7 @@ from tinymongo.errors import (
     BulkWriteError,
     DuplicateKeyError,
     TinyMongoNotSupportedError,
+    WriteError,
 )
 from tinymongo.table_backends import _json_dumps
 
@@ -102,6 +103,79 @@ def test_remote_sql_backend_round_trip(backend, env_name):
     finally:
         docs.drop()
         client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_query_operators_and_write_error_codes(backend, env_name):
+    dsn, database, prefix = _remote_target(backend, env_name)
+    client = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = client[database][prefix + "_query_operators"]
+    try:
+        docs.insert_many(
+            [
+                {"_id": "one", "values": [2, 7], "results": [{"score": 8}]},
+                {"_id": "two", "values": [1, 4, 9], "results": [{"score": 3}]},
+                {"_id": "scalar", "values": "not-an-array"},
+            ]
+        )
+
+        assert docs.find_one({"values": {"$size": 2}})["_id"] == "one"
+        assert docs.find_one({"results": {"$elemMatch": {"score": 8}}})["_id"] == "one"
+        assert {item["_id"] for item in docs.find({"values": {"$type": "int"}})} == {
+            "one",
+            "two",
+        }
+        assert {item["_id"] for item in docs.find({"values": {"$mod": [2, 0]}})} == {
+            "one",
+            "two",
+        }
+
+        with pytest.raises(TinyMongoNotSupportedError, match=r"\$exsits"):
+            docs.find({"values": {"$exsits": True}})
+        with pytest.raises(DuplicateKeyError) as duplicate:
+            docs.insert_one({"_id": "one"})
+        assert duplicate.value.code == 11000
+        with pytest.raises(WriteError) as write_error:
+            docs.update_one(
+                {"_id": "scalar"},
+                {"$addToSet": {"values": "new"}},
+            )
+        assert write_error.value.code == 2
+    finally:
+        docs.drop()
+        client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_async_query_operators(backend, env_name):
+    dsn, database, prefix = _remote_target(backend, env_name)
+
+    async def scenario():
+        client = AsyncTinyMongoClient(backend=backend, dsn=dsn)
+        docs = client[database][prefix + "_async_query_operators"]
+        try:
+            await docs.insert_many(
+                [
+                    {"_id": "one", "values": [2, 7], "results": [{"score": 8}]},
+                    {"_id": "two", "values": [1, 4, 9]},
+                ]
+            )
+            size_rows = await docs.find({"values": {"$size": 2}}).to_list()
+            elem_rows = await docs.find(
+                {"results": {"$elemMatch": {"score": 8}}}
+            ).to_list()
+            type_rows = await docs.find({"values": {"$type": "int"}}).to_list()
+            mod_rows = await docs.find({"values": {"$mod": [2, 0]}}).to_list()
+
+            assert [item["_id"] for item in size_rows] == ["one"]
+            assert [item["_id"] for item in elem_rows] == ["one"]
+            assert {item["_id"] for item in type_rows} == {"one", "two"}
+            assert {item["_id"] for item in mod_rows} == {"one", "two"}
+        finally:
+            await docs.drop()
+            await client.close()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)

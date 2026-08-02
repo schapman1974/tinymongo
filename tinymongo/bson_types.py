@@ -378,6 +378,33 @@ def bson_capabilities():
     }
 
 
+def supported_bson_types():
+    """Enumerate native families and richer types enabled by PyMongo."""
+
+    optional = bson_capabilities()
+    return {
+        "native": (
+            "array",
+            "binary",
+            "boolean",
+            "datetime",
+            "double",
+            "int",
+            "long",
+            "null",
+            "object",
+            "regex",
+            "string",
+            "uuid",
+        ),
+        "pymongo": tuple(
+            name
+            for name in ("binary", "decimal128", "objectid", "regex")
+            if optional[name]
+        ),
+    }
+
+
 def object_id_type():
     """Return PyMongo's ``ObjectId`` class, or ``None`` when unavailable."""
 

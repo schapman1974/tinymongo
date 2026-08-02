@@ -103,6 +103,14 @@ class WriteError(_WriteError, OperationFailure):
 class DuplicateKeyError(_DuplicateKeyError, WriteError):
     """Raised when a write violates a unique key constraint."""
 
+    def __init__(self, error, code=11000, details=None, max_wire_version=None):
+        super(DuplicateKeyError, self).__init__(
+            error,
+            code,
+            details,
+            max_wire_version,
+        )
+
 
 class BulkWriteError(_BulkWriteError, OperationFailure):
     """Raised when one or more operations in a batch write fail."""

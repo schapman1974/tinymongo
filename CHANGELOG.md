@@ -24,6 +24,9 @@
   unique-index identity across synchronous and asynchronous backends. UUIDs
   use standard subtype-4 BinData identity, and native or BSON regex values use
   their pattern plus canonical MongoDB options.
+- MongoDB-style `$size`, `$elemMatch`, `$type`, and `$mod` query operators,
+  including array-member behavior, BSON type aliases and numeric codes, and
+  operand validation across synchronous and asynchronous clients.
 
 ### Changed
 - Aggregation capability reporting now describes the exact supported stages,
@@ -31,6 +34,10 @@
   value. The value therefore changed from falsey `False` to a truthy structured
   mapping; use `client.supports("aggregation")` for a Boolean check or inspect
   the mapping when selecting individual features.
+- Query capability reporting now enumerates logical and field operators.
+  `bson_types` likewise changed from a Boolean to a structured mapping of
+  dependency-free `native` families and installed optional `pymongo` types;
+  inspect its `pymongo` tuple when detecting optional BSON support.
 - Remote SQL unique indexes fail closed for Decimal128 values, as they already
   do for arrays, when their native JSON constraints cannot guarantee exact
   MongoDB numeric identity across concurrent writers.
@@ -39,6 +46,15 @@
   constraint.
 
 ### Fixed
+- **TM-016:** `distinct()` now collapses BSON-equivalent numeric values across
+  integers, doubles, and Decimal128 while keeping booleans distinct.
+- **TM-018:** Every CRUD filter now rejects unsupported or misspelled query
+  operators before storage access instead of silently returning no matches.
+- **TM-020:** Duplicate `_id` and unique-index failures now expose MongoDB error
+  code `11000` through `DuplicateKeyError`.
+- **TM-021:** Applying `$addToSet` to a null or non-array field now raises
+  PyMongo-compatible `WriteError` code `2` instead of a bare `ValueError`, while
+  preserving update atomicity.
 - Aggregation field references no longer cross a raw array nested directly
   inside another array before reaching the requested field.
 - Aggregation projections preserve source BSON field order for retained fields
