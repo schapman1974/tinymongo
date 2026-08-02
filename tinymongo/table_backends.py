@@ -2083,7 +2083,162 @@ class SQLiteTableBackend(TableBackend):
                 if matches_filter(doc, filter_doc)
             ]
 
+    @staticmethod
+    def _bounded_slice(documents, skip=0, limit=0):
+        """Apply Mongo-style cursor bounds to an already materialized result."""
+
+        end = None if not limit else skip + limit
+        return list(documents)[skip:end]
+
+    @staticmethod
+    def _sqlite_bounds(skip=0, limit=0):
+        """Return a SQLite LIMIT/OFFSET suffix and its bound parameters."""
+
+        if limit:
+            return " LIMIT ? OFFSET ?", [limit, skip]
+        if skip:
+            return " LIMIT -1 OFFSET ?", [skip]
+        return "", []
+
+    def _scan_bounded(self, collection, filter_doc, skip=0, limit=0):
+        """Decode rows until the requested number of Python matches is found."""
+
+        sql = "SELECT data FROM {0}".format(_quote_identifier(collection))
+        conn = self._connect()
+        try:
+            documents = []
+            matched = 0
+            for row in conn.execute(sql):
+                document = _json_loads(row[0])
+                if not matches_filter(document, filter_doc):
+                    continue
+                if matched < skip:
+                    matched += 1
+                    continue
+                documents.append(document)
+                if limit and len(documents) >= limit:
+                    break
+            return documents
+        finally:
+            conn.close()
+
+    def find_bounded(self, collection, filter_doc=None, skip=0, limit=0):
+        """Return an unsorted cursor window without decoding later rows.
+
+        This optional backend hook lets the public cursor stay lazy until its
+        final ``skip`` and ``limit`` are known.  Sorting is intentionally kept
+        out of this path because TinyMongo currently applies BSON ordering in
+        Python and therefore needs every candidate document.
+        """
+
+        self.create_collection(collection)
+        indexed = self._find_indexed_scalar_with_array_union(collection, filter_doc)
+        if indexed is not None:
+            return self._bounded_slice(indexed, skip, limit)
+        if requires_python_filter(filter_doc):
+            return self._scan_bounded(collection, filter_doc, skip, limit)
+        try:
+            if _filter_references_id(filter_doc):
+                return self._bounded_slice(
+                    self.find(collection, filter_doc),
+                    skip,
+                    limit,
+                )
+            where, params = self.compiler.compile(filter_doc)
+            bounds, bound_params = self._sqlite_bounds(skip, limit)
+            sql = "SELECT data FROM {0}{1}{2}".format(
+                _quote_identifier(collection),
+                where,
+                bounds,
+            )
+            conn = self._connect()
+            try:
+                rows = conn.execute(sql, params + bound_params).fetchall()
+            finally:
+                conn.close()
+            return [_json_loads(row[0]) for row in rows]
+        except Exception:
+            return self._scan_bounded(collection, filter_doc, skip, limit)
+
+    def count_documents(self, collection, filter_doc=None):
+        """Count matching SQLite rows without retaining document payloads."""
+
+        self.create_collection(collection)
+        if requires_python_filter(filter_doc):
+            return self._count_filtered_scan(collection, filter_doc)
+        try:
+            if _filter_references_id(filter_doc):
+                return len(self.find(collection, filter_doc))
+            where, params = self.compiler.compile(filter_doc)
+            sql = "SELECT COUNT(*) FROM {0}{1}".format(
+                _quote_identifier(collection),
+                where,
+            )
+            conn = self._connect()
+            try:
+                row = conn.execute(sql, params).fetchone()
+            finally:
+                conn.close()
+            # SQLite always returns one row for ``COUNT(*)``.
+            return int(row[0])
+        except Exception:
+            return self._count_filtered_scan(collection, filter_doc)
+
+    def _count_filtered_scan(self, collection, filter_doc):
+        """Count exact Python-filter matches while releasing each row promptly."""
+
+        sql = "SELECT data FROM {0}".format(_quote_identifier(collection))
+        conn = self._connect()
+        try:
+            return sum(
+                1
+                for row in conn.execute(sql)
+                if matches_filter(_json_loads(row[0]), filter_doc)
+            )
+        finally:
+            conn.close()
+
     def find_projected(self, collection, filter_doc, projection):
+        """Return projected rows through the established backend hook."""
+
+        return self._find_projected_bounded(
+            collection,
+            filter_doc,
+            projection,
+        )
+
+    def find_projected_bounded(
+        self,
+        collection,
+        filter_doc,
+        projection,
+        skip=0,
+        limit=0,
+    ):
+        """Return a projected cursor window without breaking legacy overrides."""
+
+        if type(self).find_projected is not SQLiteTableBackend.find_projected:
+            return self._bounded_slice(
+                self.find_projected(collection, filter_doc, projection),
+                skip,
+                limit,
+            )
+        return self._find_projected_bounded(
+            collection,
+            filter_doc,
+            projection,
+            skip=skip,
+            limit=limit,
+        )
+
+    def _find_projected_bounded(
+        self,
+        collection,
+        filter_doc,
+        projection,
+        skip=0,
+        limit=0,
+    ):
         """Scan SQLite rows while retaining only each projected post-image.
 
         ``TinyMongoCollection`` discovers this optional backend hook at runtime,
@@ -2099,13 +2254,15 @@ class SQLiteTableBackend(TableBackend):
             projection=projection,
         )
         if indexed is not None:
-            return indexed
+            return self._bounded_slice(indexed, skip, limit)
 
         if requires_python_filter(filter_doc):
             return self._scan_projected(
                 collection,
                 projection,
                 predicate=lambda document: matches_filter(document, filter_doc),
+                skip=skip,
+                limit=limit,
             )
 
         try:
@@ -2113,7 +2270,13 @@ class SQLiteTableBackend(TableBackend):
             if self._is_id_only_projection(projection) and not _filter_references_id(
                 filter_doc
             ):
-                return self._scan_projected_ids(collection, where, params)
+                return self._scan_projected_ids(
+                    collection,
+                    where,
+                    params,
+                    skip=skip,
+                    limit=limit,
+                )
 
             documents = self._scan_projected(
                 collection,
@@ -2125,6 +2288,8 @@ class SQLiteTableBackend(TableBackend):
                     if _filter_references_id(filter_doc)
                     else None
                 ),
+                skip=skip,
+                limit=limit,
             )
             direct_id_equality = (
                 isinstance(filter_doc, Mapping)
@@ -2138,6 +2303,8 @@ class SQLiteTableBackend(TableBackend):
                     collection,
                     projection,
                     predicate=lambda document: matches_filter(document, filter_doc),
+                    skip=skip,
+                    limit=limit,
                 )
             return documents
         except Exception:
@@ -2145,6 +2312,8 @@ class SQLiteTableBackend(TableBackend):
                 collection,
                 projection,
                 predicate=lambda document: matches_filter(document, filter_doc),
+                skip=skip,
+                limit=limit,
             )
 
     @staticmethod
@@ -2182,19 +2351,27 @@ class SQLiteTableBackend(TableBackend):
             )
         return {"_id": value}
 
-    def _scan_projected_ids(self, collection, where, params):
+    def _scan_projected_ids(
+        self,
+        collection,
+        where,
+        params,
+        skip=0,
+        limit=0,
+    ):
         """Return ``_id`` documents without transferring large JSON payloads."""
 
         table = _quote_identifier(collection)
         path = _sql_literal("$._id")
+        bounds, bound_params = self._sqlite_bounds(skip, limit)
         sql = (
             "SELECT _id, json_type(data, {path}), "
-            "json_extract(data, {path}) FROM {table}{where}"
-        ).format(path=path, table=table, where=where)
+            "json_extract(data, {path}) FROM {table}{where}{bounds}"
+        ).format(path=path, table=table, where=where, bounds=bounds)
         conn = self._connect()
         try:
             documents = []
-            cursor = conn.execute(sql, params)
+            cursor = conn.execute(sql, params + bound_params)
             for physical_id, kind, value in cursor:
                 document = self._project_sqlite_id(kind, value)
                 if document is None:
@@ -2220,22 +2397,35 @@ class SQLiteTableBackend(TableBackend):
         where="",
         params=None,
         predicate=None,
+        skip=0,
+        limit=0,
     ):
         """Decode, filter, and release one source row at a time."""
 
-        sql = "SELECT data FROM {0}{1}".format(
+        bounds = ""
+        bound_params = []
+        if predicate is None:
+            bounds, bound_params = self._sqlite_bounds(skip, limit)
+        sql = "SELECT data FROM {0}{1}{2}".format(
             _quote_identifier(collection),
             where,
+            bounds,
         )
         conn = self._connect()
         try:
             documents = []
-            cursor = conn.execute(sql, params or [])
+            matched = 0
+            cursor = conn.execute(sql, (params or []) + bound_params)
             for row in cursor:
                 document = _json_loads(row[0])
                 if predicate is not None and not predicate(document):
                     continue
+                if predicate is not None and matched < skip:
+                    matched += 1
+                    continue
                 documents.append(project_document(document, projection))
+                if predicate is not None and limit and len(documents) >= limit:
+                    break
             return documents
         finally:
             conn.close()

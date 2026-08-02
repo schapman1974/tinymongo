@@ -82,6 +82,14 @@
   scan, and `_id`-only sweeps avoid transferring unrequested JSON payloads into
   Python. Sorted cursors retain their complete-document fallback so omitted
   sort keys continue to order results correctly.
+- **TM-015:** Unsorted SQLite cursors now defer execution until their final
+  `skip` and `limit` are known, push that window into eligible native SQL
+  scans, stop Python-filtered scans after the requested result window, and use
+  payload-free SQL counts where possible. This prevents
+  `find_one({})`, `find({}).limit(1)`, and `count_documents({})` from
+  materializing an entire collection; synchronous and asynchronous paths share
+  the optimization, while sorted cursors still load every candidate needed for
+  correct global ordering.
 
 ## [1.2.1] - 2026-07-31
 

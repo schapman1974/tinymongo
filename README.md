@@ -461,6 +461,15 @@ The common `{"_id": 1}` sweep goes further and reads only each JSON `_id` value,
 so large unrequested payloads never enter Python memory. Filters still evaluate
 against complete source values when Python-side matching is required.
 
+SQLite `find()` cursors defer their scan until first consumption. For
+unindexed filters handled by SQLite's existing SQL compiler, a final `skip()`
+and `limit()` can therefore be applied before later payloads are read.
+Python-only filters stream until that result window is filled; paths that must
+merge scalar and array index candidates retain their complete-candidate
+fallback. `count_documents()` uses a native SQL count for the same SQL-routed
+filters and otherwise counts a row-at-a-time scan without retaining documents.
+The same paths back synchronous and asynchronous collections.
+
 This memory bound has explicit limits. Sorting must see unprojected sort keys,
 so a sorted SQLite cursor falls back to complete source documents before it
 projects the results. Other TinyMongo backends also continue to materialize

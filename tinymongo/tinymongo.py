@@ -33,7 +33,7 @@ from .bson_types import (
 )
 from .aggregation import AggregationEngine, aggregation_capabilities
 from .sorting import bson_document_sort_value_key, sort_documents
-from .warning_context import emit_warning
+from .warning_context import capture_warning_origin, emit_warning, use_warning_origin
 from .storage_backends import (
     clear_memory_database,
     clear_memory_namespace,
@@ -1740,7 +1740,13 @@ class TinyMongoCollection(object):
         :return: Integer representing the number of documents in the collection.
         """
         _reject_session(kwargs)
-        return self.find(filter).count()
+        filter_doc = {} if filter is None else filter
+        validate_filter_operators(filter_doc)
+        if self.parent.engine is not None:
+            backend_count = getattr(self.parent.engine, "count_documents", None)
+            if callable(backend_count):
+                return backend_count(self.tablename, filter_doc)
+        return self.find(filter_doc).count()
 
     def estimated_document_count(self, *args, **kwargs):
         """Return the local collection size."""
@@ -2677,6 +2683,64 @@ class TinyMongoCollection(object):
         sort = kwargs.get("sort")
         if self.parent.engine is not None:
             projected_find = getattr(self.parent.engine, "find_projected", None)
+            projected_bounded_find = getattr(
+                self.parent.engine,
+                "find_projected_bounded",
+                None,
+            )
+            bounded_find = getattr(self.parent.engine, "find_bounded", None)
+            if callable(bounded_find):
+                deferred_filter = copy.deepcopy(_filter)
+
+                def load_cursor(sort_requested, cursor_skip, cursor_limit):
+                    projection_applied = (
+                        projection is not None
+                        and not sort_requested
+                        and callable(projected_find)
+                    )
+                    if projection_applied:
+                        if callable(projected_bounded_find):
+                            result = projected_bounded_find(
+                                self.tablename,
+                                deferred_filter,
+                                projection,
+                                skip=cursor_skip,
+                                limit=cursor_limit,
+                            )
+                            window_applied = True
+                        else:
+                            result = projected_find(
+                                self.tablename,
+                                deferred_filter,
+                                projection,
+                            )
+                            window_applied = False
+                    elif not sort_requested:
+                        result = bounded_find(
+                            self.tablename,
+                            deferred_filter,
+                            skip=cursor_skip,
+                            limit=cursor_limit,
+                        )
+                        window_applied = True
+                    else:
+                        result = self.parent.engine.find(
+                            self.tablename,
+                            deferred_filter,
+                        )
+                        window_applied = False
+                    return result, projection_applied, window_applied
+
+                return TinyMongoCursor(
+                    (),
+                    sort=sort,
+                    skip=skip,
+                    limit=limit,
+                    collection=self,
+                    projection=projection,
+                    query=deferred_filter,
+                    deferred_loader=load_cursor,
+                )
             projection_applied = (
                 projection is not None and not sort and callable(projected_find)
             )
@@ -2904,15 +2968,20 @@ class TinyMongoCursor(object):
         projection=None,
         query=None,
         source_projected=False,
+        deferred_loader=None,
     ):
         """Initialize the mongo iterable cursor with data"""
-        self._source_data = list(cursordat)
+        self._deferred_loader = deferred_loader
+        self._deferred_loaded = deferred_loader is None
+        self._source_data = list(cursordat) if self._deferred_loaded else []
         self.cursordat = list(self._source_data)
         self.collection = collection
         self.projection = projection
         self.query = copy.deepcopy(query)
         self._source_projected = source_projected
         self._sort_spec = None
+        self._normalized_sort_spec = None
+        self._sort_warning_origin = None
         self._skip = 0
         self._limit = 0
         self._closed = False
@@ -2927,6 +2996,7 @@ class TinyMongoCursor(object):
 
     def __getitem__(self, key):
         """Gets record by index or value by key"""
+        self._ensure_loaded()
         if isinstance(key, int):
             return self._project(self.cursordat[key])
         return self._project(self.currentrec)[key]
@@ -2936,14 +3006,56 @@ class TinyMongoCursor(object):
             return copy.deepcopy(document)
         return project_document(document, self.projection)
 
+    def _invalidate_deferred_source(self):
+        """Discard a loaded SQLite window after cursor options change."""
+
+        if self._deferred_loader is None:
+            return
+        self._deferred_loaded = False
+        self._source_data = []
+        self.cursordat = []
+        self.cursorpos = -1
+        self.currentrec = None
+
+    def _ensure_loaded(self):
+        """Execute a deferred backend query using the final cursor window."""
+
+        if self._deferred_loaded:
+            return
+        sort_requested = self._normalized_sort_spec is not None
+        source, source_projected, window_applied = self._deferred_loader(
+            sort_requested,
+            self._skip,
+            self._limit,
+        )
+        self._source_data = list(source)
+        self._source_projected = source_projected
+        if sort_requested:
+            with use_warning_origin(self._sort_warning_origin):
+                self._source_data = sort_documents(
+                    self._source_data,
+                    self._normalized_sort_spec,
+                    unsupported_value_callback=self._warn_unsupported_sort_value,
+                )
+        self._deferred_loaded = True
+        if window_applied:
+            self.cursordat = list(self._source_data)
+            self.cursorpos = -1
+            self.currentrec = self.cursordat[-1] if self.cursordat else None
+        else:
+            self._refresh_view()
+
     def paginate(self, skip, limit):
         """Paginate list of records"""
+        changed = skip is not None or limit is not None
         if skip is not None:
             self._validate_skip(skip)
             self._skip = skip
         if limit is not None:
             self._validate_limit(limit)
             self._limit = abs(limit)
+        if changed:
+            self._invalidate_deferred_source()
         self._refresh_view()
         return self
 
@@ -2960,6 +3072,11 @@ class TinyMongoCursor(object):
             raise TypeError("limit must be an integer")
 
     def _refresh_view(self):
+        if not self._deferred_loaded:
+            self.cursordat = []
+            self.cursorpos = -1
+            self.currentrec = None
+            return
         end = None if self._limit == 0 else self._skip + self._limit
         self.cursordat = self._source_data[self._skip : end]
         self.cursorpos = -1
@@ -3054,6 +3171,12 @@ class TinyMongoCursor(object):
             )
 
         self._sort_spec = (copy.deepcopy(key_or_list), direction)
+        self._normalized_sort_spec = copy.deepcopy(sort_specifier)
+
+        if self._deferred_loader is not None:
+            self._sort_warning_origin = capture_warning_origin()
+            self._invalidate_deferred_source()
+            return self
 
         if self._source_projected:
             # A chained sort can name a field omitted by the projection.  Load
@@ -3075,6 +3198,7 @@ class TinyMongoCursor(object):
     def limit(self, n):
         self._validate_limit(n)
         self._limit = abs(n)
+        self._invalidate_deferred_source()
         self._refresh_view()
         return self
 
@@ -3082,12 +3206,22 @@ class TinyMongoCursor(object):
         """Skip the first ``n`` records without changing the result source."""
         self._validate_skip(n)
         self._skip = n
+        self._invalidate_deferred_source()
         self._refresh_view()
         return self
 
     def clone(self):
         """Return an independently consumable copy of this cursor."""
-        if self.collection is None:
+        if self._deferred_loader is not None:
+            clone = type(self)(
+                (),
+                collection=self.collection,
+                projection=copy.deepcopy(self.projection),
+                query=copy.deepcopy(self.query),
+                source_projected=self._source_projected,
+                deferred_loader=self._deferred_loader,
+            )
+        elif self.collection is None:
             clone = type(self)(
                 copy.deepcopy(self._source_data),
                 projection=copy.deepcopy(self.projection),
@@ -3096,11 +3230,14 @@ class TinyMongoCursor(object):
         else:
             clone = self.collection.find(copy.deepcopy(self.query))
             clone.projection = copy.deepcopy(self.projection)
-            if self._sort_spec is not None:
-                clone.sort(
-                    copy.deepcopy(self._sort_spec[0]),
-                    self._sort_spec[1],
-                )
+        if self._sort_spec is not None and (
+            self._deferred_loader is not None or self.collection is not None
+        ):
+            clone.sort(
+                copy.deepcopy(self._sort_spec[0]),
+                self._sort_spec[1],
+            )
+            clone._sort_warning_origin = self._sort_warning_origin
         clone._skip = self._skip
         clone._limit = self._limit
         clone._refresh_view()
@@ -3115,6 +3252,8 @@ class TinyMongoCursor(object):
 
     @property
     def alive(self):
+        if not self._deferred_loaded:
+            return not self._closed
         return not self._closed and self.cursorpos + 1 < len(self.cursordat)
 
     def close(self):
@@ -3130,6 +3269,7 @@ class TinyMongoCursor(object):
                 raise ValueError("length must be non-negative")
         if self._closed:
             return []
+        self._ensure_loaded()
         start = self.cursorpos + 1
         end = len(self.cursordat) if length is None else start + length
         documents = [self._project(item) for item in self.cursordat[start:end]]
@@ -3141,7 +3281,7 @@ class TinyMongoCursor(object):
         Returns True if the cursor has a next position, False if not
         :return:
         """
-        return self.alive
+        return self.hasNext()
 
     def hasNext(self):
         """
@@ -3150,6 +3290,7 @@ class TinyMongoCursor(object):
         """
         if self._closed:
             return False
+        self._ensure_loaded()
         cursor_pos = self.cursorpos + 1
 
         try:
@@ -3175,6 +3316,7 @@ class TinyMongoCursor(object):
 
         :return: number of records
         """
+        self._ensure_loaded()
         return len(self.cursordat)
 
     def __iter__(self):
