@@ -154,11 +154,14 @@ reproductions and the real Talk Python write paths. The main application goal
 is complete with no known correctness defect in Talk Python's TinyMongo path.
 
 Mike's separate TinyMongo agent reference should now be updated against the
-`v1.2.1` tag, including the Binary codec, BSON-aware `_id` identity,
+`v1.3.0` tag, including the Binary codec, BSON-aware `_id` identity,
 `insert_many()` partial failures,
 bounded sort diagnostics, exact `$unset`, BSON-aware CLI, dotted child
 collections, native automatic `ObjectId` values, null-negation behavior, and
-contextual `InvalidDocument` errors. Also correct the stale list-only
+contextual `InvalidDocument` errors. It should also describe the structured
+query, update-operator, aggregation, and BSON-type capabilities plus the
+expanded `$rename`, `$min`, `$max`, and `$pop` update subset. Also correct the
+stale list-only
 `insert_many()` signature and defaults, `BulkWriteError` details, blanket
 session claim, conditional `AsyncMongoClient` patch/import caveat,
 numeric-versus-bool identity wording, explicit null `_id` handling, `_default`

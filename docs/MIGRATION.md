@@ -1,6 +1,6 @@
 # Migration Guide
 
-This guide helps you migrate from earlier `tinymongo` versions to the 1.2.1
+This guide helps you migrate from earlier `tinymongo` versions to the 1.3.0
 release line.
 
 ## Key changes
@@ -9,7 +9,25 @@ release line.
 - Default storage remains TinyDB JSON storage.
 - Parquet v2, SQLite, and DuckDB are available as table-native backends.
 - A `tinymongo` CLI is available for inspecting, exporting, importing, and migrating data.
-- Common update operators and durable single-field indexes are supported.
+- The common update subset now includes `$rename`, `$min`, `$max`, and `$pop`
+  in addition to `$set`, `$unset`, `$inc`, `$push`, `$pull`, and `$addToSet`.
+  The new operators use MongoDB-compatible dotted-path, BSON comparison, array,
+  immutable `_id`, and atomic error behavior across synchronous and
+  asynchronous clients.
+- Aggregation now includes the application-driven `$match`, `$sort`, `$skip`,
+  `$limit`, `$count`, `$project`, `$set`, `$addFields`, `$unset`, and `$group`
+  stages, with the documented expression and accumulator subset.
+- Query support now includes `$size`, `$elemMatch`, `$type`, and `$mod`, and all
+  CRUD filters reject unknown query operators before touching storage.
+- Decimal128, UUID, and regex values join ObjectId, datetime, and Binary in the
+  BSON-aware storage and comparison layer when their optional types are
+  available.
+- PyMongo-shaped clients honor recursive `document_class`, `tz_aware`, and
+  `tzinfo` reads. Datetimes are stored at signed UTC millisecond precision.
+- Aggregation, query, update-operator, and BSON-type capabilities are structured
+  mappings. Use `client.supports()` for a Boolean check or inspect the mapping
+  to select an individual feature.
+- Durable single-field indexes remain supported across all backends.
 - Local JSON writes use advisory locks, atomic replacement, and file/directory
   `fsync`; local table backends use scoped locking plus database/file
   mechanisms, remote SQL relies on database transactions, and object-storage
@@ -50,6 +68,11 @@ pip install ".[all]"
 - Use `tinymongo migrate SOURCE TARGET --to-backend sqlite` to copy existing TinyDB JSON data into another backend.
 - Existing plain JSON and legacy stringified table-backend `_id` keys remain
   readable and mutable after upgrading.
+- Update specifications are validated before writes. Code that previously
+  relied on malformed operator operands, empty or conflicting paths, scalar
+  path traversal, or `_id` mutation now receives a PyMongo-compatible
+  `WriteError` without a partial update. `$pop` accepts only `1` or `-1`, and
+  `$rename` cannot address array elements.
 - Before a bulk rewrite or migration, check legacy data for `_id` pairs that
   are BSON-equivalent, such as `1` and `1.0` or native bytes and generic
   subtype-0 `Binary`. Version 1.2.1 rejects new equivalent duplicates while

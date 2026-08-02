@@ -293,7 +293,19 @@ def _unset_nested(doc, path):
     current.pop(parts[-1], None)
 
 
-_UPDATE_OPERATORS = frozenset(("$set", "$unset", "$inc", "$push", "$pull", "$addToSet"))
+_UPDATE_OPERATOR_NAMES = (
+    "$addToSet",
+    "$inc",
+    "$max",
+    "$min",
+    "$pop",
+    "$pull",
+    "$push",
+    "$rename",
+    "$set",
+    "$unset",
+)
+_UPDATE_OPERATORS = frozenset(_UPDATE_OPERATOR_NAMES)
 _PUSH_MODIFIERS = frozenset(("$each", "$position", "$sort", "$slice"))
 _ADD_TO_SET_MODIFIERS = frozenset(("$each",))
 _PULL_COMPARISON_OPERATORS = {
@@ -310,6 +322,140 @@ def _raise_write_error(message, code=2):
     """Raise a Mongo-shaped write error that remains a TinyMongoError."""
 
     raise WriteError(message, code=code)
+
+
+def _update_path_parts(path):
+    """Validate and split one MongoDB update field path."""
+
+    if not isinstance(path, str):
+        _raise_write_error("Update field paths must be strings", code=9)
+    parts = path.split(".")
+    if any(not part for part in parts):
+        _raise_write_error("An empty update path is not valid", code=56)
+    return parts
+
+
+def _is_update_array_index(part):
+    return part == "0" or (
+        part
+        and part[0] in "123456789"
+        and all("0" <= character <= "9" for character in part)
+    )
+
+
+def _update_paths_overlap(left, right):
+    left_parts = _update_path_parts(left)
+    right_parts = _update_path_parts(right)
+    shared = min(len(left_parts), len(right_parts))
+    return left_parts[:shared] == right_parts[:shared]
+
+
+def _raise_path_not_viable(path):
+    _raise_write_error(
+        "Cannot create or traverse update path {0}".format(repr(path)),
+        code=28,
+    )
+
+
+def _raise_rename_array_path(path, role):
+    _raise_write_error(
+        "The {0} field cannot be an array element: {1}".format(role, repr(path)),
+        code=2,
+    )
+
+
+def _read_update_path(document, path, rename_role=None):
+    """Read a dotted update path while distinguishing missing and blocked paths."""
+
+    current = document
+    for part in _update_path_parts(path):
+        if isinstance(current, Mapping):
+            if part not in current:
+                return _MISSING
+            current = current[part]
+            continue
+        if isinstance(current, list):
+            if rename_role is not None:
+                if _is_update_array_index(part):
+                    _raise_rename_array_path(path, rename_role)
+                _raise_path_not_viable(path)
+            if not _is_update_array_index(part):
+                _raise_path_not_viable(path)
+            index = int(part)
+            if index >= len(current):
+                return _MISSING
+            current = current[index]
+            continue
+        _raise_path_not_viable(path)
+    return current
+
+
+def _write_update_path(document, path, value, rename_role=None):
+    """Write a dotted update path with MongoDB-style path viability checks."""
+
+    parts = _update_path_parts(path)
+    current = document
+    for offset, part in enumerate(parts):  # pragma: no branch - paths are nonempty
+        last = offset == len(parts) - 1
+        if isinstance(current, MutableMapping):
+            if last:
+                current[part] = copy.deepcopy(value)
+                return
+            if part not in current:
+                current[part] = {}
+            child = current[part]
+            if not isinstance(child, (MutableMapping, list)):
+                _raise_path_not_viable(path)
+            current = child
+            continue
+        if isinstance(current, list):
+            if rename_role is not None:
+                if _is_update_array_index(part):
+                    _raise_rename_array_path(path, rename_role)
+                _raise_path_not_viable(path)
+            if not _is_update_array_index(part):
+                _raise_path_not_viable(path)
+            index = int(part)
+            if last:
+                if index >= len(current):
+                    current.extend([None] * (index + 1 - len(current)))
+                current[index] = copy.deepcopy(value)
+                return
+            if index >= len(current):
+                current.extend([None] * (index + 1 - len(current)))
+                current[index] = {}
+            child = current[index]
+            if not isinstance(child, (MutableMapping, list)):
+                _raise_path_not_viable(path)
+            current = child
+            continue
+        _raise_path_not_viable(path)
+
+
+def _remove_update_path(document, path, rename_role=None):
+    """Remove an existing dotted update path without collapsing empty parents."""
+
+    parts = _update_path_parts(path)
+    current = document
+    for part in parts[:-1]:
+        if isinstance(current, MutableMapping):
+            if part not in current:
+                return
+            current = current[part]
+            continue
+        if isinstance(current, list):
+            if rename_role is not None and _is_update_array_index(part):
+                _raise_rename_array_path(path, rename_role)
+            _raise_path_not_viable(path)
+        _raise_path_not_viable(path)
+    if isinstance(current, MutableMapping):
+        current.pop(parts[-1], None)
+        return
+    if isinstance(current, list):
+        if rename_role is not None and _is_update_array_index(parts[-1]):
+            _raise_rename_array_path(path, rename_role)
+        _raise_path_not_viable(path)
+    _raise_path_not_viable(path)
 
 
 def _is_modifier_document(value):
@@ -376,6 +522,45 @@ def _validate_push_operand(value):
 
 def _validate_add_to_set_operand(value):
     return _validate_each_modifier(value, "$addToSet", _ADD_TO_SET_MODIFIERS)
+
+
+def _validate_pop_operand(value):
+    if not _is_modifier_integer(value) or bson_number_decimal(value) not in (-1, 1):
+        _raise_write_error("$pop expects 1 or -1", code=9)
+
+
+def _validate_rename_operand(source, target):
+    _update_path_parts(source)
+    if not isinstance(target, str):
+        _raise_write_error("The destination field for $rename must be a string")
+    _update_path_parts(target)
+    if any(part.startswith("$") for part in source.split(".") + target.split(".")):
+        _raise_write_error("$rename does not support positional array paths")
+    if _update_paths_overlap(source, target):
+        if source == target:
+            _raise_write_error("The source and target field for $rename must differ")
+        _raise_write_error(
+            "The source and target field for $rename must not be on the same path"
+        )
+
+
+def _validate_update_path_conflicts(update_doc):
+    paths = []
+    for operator, changes in update_doc.items():
+        for path, value in changes.items():
+            paths.append(path)
+            if operator == "$rename":
+                paths.append(value)
+
+    for index, path in enumerate(paths):
+        for other in paths[index + 1 :]:
+            if _update_paths_overlap(path, other):
+                _raise_write_error(
+                    "Updating path {0} would create a conflict at {1}".format(
+                        repr(other), repr(path)
+                    ),
+                    code=40,
+                )
 
 
 def _validate_pull_field_condition(condition):
@@ -447,8 +632,12 @@ def _validate_update_operators(update_doc):
             raise TinyMongoNotSupportedError(
                 "Unsupported update operator: {0}".format(operator)
             )
-        if not isinstance(changes, dict):
-            raise ValueError("{0} update requires a dict".format(operator))
+        if not isinstance(changes, Mapping):
+            _raise_write_error(
+                "{0} update requires a document".format(operator), code=9
+            )
+        for path in changes:
+            _update_path_parts(path)
         if operator == "$push":
             for value in changes.values():
                 _validate_push_operand(value)
@@ -462,6 +651,26 @@ def _validate_update_operators(update_doc):
             for value in changes.values():
                 if not is_bson_number(value):
                     _raise_write_error("$inc requires numeric values", code=14)
+        elif operator == "$pop":
+            for value in changes.values():
+                _validate_pop_operand(value)
+        elif operator == "$rename":
+            for source, target in changes.items():
+                _validate_rename_operand(source, target)
+
+    _validate_update_path_conflicts(update_doc)
+
+
+def update_operator_capabilities():
+    """Return the exact update operators and modifiers TinyMongo supports."""
+
+    return {
+        "operators": _UPDATE_OPERATOR_NAMES,
+        "modifiers": {
+            "$addToSet": tuple(sorted(_ADD_TO_SET_MODIFIERS)),
+            "$push": tuple(sorted(_PUSH_MODIFIERS)),
+        },
+    }
 
 
 def _sort_pushed_values(values, sort_spec):
@@ -517,6 +726,27 @@ def _apply_add_to_set(current, value):
         if not any(bson_values_equal(candidate, existing) for existing in current):
             current.append(copy.deepcopy(candidate))
     return current
+
+
+def _comparison_update_replaces(operator, current, candidate):
+    current_key = bson_value_sort_key(current)
+    candidate_key = bson_value_sort_key(candidate)
+    if current_key is None or candidate_key is None:
+        _raise_write_error(
+            "{0} requires supported BSON values".format(operator), code=2
+        )
+    if operator == "$min":
+        return candidate_key < current_key
+    return candidate_key > current_key
+
+
+def _raise_immutable_id_update(path):
+    _raise_write_error(
+        "Performing an update on path {0} would modify immutable field _id".format(
+            repr(path)
+        ),
+        code=66,
+    )
 
 
 def _pull_comparison_matches(actual, operand, comparison):
@@ -580,6 +810,37 @@ def _apply_update_document(item, update_doc):
                 if not is_bson_number(current) or not is_bson_number(value):
                     _raise_write_error("$inc requires numeric values", code=14)
                 _set_nested(updated, path, add_bson_numbers(current, value))
+        elif operator in ("$min", "$max"):
+            for path, value in changes.items():
+                current = _read_update_path(updated, path)
+                should_write = current is _MISSING or _comparison_update_replaces(
+                    operator, current, value
+                )
+                if should_write:
+                    if path == "_id" or path.startswith("_id."):
+                        _raise_immutable_id_update(path)
+                    _write_update_path(updated, path, value)
+        elif operator == "$pop":
+            for path, value in changes.items():
+                current = _read_update_path(updated, path)
+                if current is _MISSING or not current:
+                    if current is not _MISSING and not isinstance(current, list):
+                        _raise_write_error(
+                            "Cannot apply $pop to a non-array field", code=14
+                        )
+                    continue  # pragma: no cover - no trace event on Python 3.9
+                if not isinstance(current, list):
+                    _raise_write_error(
+                        "Cannot apply $pop to a non-array field", code=14
+                    )
+                popped = list(current)
+                if bson_number_decimal(value) < 0:
+                    popped.pop(0)
+                else:
+                    popped.pop()
+                if path == "_id" or path.startswith("_id."):
+                    _raise_immutable_id_update(path)
+                _write_update_path(updated, path, popped)
         elif operator == "$push":
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
@@ -606,6 +867,25 @@ def _apply_update_document(item, update_doc):
                 current = list(current)
                 current = _apply_add_to_set(current, value)
                 _set_nested(updated, path, current)
+        elif operator == "$rename":  # pragma: no branch - operators prevalidated
+            for source, destination in changes.items():
+                value = _read_update_path(updated, source, rename_role="source")
+                if value is _MISSING:
+                    continue
+                if (
+                    source == "_id"
+                    or source.startswith("_id.")
+                    or destination == "_id"
+                    or destination.startswith("_id.")
+                ):
+                    _raise_immutable_id_update(source)
+                _remove_update_path(updated, source, rename_role="source")
+                _write_update_path(
+                    updated,
+                    destination,
+                    value,
+                    rename_role="destination",
+                )
 
     updated["_id"] = item["_id"]
     return updated
@@ -1157,6 +1437,7 @@ class TinyMongoClient(object):
             "bulk_writes": False,
             "aggregation": aggregation_capabilities(),
             "query_operators": query_operator_capabilities(),
+            "update_operators": update_operator_capabilities(),
             "sessions": False,
             "transactions": False,
             "change_streams": False,

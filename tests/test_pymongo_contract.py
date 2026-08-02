@@ -178,6 +178,24 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
             "$type",
         ),
     }
+    assert capabilities["update_operators"] == {
+        "operators": (
+            "$addToSet",
+            "$inc",
+            "$max",
+            "$min",
+            "$pop",
+            "$pull",
+            "$push",
+            "$rename",
+            "$set",
+            "$unset",
+        ),
+        "modifiers": {
+            "$addToSet": ("$each",),
+            "$push": ("$each", "$position", "$slice", "$sort"),
+        },
+    }
     assert capabilities["bson_types"]["native"] == (
         "array",
         "binary",
@@ -196,6 +214,7 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
     assert client.supports("multiprocess_writes") is True
     assert client.supports("aggregation") is True
     assert client.supports("query_operators") is True
+    assert client.supports("update_operators") is True
     assert client.supports("bson_types") is True
 
 

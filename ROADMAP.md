@@ -178,7 +178,7 @@ with the follow-up audit of his
   conflicting legacy values fail closed without advancing the catalog version.
   Decimal128 remains fail-closed until the same token can be derived safely
   from its BID representation.
-- [ ] Update Mike's agent guide against the `v1.2.1` tag and describe the
+- [ ] Update Mike's agent guide against the `v1.3.0` tag and describe the
   expanded API as available from PyPI.
   Correct its list-only `insert_many()` signature
   and defaults, `BulkWriteError` details, blanket session-rejection claim,
@@ -198,7 +198,9 @@ with the follow-up audit of his
 - [x] Under [#77](https://github.com/schapman1974/tinymongo/issues/77), reject
   unsupported query operators with `TinyMongoNotSupportedError` instead of
   silently returning no matches, and implement `$size`, `$elemMatch`, `$type`,
-  and `$mod`.
+  and `$mod`, plus the `$rename`, `$min`, `$max`, and `$pop` update operators
+  with MongoDB-shaped path validation, error codes, and structured capability
+  reporting.
 - [x] Under [#94](https://github.com/schapman1974/tinymongo/issues/94), complete
   the BSON-aware `$gt`, `$gte`, `$lt`, and `$lte` contracts across recursive
   documents and arrays, BSON type bracketing, query and `$pull` paths, and
@@ -234,14 +236,15 @@ Application-compatibility work:
   - [x] Milestone 1 ObjectId, datetime, and Binary storage/query support.
   - [x] **TM-014:** Add Decimal128 round trips and numeric behavior.
   - [x] Add UUID and regular-expression round trips.
-- [ ] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
+- [x] [#77: Additional query and update operators](https://github.com/schapman1974/tinymongo/issues/77)
   - [x] Talk Python query slice: scalar-to-array equality, combined `$nin`,
     `$not`, `$regex`, case-insensitive `$options`, and Mongo-correct
     null-versus-missing negation.
   - [x] Reject unsupported or misspelled query operators across CRUD filters and
     add `$size`, `$elemMatch`, `$type`, and `$mod`.
-  - [ ] Prioritize the remaining update candidates from measured application
-    failures, including the `$min` and `$max` update modifiers.
+  - [x] Complete the remaining update slice with `$rename`, `$min`, `$max`, and
+    `$pop`, including dotted and numeric-array paths, atomic validation,
+    MongoDB-compatible errors, and structured capability reporting.
 - [ ] [#102: Optional PyMongo-version adaptation](https://github.com/schapman1974/tinymongo/issues/102)
   - [x] TinyMongo errors conditionally inherit matching PyMongo errors.
   - [x] Derive accepted connection option names from the installed PyMongo
@@ -467,6 +470,8 @@ Exit criteria:
      real application aggregation call sites pass.
 6. [ ] Add advanced array, bulk, and remaining BSON operations according to measured
    compatibility gaps.
+   - [x] Complete the measured #77 update slice with `$rename`, `$min`, `$max`,
+     and `$pop` across synchronous and asynchronous clients.
 7. [ ] Implement GridFS on stable BSON, index, and cursor foundations.
 8. [ ] Build the wire-server foundation, followed by read-only Compass browsing and
    then editing support.
