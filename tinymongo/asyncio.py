@@ -22,6 +22,7 @@ from .tinymongo import (
     TinyMongoCollection,
     TinyMongoCursor,
     _resolve_tiny_client_folder,
+    _validate_mongo_client_kwargs,
 )
 from .warning_context import (
     WarningOrigin,
@@ -223,6 +224,10 @@ class AsyncMongoClient(_AsyncClientBase):
 
     _sync_client_class = MongoClient
     _backend_position = None
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        _validate_mongo_client_kwargs(kwargs)
+        super().__init__(*args, **kwargs)
 
 
 class AsyncTinyMongoDatabase:

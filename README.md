@@ -71,8 +71,10 @@ rows = list(users.find({}).sort("score", pymongo.DESCENDING))
 
 This is intended for the supported TinyMongo subset of PyMongo operations, not
 for server features such as authentication, replica sets, sessions, or network
-connections. MongoDB URIs, host names, ports, and common connection kwargs are
-accepted and ignored so existing code can be tried locally.
+connections. MongoDB URIs, host names, ports, and recognized PyMongo connection
+kwargs are accepted and ignored so existing code can be tried locally. Unknown
+or misspelled kwargs fail eagerly with `ConfigurationError`, matching PyMongo's
+configuration behavior instead of silently selecting the wrong local storage.
 Set `TINYMONGO_HOME` or pass `tinymongo_folder=` to choose where TinyMongo stores
 files. See `examples/pymongo_dropin.py` for a runnable example.
 
@@ -195,6 +197,10 @@ You can select another backend with the `backend` argument:
 keywords raise `TypeError` instead of being silently ignored. The other
 supported backend configuration keywords are `threads`, `storage_uri`,
 `duckdb_config`, and `dsn`.
+
+The PyMongo-shaped `MongoClient` and `AsyncMongoClient` accept recognized
+PyMongo connection kwargs for drop-in use and ignore their network effects.
+Unknown or misspelled kwargs raise `ConfigurationError` before storage opens.
 
 Parquet can also store collection files in object storage by passing
 `storage_uri` or setting `TINYMONGO_STORAGE_URI`. Object-storage Parquet is
@@ -425,11 +431,13 @@ Query support includes equality (including scalar matches against array
 members), nested document paths, `$gt`, `$gte`, `$lt`, `$lte`, `$ne`,
 `$nin`, `$in`, `$all`, `$and`, `$or`, `$nor`, `$not`, `$regex`,
 case-insensitive `$options`, `$exists`, `$size`, `$elemMatch`, `$type`, and
-`$mod`. Top-level `$comment` metadata is accepted and ignored while matching.
-`$size` matches an exact array length, while `$elemMatch` requires one array
-member to satisfy the complete nested condition. `$type` accepts MongoDB type
-names, numeric codes, or a list of either; `$mod` follows MongoDB's
-integer-truncation and array-member matching rules.
+`$mod`. `$comment` metadata is accepted and ignored at the top level and inside
+document-form `$elemMatch` filters; using `$comment` as a field operator raises
+`OperationFailure` with MongoDB error code `2`. `$size` matches an exact array
+length, while `$elemMatch` requires one array member to satisfy the complete
+nested condition. `$type` accepts MongoDB type names, numeric codes, or a list
+of either; `$mod` follows MongoDB's integer-truncation and array-member matching
+rules.
 
 Every CRUD method that accepts a filter validates it before reading or changing
 storage. Unsupported or misspelled `$`-prefixed query operators raise

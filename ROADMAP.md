@@ -105,7 +105,9 @@ with the follow-up audit of his
   sync and async regressions verify that `find_one({})` and
   `find({}).limit(1)` decode one row, `count_documents({})` decodes none, and
   sorted cursors still consider the complete candidate set.
-  - [ ] Rerun Mike's private 559-transcript acceptance case after merge.
+  - [x] Mike's private 559-transcript rerun remained bounded on both clients:
+    `find_one({})` peaked near 0.1 MB and `count_documents({})` near 0.0 MB,
+    with the correct count of 559.
 - [x] **TM-001:** When a degraded index resolves to an effective key
   specification that already exists, warn once and skip the duplicate native
   index instead of creating redundant metadata or storage work.
@@ -142,6 +144,18 @@ with the follow-up audit of his
 - [x] **TM-025:** Reject bare scalar, list, and empty-document `$not` operands
   with `OperationFailure` code `2` while retaining non-empty query-document and
   compiled-regex forms.
+
+#### Mike's [TM-026 through TM-029 follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5159109461)
+
+- [x] **TM-026:** Reject unknown or misspelled PyMongo-shaped connection kwargs
+  on synchronous and asynchronous `MongoClient` with `ConfigurationError`,
+  while retaining recognized connection options for drop-in use.
+- [x] **TM-027:** Report code `86` for every same-name index conflict while
+  preserving code `85` for the same key specification under a different name.
+- [x] **TM-028:** Report code `51075` when `$options` is combined with flags
+  already embedded in a native or BSON regex.
+- [x] **TM-029:** Accept and ignore `$comment` in document-form `$elemMatch`
+  filters, and reject it as a field operator with `OperationFailure` code `2`.
 
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique

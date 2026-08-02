@@ -1477,7 +1477,7 @@ def test_remote_unique_creation_preflights_and_drop_cleans_catalog(monkeypatch):
     backend.create_index("users", parse_index_spec("email"))
     with pytest.raises(OperationFailure, match="different options") as conflict:
         backend.create_index("users", parse_index_spec("email", unique=True))
-    assert conflict.value.code == 85
+    assert conflict.value.code == 86
     assert backend.drop_collection("users") is True
     assert not store.indexes
 

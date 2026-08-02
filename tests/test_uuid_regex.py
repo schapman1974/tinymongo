@@ -69,25 +69,27 @@ def test_regex_options_validation_accepts_u_and_rejects_invalid_combinations():
             validate_filter_operators({"value": {"$regex": "x", "$options": options}})
         assert caught.value.code == code
 
-    with pytest.raises(OperationFailure, match="embedded") as caught:
-        validate_filter_operators(
-            {"value": {"$regex": bson.Regex("x", "i"), "$options": "m"}}
-        )
-    assert caught.value.code == 2
+    for expression in (bson.Regex("x", "i"), re.compile("x", re.IGNORECASE)):
+        with pytest.raises(OperationFailure, match="embedded") as caught:
+            validate_filter_operators(
+                {"value": {"$regex": expression, "$options": "m"}}
+            )
+        assert caught.value.code == 51075
     with pytest.raises(OperationFailure, match="supports only") as caught:
         matches_filter({"value": "x"}, {"value": {"$regex": "x", "$options": "z"}})
     assert caught.value.code == 51108
-    with pytest.raises(OperationFailure, match="embedded") as caught:
-        matches_filter(
-            {"value": "x"},
-            {
-                "value": {
-                    "$regex": bson.Regex("x", "i"),
-                    "$options": "m",
-                }
-            },
-        )
-    assert caught.value.code == 2
+    for expression in (bson.Regex("x", "i"), re.compile("x", re.IGNORECASE)):
+        with pytest.raises(OperationFailure, match="embedded") as caught:
+            matches_filter(
+                {"value": "x"},
+                {
+                    "value": {
+                        "$regex": expression,
+                        "$options": "m",
+                    }
+                },
+            )
+        assert caught.value.code == 51075
 
 
 def test_regex_locale_flag_can_still_match_an_exact_stored_regex():

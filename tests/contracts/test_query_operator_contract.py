@@ -479,6 +479,133 @@ def test_comment_is_accepted_and_ignored_while_matching(contract_target):
     ]
 
 
+def test_comment_inside_document_elem_match_is_accepted(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "scalars", "tags": ["a", "b"]},
+            {"_id": "documents", "tags": [{"kind": "match"}]},
+            {"_id": "nested-array", "tags": [["nested"]]},
+            {"_id": "empty", "tags": []},
+        ]
+    )
+
+    assert _ids(collection.find({"tags": {"$elemMatch": {"$comment": "context"}}})) == [
+        "documents",
+        "nested-array",
+    ]
+    assert _ids(
+        collection.find(
+            {
+                "tags": {
+                    "$elemMatch": {
+                        "kind": "match",
+                        "$comment": "context",
+                    }
+                }
+            }
+        )
+    ) == ["documents"]
+    assert _ids(
+        collection.aggregate(
+            [{"$match": {"tags": {"$elemMatch": {"$comment": "context"}}}}]
+        )
+    ) == ["documents", "nested-array"]
+    assert _ids(
+        collection.find(
+            {
+                "tags": {
+                    "$all": [
+                        {"$elemMatch": {"$comment": "context"}},
+                    ]
+                }
+            }
+        )
+    ) == ["documents", "nested-array"]
+
+
+def test_comment_remains_invalid_as_a_field_operator(contract_target):
+    collection = contract_target.collection
+    original = {"_id": "original", "value": 1}
+    collection.insert_one(original)
+
+    operations = (
+        "find",
+        "find_one",
+        "count_documents",
+        "distinct",
+        "update_one",
+        "update_many",
+        "replace_one",
+        "delete_one",
+        "delete_many",
+        "find_one_and_update",
+        "find_one_and_replace",
+        "find_one_and_delete",
+    )
+    for operation in operations:
+        with pytest.raises(_OPERATION_ERRORS) as caught:
+            _run_filter_operation(
+                collection,
+                operation,
+                {"value": {"$comment": "context"}},
+            )
+        assert caught.value.code == 2
+        assert collection.find_one({"_id": "original"}) == original
+
+    with pytest.raises(_OPERATION_ERRORS) as caught:
+        list(
+            collection.find(
+                {
+                    "value": {
+                        "$elemMatch": {
+                            "$gt": 0,
+                            "$comment": "context",
+                        }
+                    }
+                }
+            )
+        )
+    assert caught.value.code == 2
+
+    with pytest.raises(_OPERATION_ERRORS) as caught:
+        list(collection.aggregate([{"$match": {"value": {"$comment": "context"}}}]))
+    assert caught.value.code == 2
+
+
+def test_embedded_regex_flags_and_options_report_code_51075(contract_target):
+    collection = contract_target.collection
+    collection.insert_one({"_id": "text", "value": "text"})
+
+    with pytest.raises(_OPERATION_ERRORS) as caught:
+        list(
+            collection.find(
+                {
+                    "value": {
+                        "$regex": re.compile("te", re.IGNORECASE),
+                        "$options": "i",
+                    }
+                }
+            )
+        )
+    assert caught.value.code == 51075
+
+
+def test_index_name_and_key_conflict_codes_match_mongodb(contract_target):
+    collection = contract_target.collection
+    collection.create_index("value", name="ix")
+
+    conflicts = (
+        ("value", {"name": "ix", "unique": True}, 86),
+        ("other", {"name": "ix"}, 86),
+        ("value", {"name": "other_ix"}, 85),
+    )
+    for key, options, code in conflicts:
+        with pytest.raises(_OPERATION_ERRORS) as caught:
+            collection.create_index(key, **options)
+        assert caught.value.code == code
+
+
 @pytest.mark.parametrize("operand", ["text", 7, ["text"], {}, {"literal": 1}])
 def test_not_rejects_non_regex_and_empty_operands_with_code_2(
     contract_target,
