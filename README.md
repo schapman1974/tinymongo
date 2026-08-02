@@ -537,11 +537,23 @@ BSON-equivalent IDs share one key (`1` and `1.0`, or native bytes and Binary
 subtype 0), while BSON-distinct values such as `True` and `1` or identical
 binary data with different subtypes remain separate.
 
-Cursor sorting follows MongoDB's comparison order for the currently supported
-scalar families, including BinData, `ObjectId`, booleans, and datetimes.
-The same recursive BSON order is used by aggregation `$min` and `$max`.
-Broader BSON comparison across query ranges and indexes remains tracked in
-[#94](https://github.com/schapman1974/tinymongo/issues/94).
+Cursor sorting follows MongoDB's recursive comparison order for the supported
+BSON scalar, document, and array families, including BinData, `ObjectId`,
+booleans, and datetimes. The same order is used by aggregation `$min` and
+`$max` and by the `$gt`, `$gte`, `$lt`, and `$lte` query operators, including
+range predicates inside `$pull`. Range queries apply MongoDB's BSON type
+bracketing: numeric representations share one family, while values from other
+type families do not compare with one another. Array fields expose both the
+whole array and its direct members where MongoDB does, and documents and arrays
+are compared recursively. Values with equal comparison keys retain their input
+order for ascending and descending sorts. TinyMongo uses its shared Python
+matcher whenever a backend-native or indexed predicate cannot guarantee these
+rules. Extending unique-index identity to the remaining supported BSON values
+is still tracked separately in the roadmap and continues to fail closed where
+exact enforcement is unavailable. The update `$min` and `$max` modifiers remain
+tracked under
+[#77](https://github.com/schapman1974/tinymongo/issues/77); aggregation `$min`
+and `$max` are already part of the supported aggregation subset.
 
 ## Aggregation core subset
 
@@ -679,6 +691,10 @@ the pattern plus MongoDB's canonical option string. Preserving a native
 same wire value as `bson.Regex`. An implicit regex filter,
 `$regex`, `$in`, `$nin`, `$all`, or `$not` pattern-matches strings and exact
 stored regex values, while explicit `$eq` compares only stored regex identity.
+Regex values used directly as operands of `$gt`, `$gte`, `$lt`, or `$lte` are
+rejected with MongoDB error code `2`. A regex nested inside a document or array
+range operand is comparison data instead, so TinyMongo validates its BSON
+transport shape without compiling it as an executable pattern.
 TinyMongo evaluates patterns with Python's `re` engine rather than MongoDB's
 PCRE2 engine, so a pattern must be valid Python syntax and some advanced syntax
 or matching details can differ between the two engines. A stored BSON regex
@@ -693,10 +709,12 @@ rewriting one populates its ordered copy.
 
 Sorts normalize naive datetimes as UTC and convert aware datetimes to UTC.
 BinData—including UUID—sorts by length, subtype, and then unsigned bytes,
-matching MongoDB. Regex values sort by pattern and canonical options after the
-other supported scalar families. Numeric `NaN` sorts below every other numeric
-value, matching MongoDB. TinyMongo retains Python microseconds, so it can
-distinguish two datetimes that MongoDB would store in the same millisecond.
+matching MongoDB; legacy subtype 2 includes its four-byte inner-length prefix
+when its comparison length is calculated. Regex values sort by pattern and
+canonical options after the other supported scalar families. Numeric `NaN`
+sorts below every other numeric value, matching MongoDB. TinyMongo can retain
+Python microseconds on round-trip, but BSON equality, range comparisons, and
+sorting use MongoDB's signed UTC millisecond precision.
 
 Decimal128 values retain their exact BSON representation and participate in
 numeric equality and range queries, sorting, embedded-backend unique indexes,

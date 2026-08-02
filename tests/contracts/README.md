@@ -31,6 +31,22 @@ To generate those reports locally, add
 python scripts/generate_compatibility_report.py contract-results.xml
 ```
 
+Run only the BSON comparison slice and generate its two-API, six-target report
+(memory, JSON, SQLite, DuckDB, Parquet, and the live MongoDB reference) with:
+
+```bash
+TINYMONGO_MONGODB_URI='mongodb://127.0.0.1:27017/?directConnection=true' \
+TINYMONGO_REQUIRE_MONGODB=1 \
+pytest -o addopts='' -q -m contract \
+  tests/contracts/test_bson_comparison_contract.py \
+  --junitxml=bson-comparison-results.xml
+
+python scripts/generate_compatibility_report.py \
+  bson-comparison-results.xml \
+  --json-output=bson-comparison-matrix.json \
+  --markdown-output=bson-comparison-matrix.md
+```
+
 The scoring rules, complete command, report schema, and CI failure behavior are
 documented in [Compatibility reports](../../docs/COMPATIBILITY_REPORTS.md).
 

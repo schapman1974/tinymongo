@@ -23,7 +23,7 @@ from .bson_codec import storage_values_equal
 from .bson_types import (
     bson_identity_key,
     bson_number_decimal,
-    bson_scalar_sort_key,
+    bson_query_range_matches,
     bson_values_equal,
     decimal128_type,
     is_bson_regex,
@@ -657,36 +657,8 @@ def _remote_unique_token(document, spec):
 
 
 def _comparison_matches(actual, operand, comparison, exact=False):
-    operand_identity = bson_identity_key(operand)
-    operand_order = bson_scalar_sort_key(operand)
-    if operand_identity is None or operand_order is None:
-        return False
-    values = actual if isinstance(actual, list) and not exact else [actual]
-    for value in values:
-        value_identity = bson_identity_key(value)
-        value_order = bson_scalar_sort_key(value)
-        try:
-            if (
-                value_identity is not None
-                and value_identity[0] == "number"
-                and is_bson_number(value)
-                and is_bson_number(operand)
-                and (
-                    bson_number_decimal(value).is_nan()
-                    != bson_number_decimal(operand).is_nan()
-                )
-            ):
-                continue
-            if (
-                value_identity is not None
-                and value_order is not None
-                and value_identity[0] == operand_identity[0]
-                and comparison(value_order[1], operand_order[1])
-            ):
-                return True
-        except (ArithmeticError, TypeError, ValueError):
-            continue
-    return False
+    value = None if actual is _MISSING else actual
+    return bson_query_range_matches(value, operand, comparison, exact=exact)
 
 
 def _validate_regex_options(options):
@@ -905,9 +877,14 @@ def _elem_match_matches(actual, operand):
         return any(_field_matches(item, operand, exact=True) for item in actual)
     return any(
         isinstance(item, Mapping)
-        and matches_filter(item, operand)
+        and matches_filter(item, operand, _exact_id=False)
         or isinstance(item, (list, tuple))
-        and matches_filter(item, operand, _array_document=True)
+        and matches_filter(
+            item,
+            operand,
+            _array_document=True,
+            _exact_id=False,
+        )
         for item in actual
     )
 
@@ -996,22 +973,22 @@ def _field_matches(actual, expected, exact=False):
             if bool(operand) != exists:
                 return False
         elif operator == "$gt":
-            if not exists or not _comparison_matches(
+            if not _comparison_matches(
                 actual, operand, lambda a, b: a > b, exact=exact
             ):
                 return False
         elif operator == "$gte":
-            if not exists or not _comparison_matches(
+            if not _comparison_matches(
                 actual, operand, lambda a, b: a >= b, exact=exact
             ):
                 return False
         elif operator == "$lt":
-            if not exists or not _comparison_matches(
+            if not _comparison_matches(
                 actual, operand, lambda a, b: a < b, exact=exact
             ):
                 return False
         elif operator == "$lte":
-            if not exists or not _comparison_matches(
+            if not _comparison_matches(
                 actual, operand, lambda a, b: a <= b, exact=exact
             ):
                 return False
@@ -1091,7 +1068,7 @@ def _field_matches(actual, expected, exact=False):
     return True
 
 
-def matches_filter(doc, filter_doc, _array_document=False):
+def matches_filter(doc, filter_doc, _array_document=False, _exact_id=True):
     if not filter_doc:
         return True
     if not isinstance(filter_doc, Mapping):
@@ -1099,13 +1076,22 @@ def matches_filter(doc, filter_doc, _array_document=False):
 
     for key, expected in filter_doc.items():
         if key == "$and":
-            if not all(matches_filter(doc, spec, _array_document) for spec in expected):
+            if not all(
+                matches_filter(doc, spec, _array_document, _exact_id)
+                for spec in expected
+            ):
                 return False
         elif key == "$or":
-            if not any(matches_filter(doc, spec, _array_document) for spec in expected):
+            if not any(
+                matches_filter(doc, spec, _array_document, _exact_id)
+                for spec in expected
+            ):
                 return False
         elif key == "$nor":
-            if any(matches_filter(doc, spec, _array_document) for spec in expected):
+            if any(
+                matches_filter(doc, spec, _array_document, _exact_id)
+                for spec in expected
+            ):
                 return False
         elif key in _IGNORED_FILTER_OPERATORS:
             continue
@@ -1123,14 +1109,14 @@ def matches_filter(doc, filter_doc, _array_document=False):
             if not _field_path_matches(
                 candidates,
                 expected,
-                exact=key == "_id",
+                exact=_exact_id and key == "_id",
                 indexed_endpoints=indexed_endpoints,
             ):
                 return False
     return True
 
 
-def _validate_regex_literal(value):
+def _validate_regex_transport_literal(value):
     """Reject regex values that cannot cross a BSON persistence boundary."""
 
     try:
@@ -1145,6 +1131,13 @@ def _validate_regex_literal(value):
             "Regular-expression patterns cannot contain NUL",
             code=2,
         )
+    return pattern, options
+
+
+def _validate_regex_literal(value):
+    """Reject regex values that cannot be executed by the query matcher."""
+
+    _pattern, options = _validate_regex_transport_literal(value)
     if is_native_regex(value) or "l" in options:
         return
     compile_pattern, flags = regex_compile_components(value)
@@ -1157,15 +1150,18 @@ def _validate_regex_literal(value):
         ) from error
 
 
-def _validate_regex_literals(value):
+def _validate_regex_literals(value, compile_patterns=True):
     if is_bson_regex(value):
-        _validate_regex_literal(value)
+        if compile_patterns:
+            _validate_regex_literal(value)
+        else:
+            _validate_regex_transport_literal(value)
     elif isinstance(value, Mapping):
         for item in value.values():
-            _validate_regex_literals(item)
+            _validate_regex_literals(item, compile_patterns=compile_patterns)
     elif isinstance(value, (list, tuple)):
         for item in value:
-            _validate_regex_literals(item)
+            _validate_regex_literals(item, compile_patterns=compile_patterns)
 
 
 def _regex_query_flags(options):
@@ -1227,7 +1223,29 @@ def _validate_field_filter_operators(expression):
                 "Field query documents cannot mix operators and literal fields",
                 code=2,
             )
-        _validate_regex_literals(operand)
+        if operator in ("$gt", "$gte", "$lt", "$lte"):
+            if is_bson_regex(operand):
+                raise OperationFailure(
+                    "Can't have RegEx as arg to non-equality predicate",
+                    code=2,
+                )
+            _validate_regex_literals(operand, compile_patterns=False)
+        elif operator == "$eq":
+            _validate_regex_literals(operand, compile_patterns=False)
+        elif operator == "$ne":
+            if is_bson_regex(operand):
+                raise OperationFailure("Can't have regex as arg to $ne", code=2)
+            _validate_regex_literals(operand, compile_patterns=False)
+        elif operator not in (
+            "$all",
+            "$elemMatch",
+            "$in",
+            "$nin",
+            "$not",
+            "$options",
+            "$regex",
+        ):
+            _validate_regex_literals(operand)
         if operator in ("$all", "$in", "$nin") and not isinstance(
             operand, (list, tuple)
         ):
@@ -1256,7 +1274,11 @@ def _validate_field_filter_operators(expression):
                     ),
                     code=2,
                 )
-            _validate_regex_literals(operand)
+            for item in operand:
+                _validate_regex_literals(
+                    item,
+                    compile_patterns=is_bson_regex(item),
+                )
         if operator == "$all":
             for item in operand:
                 nested_operators = (
@@ -1265,6 +1287,10 @@ def _validate_field_filter_operators(expression):
                     else []
                 )
                 if not nested_operators:
+                    _validate_regex_literals(
+                        item,
+                        compile_patterns=is_bson_regex(item),
+                    )
                     continue
                 if set(item) != {"$elemMatch"}:
                     if "$regex" in item:
@@ -1340,7 +1366,10 @@ def validate_filter_operators(filter_doc):
         ):
             _validate_field_filter_operators(expected)
         else:
-            _validate_regex_literals(expected)
+            _validate_regex_literals(
+                expected,
+                compile_patterns=is_bson_regex(expected),
+            )
 
 
 def query_operator_capabilities():
@@ -1356,29 +1385,66 @@ def query_operator_capabilities():
 def _validate_regex_field_expression(expression):
     """Validate only regex-specific shapes without widening query policy."""
 
-    if "$regex" in expression:
-        _validate_regex_query_operand(
-            expression["$regex"], expression.get("$options", "")
-        )
-    for operator in ("$all", "$in", "$nin"):
-        operand = expression.get(operator)
-        if not isinstance(operand, (list, tuple)):
-            continue
-        if any(isinstance(item, Mapping) and "$regex" in item for item in operand):
-            raise OperationFailure(
-                "{0} accepts regex values, not $regex operator documents".format(
-                    operator
-                ),
-                code=2,
-            )
-        _validate_regex_literals(operand)
-    not_operand = expression.get("$not")
-    if isinstance(not_operand, Mapping) and any(
-        str(key).startswith("$") for key in not_operand
-    ):
-        _validate_regex_field_expression(not_operand)
+    for operator, operand in expression.items():
+        if operator in ("$gt", "$gte", "$lt", "$lte"):
+            if is_bson_regex(operand):
+                raise OperationFailure(
+                    "Can't have RegEx as arg to non-equality predicate",
+                    code=2,
+                )
+            _validate_regex_literals(operand, compile_patterns=False)
+        elif operator == "$eq":
+            _validate_regex_literals(operand, compile_patterns=False)
+        elif operator == "$ne":
+            if is_bson_regex(operand):
+                raise OperationFailure("Can't have regex as arg to $ne", code=2)
+            _validate_regex_literals(operand, compile_patterns=False)
+        elif operator in ("$all", "$in", "$nin"):
+            if not isinstance(operand, (list, tuple)):
+                continue
+            if any(isinstance(item, Mapping) and "$regex" in item for item in operand):
+                raise OperationFailure(
+                    "{0} accepts regex values, not $regex operator documents".format(
+                        operator
+                    ),
+                    code=2,
+                )
+            for item in operand:
+                if (
+                    operator == "$all"
+                    and isinstance(item, Mapping)
+                    and set(item) == {"$elemMatch"}
+                ):
+                    _validate_regex_elem_match_operand(item["$elemMatch"])
+                else:
+                    _validate_regex_literals(
+                        item,
+                        compile_patterns=is_bson_regex(item),
+                    )
+        elif operator == "$regex":
+            _validate_regex_query_operand(operand, expression.get("$options", ""))
+        elif operator == "$not":
+            if isinstance(operand, Mapping) and any(
+                str(key).startswith("$") for key in operand
+            ):
+                _validate_regex_field_expression(operand)
+            else:
+                _validate_regex_literals(operand)
+        elif operator == "$elemMatch":
+            _validate_regex_elem_match_operand(operand)
+
+
+def _validate_regex_elem_match_operand(operand):
+    """Walk regex contexts inside ``$elemMatch`` without full validation."""
+
+    if not isinstance(operand, Mapping):
+        return
+    if any(key in _LOGICAL_FILTER_OPERATORS for key in operand):
+        validate_regex_filter(operand)
+    elif any(key in _FIELD_FILTER_OPERATORS for key in operand):
+        _validate_regex_field_expression(operand)
     else:
-        _validate_regex_literals(not_operand)
+        validate_regex_filter(operand)
 
 
 def validate_regex_filter(filter_doc):
@@ -1395,7 +1461,10 @@ def validate_regex_filter(filter_doc):
         ):
             _validate_regex_field_expression(expected)
         else:
-            _validate_regex_literals(expected)
+            _validate_regex_literals(
+                expected,
+                compile_patterns=is_bson_regex(expected),
+            )
 
 
 def _filter_references_id(filter_doc):
@@ -1521,12 +1590,13 @@ def requires_python_filter(filter_doc):
                 ):
                     return True
                 if any(
-                    operator in expected and is_bson_number(expected[operator])
-                    for operator in ("$gt", "$gte", "$lt", "$lte")
+                    operator in expected for operator in ("$gt", "$gte", "$lt", "$lte")
                 ):
-                    # Tagged Decimal128 values live in JSON objects, so native
-                    # numeric predicates cannot provide a complete candidate
-                    # set when the query operand is an int or double.
+                    # Native JSON/SQL predicates do not implement BSON type
+                    # bracketing, array-member matching, recursive object/array
+                    # comparison, or Decimal128's numeric family. Keep every
+                    # range predicate on the shared BSON matcher until a
+                    # backend can provide a complete candidate superset.
                     return True
     return False
 

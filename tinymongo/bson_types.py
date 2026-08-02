@@ -197,8 +197,10 @@ def binary_components(value):
 
 def _binary_sort_key(value):
     raw, subtype = binary_components(value)
-    # MongoDB compares BinData by length, then subtype, then byte content.
-    return len(raw), subtype, raw
+    # MongoDB compares BinData by encoded length, then subtype, then byte
+    # content. Legacy subtype 2 carries an additional four-byte inner length.
+    encoded_length = len(raw) + (4 if subtype == 2 else 0)
+    return encoded_length, subtype, raw
 
 
 def _binary_identity_key(value):
@@ -338,7 +340,7 @@ _BOOLEAN = BSONTypeSpec("boolean", 7, _identity, _identity)
 _DATETIME = BSONTypeSpec(
     "datetime",
     8,
-    normalize_datetime,
+    _datetime_identity_key,
     _datetime_identity_key,
     storage_tag="datetime",
     requires_python_comparison=True,
@@ -504,6 +506,47 @@ def bson_value_sort_key(value):
         return 4, tuple(parsed)
 
     return bson_scalar_sort_key(value)
+
+
+def bson_query_range_matches(actual, operand, comparison, exact=False):
+    """Return whether one query range comparison follows BSON semantics.
+
+    MongoDB brackets range predicates by the outer BSON type, with all numeric
+    representations sharing one family. A non-positional array field exposes
+    both its complete array value and each direct member to the predicate;
+    ``exact`` endpoints such as ``$elemMatch`` or a numeric path component do
+    not fan out again.
+    """
+
+    operand_identity = bson_value_identity_key(operand)
+    operand_order = bson_value_sort_key(operand)
+    if operand_identity is None or operand_order is None:
+        return False
+
+    values = [actual]
+    if isinstance(actual, (list, tuple)) and not exact:
+        values.extend(actual)
+
+    for value in values:
+        value_identity = bson_value_identity_key(value)
+        value_order = bson_value_sort_key(value)
+        if (
+            value_identity is None
+            or value_order is None
+            or value_identity[0] != operand_identity[0]
+        ):
+            continue
+        try:
+            if value_identity[0] == "number" and (
+                bson_number_decimal(value).is_nan()
+                != bson_number_decimal(operand).is_nan()
+            ):
+                continue
+            if comparison(value_order, operand_order):
+                return True
+        except (ArithmeticError, TypeError, ValueError):
+            continue
+    return False
 
 
 def bson_identity_key(value):

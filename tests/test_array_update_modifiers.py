@@ -220,7 +220,7 @@ def test_pull_supports_query_operators_documents_logical_queries_and_exact_array
         ({"$not": {"$eq": 2}}, "does not support query operator"),
         ({"$options": "i"}, "does not support query operator"),
         ({"$regex": "["}, "does not support query operator"),
-        ({"$gte": {}}, "requires a supported scalar value"),
+        ({"$gte": {1}}, "requires a supported BSON value"),
         (
             {"$gte": 1, "$or": [{"score": 1}]},
             "document query operator",

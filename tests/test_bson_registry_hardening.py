@@ -13,6 +13,7 @@ import pytest
 import tinymongo
 from tinymongo import bson_codec, bson_types
 from tinymongo.errors import BulkWriteError
+from tinymongo.sorting import sort_documents
 
 
 def test_core_datetime_and_binary_values_do_not_require_pymongo():
@@ -199,6 +200,36 @@ def test_numeric_sort_places_nan_below_all_other_numbers():
         "one",
         "infinity",
     ]
+
+
+def test_equal_bson_sort_keys_preserve_input_order_in_both_directions():
+    bson = pytest.importorskip("bson")
+    numeric = [
+        {"_id": "integer", "value": 1},
+        {"_id": "double", "value": 1.0},
+        {"_id": "decimal", "value": bson.Decimal128("1.00")},
+    ]
+    dates = [
+        {
+            "_id": "first",
+            "value": datetime(2026, 8, 2, 12, 0, 0, 123100),
+        },
+        {
+            "_id": "second",
+            "value": datetime(2026, 8, 2, 12, 0, 0, 123900),
+        },
+    ]
+
+    for documents in (numeric, dates):
+        expected = [document["_id"] for document in documents]
+        for direction in (1, -1):
+            assert [
+                document["_id"]
+                for document in sort_documents(
+                    documents,
+                    (("value", direction),),
+                )
+            ] == expected
 
 
 def test_recursive_bson_equality_preserves_nested_scalar_types():

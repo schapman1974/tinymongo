@@ -730,7 +730,7 @@ def test_tinydb_native_search_errors_remain_empty_results(tmp_path, monkeypatch,
         lambda _condition: (_ for _ in ()).throw(error),
     )
 
-    assert list(collection.find({"name": {"$gt": "A"}})) == []
+    assert list(collection.find({"name": {"$exists": True}})) == []
     client.close()
 
 

@@ -160,6 +160,59 @@ def test_regex_only_preflight_ignores_non_query_documents():
     assert validate_regex_filter(None) is None
 
 
+@pytest.mark.parametrize(
+    ("query", "expected_code"),
+    [
+        ({"value": bson.Regex("[")}, 51091),
+        ({"value": {"$gt": bson.Regex("[")}}, 2),
+        ({"value": {"$lte": re.compile("valid")}}, 2),
+        ({"value": {"$ne": bson.Regex("[")}}, 2),
+        ({"value": {"$ne": {"nested": bson.Regex("[")}}}, None),
+        ({"value": {"$eq": bson.Regex("[")}}, None),
+        ({"value": {"$gte": {"nested": bson.Regex("[")}}}, None),
+        ({"value": {"$in": [bson.Regex("[")]}}, 51091),
+        (
+            {"value": {"$nin": [{"nested": bson.Regex("[")}]}},
+            None,
+        ),
+        ({"value": {"$all": [bson.Regex("[")]}}, 51091),
+        ({"value": {"$all": [[bson.Regex("[")]]}}, None),
+        (
+            {"value": {"$all": [{"$elemMatch": {"name": bson.Regex("[")}}]}},
+            51091,
+        ),
+        ({"value": {"$not": bson.Regex("[")}}, 51091),
+        ({"value": {"$elemMatch": {"name": bson.Regex("[")}}}, 51091),
+        (
+            {"value": {"$elemMatch": {"$or": [{"name": bson.Regex("[")}]}}},
+            51091,
+        ),
+        (
+            {"value": {"$elemMatch": {"$gt": {"nested": bson.Regex("[")}}}},
+            None,
+        ),
+        ({"value": {"nested": bson.Regex("[")}}, None),
+        ({"value": {"$gt": {"nested": bson.Regex("nul\x00pattern")}}}, 2),
+    ],
+)
+def test_regex_only_preflight_matches_contextual_filter_validation(
+    query,
+    expected_code,
+):
+    for validator in (validate_filter_operators, validate_regex_filter):
+        if expected_code is None:
+            validator(query)
+            continue
+        with pytest.raises(OperationFailure) as caught:
+            validator(query)
+        assert caught.value.code == expected_code
+
+
+def test_regex_only_preflight_keeps_ignoring_non_regex_query_shape_errors():
+    validate_regex_filter({"value": {"$in": bson.Regex("[")}})
+    validate_regex_filter({"value": {"$elemMatch": "not-a-document"}})
+
+
 def test_full_filter_validation_rejects_operator_documents_inside_regex_arrays():
     with pytest.raises(OperationFailure, match="accepts regex values") as caught:
         validate_filter_operators({"value": {"$in": [{"$regex": "valid"}]}})

@@ -534,6 +534,10 @@ def test_bson_type_registry_uses_mongodb_scalar_order_and_subclass_precedence():
         5,
         (1, 128, b"x"),
     )
+    assert bson_types.bson_scalar_sort_key(Binary(b"x", subtype=2)) == (
+        5,
+        (5, 2, b"x"),
+    )
     assert bson_types.bson_scalar_sort_key(b"x") == (5, (1, 0, b"x"))
     assert bson_types.bson_scalar_sort_key(ObjectId("000000000000000000000001")) == (
         6,
