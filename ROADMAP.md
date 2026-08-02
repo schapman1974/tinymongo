@@ -186,8 +186,11 @@ with the follow-up audit of his
   unsupported query operators with `TinyMongoNotSupportedError` instead of
   silently returning no matches, and implement `$size`, `$elemMatch`, `$type`,
   and `$mod`.
-- [ ] Under [#94](https://github.com/schapman1974/tinymongo/issues/94), complete
-  the remaining BSON-aware range-comparison contracts.
+- [x] Under [#94](https://github.com/schapman1974/tinymongo/issues/94), complete
+  the BSON-aware `$gt`, `$gte`, `$lt`, and `$lte` contracts across recursive
+  documents and arrays, BSON type bracketing, query and `$pull` paths, and
+  MongoDB-compatible datetime, BinData, and regex boundaries. The focused
+  sync/async matrix covers all five embedded backends plus live MongoDB.
 - [ ] Extend unique-index tokens to supported BSON values through
   [#75](https://github.com/schapman1974/tinymongo/issues/75) and
   [#76](https://github.com/schapman1974/tinymongo/issues/76).
@@ -223,7 +226,7 @@ Application-compatibility work:
   - [x] Reject unsupported or misspelled query operators across CRUD filters and
     add `$size`, `$elemMatch`, `$type`, and `$mod`.
   - [ ] Prioritize the remaining update candidates from measured application
-    failures.
+    failures, including the `$min` and `$max` update modifiers.
 - [ ] [#102: Optional PyMongo-version adaptation](https://github.com/schapman1974/tinymongo/issues/102)
   - [x] TinyMongo errors conditionally inherit matching PyMongo errors.
   - [ ] Add version-matrix CI plus broader signature and result adaptation.
@@ -316,7 +319,7 @@ Exit criteria:
 - [ ] [#81: MongoDB document and key validation](https://github.com/schapman1974/tinymongo/issues/81)
 - [ ] [#83: Remaining common BSON types](https://github.com/schapman1974/tinymongo/issues/83)
 - [ ] [#93: Backend concurrency and compatibility stress tests](https://github.com/schapman1974/tinymongo/issues/93)
-- [ ] [#94: BSON comparison and sort order](https://github.com/schapman1974/tinymongo/issues/94)
+- [x] [#94: BSON comparison and sort order](https://github.com/schapman1974/tinymongo/issues/94)
 
 Exit criteria:
 

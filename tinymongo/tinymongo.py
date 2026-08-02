@@ -21,7 +21,7 @@ from .bson_types import (
     add_bson_numbers,
     bson_identity_key,
     bson_number_decimal,
-    bson_scalar_sort_key,
+    bson_query_range_matches,
     bson_value_identity_key,
     bson_value_sort_key,
     bson_values_equal,
@@ -392,12 +392,10 @@ def _validate_pull_field_condition(condition):
     for key, operand in condition.items():
         if key not in _PULL_FIELD_OPERATORS:
             _raise_write_error("$pull does not support query operator {0}".format(key))
-        if key in _PULL_COMPARISON_OPERATORS and (
-            operand is None or bson_scalar_sort_key(operand) is None
-        ):
-            _raise_write_error(
-                "$pull {0} requires a supported scalar value".format(key)
-            )
+        if key in _PULL_COMPARISON_OPERATORS and is_bson_regex(operand):
+            _raise_write_error("Can't have RegEx as arg to non-equality predicate")
+        if key in _PULL_COMPARISON_OPERATORS and bson_value_sort_key(operand) is None:
+            _raise_write_error("$pull {0} requires a supported BSON value".format(key))
 
 
 def _validate_pull_document_condition(condition):
@@ -519,41 +517,10 @@ def _apply_add_to_set(current, value):
 
 
 def _pull_comparison_matches(actual, operand, comparison):
-    operand_identity = bson_identity_key(operand)
-    operand_order = bson_scalar_sort_key(operand)
-    values = actual if isinstance(actual, (list, tuple)) else [actual]
-    for value in values:
-        value_identity = bson_identity_key(value)
-        value_order = bson_scalar_sort_key(value)
-        if (
-            value_identity is not None
-            and value_identity[0] == "number"
-            and is_bson_number(value)
-            and is_bson_number(operand)
-            and (
-                bson_number_decimal(value).is_nan()
-                != bson_number_decimal(operand).is_nan()
-            )
-        ):
-            continue
-        if (
-            value_identity is not None
-            and value_order is not None
-            and value_identity[0] == operand_identity[0]
-            and comparison(value_order[1], operand_order[1])
-        ):
-            return True
-    return False
+    return bson_query_range_matches(actual, operand, comparison)
 
 
 def _pull_field_matches(actual, condition):
-    if actual is _MISSING:
-        return False
-    if not isinstance(condition, Mapping) or not any(
-        isinstance(key, str) and key.startswith("$") for key in condition
-    ):
-        return _value_matches(actual, condition)
-
     for query_operator, operand in condition.items():
         if query_operator == "$eq":
             if not _value_matches(actual, operand):
@@ -566,19 +533,9 @@ def _pull_field_matches(actual, condition):
 
 
 def _pull_document_matches(document, condition):
-    for key, expected in condition.items():
-        if key == "$and":
-            if not all(_pull_document_matches(document, item) for item in expected):
-                return False
-        elif key == "$or":
-            if not any(_pull_document_matches(document, item) for item in expected):
-                return False
-        elif key == "$nor":
-            if any(_pull_document_matches(document, item) for item in expected):
-                return False
-        elif not _pull_field_matches(_get_nested(document, key), expected):
-            return False
-    return True
+    # An ``_id`` field inside an array element is an ordinary embedded field,
+    # not the collection document's scalar-special primary key.
+    return matches_filter(document, condition, _exact_id=False)
 
 
 def _pull_matches(item, condition):

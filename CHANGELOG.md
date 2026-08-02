@@ -49,6 +49,14 @@
   constraint.
 
 ### Fixed
+- **#94:** `$gt`, `$gte`, `$lt`, and `$lte` now share recursive BSON
+  type-bracketed comparison semantics across queries, aggregation `$match`,
+  and `$pull`, including direct array-member matching. Datetimes compare at
+  signed UTC millisecond precision, legacy Binary subtype 2 uses its encoded
+  length for ordering, and regex values are validated according to whether
+  they are executable predicates or nested comparison data. A focused
+  sync/async contract matrix verifies all five embedded backends against live
+  MongoDB and feeds the deterministic compatibility-report generator.
 - **TM-016:** `distinct()` now collapses BSON-equivalent numeric values across
   integers, doubles, and Decimal128 while keeping booleans distinct.
 - **TM-018:** Every CRUD filter now rejects unsupported or misspelled query

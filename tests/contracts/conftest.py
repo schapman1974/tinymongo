@@ -142,6 +142,8 @@ def _async_mongo_client(uri, runner):
 def _contract_suite(request):
     if "test_talkpython_contract.py" in request.node.nodeid:
         return "talkpython"
+    if "test_bson_comparison_contract.py" in request.node.nodeid:
+        return "bson-comparison"
     return "core"
 
 

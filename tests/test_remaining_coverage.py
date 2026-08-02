@@ -275,13 +275,15 @@ def test_direct_id_and_cached_match_helpers_cover_operator_routes():
     assert core._cached_value_matches(1.0, 1, ("number", 1)) is True
 
 
-def test_tinydb_updates_and_replacements_parse_regular_queries(tmp_path):
+def test_tinydb_updates_and_replacements_use_native_query_routes(tmp_path):
     client = core.TinyMongoClient(str(tmp_path / "db"))
     collection = client.app.people
     collection.insert_one({"_id": 1, "name": "Ada", "score": 1})
 
-    updated = collection.update_one({"score": {"$gt": 0}}, {"$set": {"score": 2}})
-    replaced = collection.replace_one({"score": {"$gt": 0}}, {"name": "Grace"})
+    updated = collection.update_one(
+        {"score": {"$exists": True}}, {"$set": {"score": 2}}
+    )
+    replaced = collection.replace_one({"score": {"$exists": True}}, {"name": "Grace"})
 
     assert updated.matched_count == 1
     assert updated.modified_count == 1

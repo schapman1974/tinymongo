@@ -46,6 +46,30 @@ python scripts/generate_compatibility_report.py \
 Without output options, the default filenames are
 `compatibility-report.json` and `compatibility-report.md`.
 
+## Generate the BSON comparison report
+
+Issue #94 has a focused contract slice for recursive, type-bracketed BSON
+range comparison and sorting. Run it through both APIs and all six configured
+targets—the five embedded backends plus live MongoDB—and generate its reports
+with:
+
+```bash
+TINYMONGO_MONGODB_URI='mongodb://127.0.0.1:27017/?directConnection=true' \
+TINYMONGO_REQUIRE_MONGODB=1 \
+pytest -o addopts='' -q -m contract \
+  tests/contracts/test_bson_comparison_contract.py \
+  --junitxml=bson-comparison-results.xml
+
+python scripts/generate_compatibility_report.py \
+  bson-comparison-results.xml \
+  --json-output=bson-comparison-matrix.json \
+  --markdown-output=bson-comparison-matrix.md
+```
+
+The resulting suite is attributed as `bson-comparison`, so its score can be
+inspected independently while retaining the same completeness and
+live-reference requirements as the full report.
+
 ## JUnit dimensions
 
 Contract tests attach these properties to every testcase:
