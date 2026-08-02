@@ -601,12 +601,12 @@ class AsyncTinyMongoCursor:
             if self._sort is not None:
                 with use_warning_origin(self._sort_warning_origin):
                     cursor.sort(self._sort[0], self._sort[1])
-            documents = list(cursor)
+                cursor._sort_warning_origin = self._sort_warning_origin
             if self._skip:
-                documents = documents[self._skip :]
+                cursor.skip(self._skip)
             if self._limit:
-                documents = documents[: self._limit]
-            return documents
+                cursor.limit(self._limit)
+            return list(cursor)
 
         collection_handle = self.collection
         if collection_handle is None:  # pragma: no cover - constructor invariant
@@ -628,12 +628,12 @@ class AsyncTinyMongoCursor:
             if self._sort is not None:
                 with use_warning_origin(self._sort_warning_origin):
                     cursor.sort(self._sort[0], self._sort[1])
-            documents = list(cursor)
+                cursor._sort_warning_origin = self._sort_warning_origin
             if self._skip:
-                documents = documents[self._skip :]
+                cursor.skip(self._skip)
             if self._limit:
-                documents = documents[: self._limit]
-            return documents
+                cursor.limit(self._limit)
+            return list(cursor)
 
         return state._invoke(operation)
 

@@ -37,6 +37,25 @@ def test_sync_cursor_sort_warning_points_to_application_call():
     _assert_origin(caught, expected_line)
 
 
+def test_sync_deferred_cursor_sort_warning_keeps_sort_origin():
+    cursor = TinyMongoCursor(
+        (),
+        deferred_loader=lambda sort_requested, skip, limit: (
+            [{"published": date(2026, 1, 1)}],
+            False,
+            not sort_requested,
+        ),
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", TinyMongoUnsupportedWarning)
+        expected_line = inspect.currentframe().f_lineno + 1
+        cursor.sort("published")
+        list(cursor)
+
+    _assert_origin(caught, expected_line)
+
+
 def test_sync_aggregation_sort_warning_points_to_application_call():
     engine = AggregationEngine()
 
@@ -84,7 +103,14 @@ def test_async_create_indexes_warning_keeps_await_call_origin():
 
 def test_async_find_cursor_sort_warning_keeps_sort_origin_through_clone(monkeypatch):
     def find_with_unsupported_value(_collection, *args, **kwargs):
-        return TinyMongoCursor([{"published": date(2026, 1, 1)}])
+        return TinyMongoCursor(
+            (),
+            deferred_loader=lambda sort_requested, skip, limit: (
+                [{"published": date(2026, 1, 1)}],
+                False,
+                not sort_requested,
+            ),
+        )
 
     monkeypatch.setattr(TinyMongoCollection, "find", find_with_unsupported_value)
 

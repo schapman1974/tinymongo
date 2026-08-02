@@ -95,8 +95,17 @@ with the follow-up audit of his
   attached 400-document, 200,000-character reproduction dropped from 160.26 MB
   to 0.26 MB locally. Sorted SQLite cursors and non-SQLite backends explicitly
   retain the full-document fallback needed by their current ordering and scan
-  implementations. Mike's private 559-transcript rerun remains an external
-  acceptance check.
+  implementations. Mike's private 559-transcript rerun confirmed projected
+  single-document reads remain near 0.1 MB and separated the remaining
+  unprojected limit/count work into TM-015.
+- [x] **TM-015:** Defer SQLite cursor scans until the final unsorted window is
+  known, push `skip`/`limit` into unindexed SQL scans or a streaming Python
+  filter, and count
+  SQL-compatible filters without fetching document payloads. Deterministic
+  sync and async regressions verify that `find_one({})` and
+  `find({}).limit(1)` decode one row, `count_documents({})` decodes none, and
+  sorted cursors still consider the complete candidate set.
+  - [ ] Rerun Mike's private 559-transcript acceptance case after merge.
 - [x] **TM-001:** When a degraded index resolves to an effective key
   specification that already exists, warn once and skip the duplicate native
   index instead of creating redundant metadata or storage work.
