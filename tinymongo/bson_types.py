@@ -12,7 +12,7 @@ from __future__ import absolute_import
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 import math
 import re
@@ -297,13 +297,46 @@ def normalize_datetime(value):
     return value.astimezone(timezone.utc)
 
 
-def _datetime_identity_key(value):
-    """Return MongoDB's signed UTC millisecond identity for a datetime."""
+def datetime_milliseconds(value):
+    """Return MongoDB's signed UTC millisecond value for ``value``.
+
+    BSON dates are signed integers rather than floating-point timestamps.
+    Calculating from a :class:`~datetime.timedelta` preserves exact behavior
+    before the Unix epoch and avoids platform-dependent timestamp rounding.
+    """
 
     normalized = normalize_datetime(value)
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     delta = normalized - epoch
     return delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000
+
+
+def canonicalize_datetime(value, tz_aware=False, tzinfo=None):
+    """Return ``value`` with MongoDB's UTC millisecond decode semantics.
+
+    The default mirrors PyMongo's naive-UTC result. With ``tz_aware=True``,
+    the result is UTC-aware and is converted to ``tzinfo`` when supplied.
+    Client-option validation remains the caller's responsibility.
+    """
+
+    milliseconds = datetime_milliseconds(value)
+    days, day_milliseconds = divmod(milliseconds, 86_400_000)
+    seconds, milliseconds = divmod(day_milliseconds, 1_000)
+    canonical = datetime(1970, 1, 1) + timedelta(
+        days=days,
+        seconds=seconds,
+        milliseconds=milliseconds,
+    )
+    if not tz_aware:
+        return canonical
+    canonical = canonical.replace(tzinfo=timezone.utc)
+    return canonical if tzinfo is None else canonical.astimezone(tzinfo)
+
+
+def _datetime_identity_key(value):
+    """Return MongoDB's signed UTC millisecond identity for a datetime."""
+
+    return datetime_milliseconds(value)
 
 
 # The ranks reserve 3 and 4 for mappings and arrays, which cursors recursively

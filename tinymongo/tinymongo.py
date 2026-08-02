@@ -7,7 +7,9 @@ from __future__ import absolute_import
 import copy
 from collections.abc import Iterable, Mapping, MutableMapping
 from dataclasses import replace
+import datetime as datetime_module
 from functools import reduce, wraps
+import importlib
 import logging
 import operator as comparison_operator
 import os
@@ -25,6 +27,7 @@ from .bson_types import (
     bson_value_identity_key,
     bson_value_sort_key,
     bson_values_equal,
+    canonicalize_datetime,
     decimal128_type,
     is_bson_regex,
     is_bson_number,
@@ -766,7 +769,7 @@ _PYMONGO_CLIENT_PARAMETERS = frozenset(
         "type_registry",
     )
 )
-_PYMONGO_CONNECTION_OPTIONS = frozenset(
+_PYMONGO_CONNECTION_OPTIONS_FALLBACK = frozenset(
     """
     appname authmechanism authmechanismproperties authoidcallowedhosts
     authsource auto_encryption_opts compressors connect connecttimeoutms
@@ -787,6 +790,28 @@ _PYMONGO_CONNECTION_OPTIONS = frozenset(
 )
 
 
+def _load_pymongo_connection_options():
+    """Use the installed PyMongo option catalog, with an offline fallback."""
+
+    try:
+        validators = getattr(
+            importlib.import_module("pymongo.common"),
+            "VALIDATORS",
+            None,
+        )
+    except ImportError:
+        return _PYMONGO_CONNECTION_OPTIONS_FALLBACK
+    if not isinstance(validators, Mapping) or not validators:
+        return _PYMONGO_CONNECTION_OPTIONS_FALLBACK
+    names = tuple(validators)
+    if not all(isinstance(name, str) for name in names):
+        return _PYMONGO_CONNECTION_OPTIONS_FALLBACK
+    return frozenset(name.lower() for name in names)
+
+
+_PYMONGO_CONNECTION_OPTIONS = _load_pymongo_connection_options()
+
+
 def _validate_mongo_client_kwargs(options):
     """Reject unknown PyMongo-shaped options before storage can be opened."""
 
@@ -802,6 +827,89 @@ def _validate_mongo_client_kwargs(options):
     )
     if unknown is not None:
         raise ConfigurationError("Unknown option: {0}".format(unknown))
+
+
+def _normalize_document_class(document_class):
+    """Validate the mutable mapping class used for returned documents."""
+
+    if not document_class:
+        return dict
+    resolved_class = getattr(document_class, "__origin__", document_class)
+    supported = isinstance(resolved_class, type) and issubclass(
+        resolved_class,
+        MutableMapping,
+    )
+    if not supported:
+        raise TypeError(
+            "document_class must be a subclass of " "collections.abc.MutableMapping"
+        )
+    return resolved_class
+
+
+def _normalize_tz_aware(tz_aware):
+    """Normalize PyMongo's Boolean-or-string ``tz_aware`` option."""
+
+    if tz_aware is None:
+        return False
+    if isinstance(tz_aware, bool):
+        return tz_aware
+    if isinstance(tz_aware, str):
+        if tz_aware == "true":
+            return True
+        if tz_aware == "false":
+            return False
+        raise ValueError("The value of tz_aware must be 'true' or 'false'")
+    raise TypeError(
+        "tz_aware must be True or False, was: tz_aware={0!r}".format(tz_aware)
+    )
+
+
+def _normalize_read_options(document_class, tz_aware, tzinfo):
+    """Return validated PyMongo-compatible document decoding options."""
+
+    document_class = _normalize_document_class(document_class)
+    tz_aware = _normalize_tz_aware(tz_aware)
+    if tzinfo is not None and not isinstance(tzinfo, datetime_module.tzinfo):
+        raise TypeError("tzinfo must be an instance of datetime.tzinfo")
+    if tzinfo is not None and not tz_aware:
+        raise ValueError("cannot specify tzinfo without also setting tz_aware=True")
+    return document_class, tz_aware, tzinfo
+
+
+def _pop_case_insensitive_option(options, name, default=None):
+    """Remove one case-insensitive PyMongo connection option."""
+
+    matched = next((key for key in options if key.lower() == name), None)
+    if matched is None:
+        return default
+    return options.pop(matched)
+
+
+def _materialize_result_value(value, document_class, tz_aware, tzinfo):
+    """Recursively build one public result using client codec options."""
+
+    if isinstance(value, datetime_module.datetime):
+        return canonicalize_datetime(
+            value,
+            tz_aware=tz_aware,
+            tzinfo=tzinfo,
+        )
+    if isinstance(value, Mapping):
+        document = document_class()
+        for key, item in value.items():
+            document[key] = _materialize_result_value(
+                item,
+                document_class,
+                tz_aware,
+                tzinfo,
+            )
+        return document
+    if isinstance(value, list):
+        return [
+            _materialize_result_value(item, document_class, tz_aware, tzinfo)
+            for item in value
+        ]
+    return copy.deepcopy(value)
 
 
 def _resolve_tiny_client_folder(foldername, tinymongo_folder):
@@ -897,6 +1005,10 @@ class TinyMongoClient(object):
         self._databases = {}
         self._databases_lock = threading.RLock()
         self._closed = False
+        self._canonical_read_values = False
+        self._document_class = dict
+        self._tz_aware = False
+        self._tzinfo = None
         storage_is_nonlocal = is_remote_sql_backend(backend_name) or bool(
             self._storage_uri and backend_name in ("parquet", "parquetv2")
         )
@@ -959,6 +1071,7 @@ class TinyMongoClient(object):
                     key,
                     path,
                     self._storage,
+                    client=self,
                     engine=engine_class(
                         path,
                         threads=self._threads,
@@ -968,9 +1081,26 @@ class TinyMongoClient(object):
                     ),
                 )
             else:
-                database = TinyMongoDatabase(key, path, self._storage)
+                database = TinyMongoDatabase(
+                    key,
+                    path,
+                    self._storage,
+                    client=self,
+                )
             self._databases[key] = database
             return database
+
+    def _materialize_read_value(self, value):
+        """Return an isolated public value using this client's read options."""
+
+        if not self._canonical_read_values:
+            return copy.deepcopy(value)
+        return _materialize_result_value(
+            value,
+            self._document_class,
+            self._tz_aware,
+            self._tzinfo,
+        )
 
     def _ensure_open(self):
         """Reject operations that would use a client after it was closed."""
@@ -1168,6 +1298,12 @@ class MongoClient(TinyMongoClient):
         **kwargs,
     ):
         _validate_mongo_client_kwargs(kwargs)
+        tzinfo = _pop_case_insensitive_option(kwargs, "tzinfo")
+        document_class, tz_aware, tzinfo = _normalize_read_options(
+            document_class,
+            tz_aware,
+            tzinfo,
+        )
         backend = kwargs.pop("backend", "tinydb")
         storage_uri = kwargs.pop("storage_uri", None)
         threads = kwargs.pop("threads", None)
@@ -1195,12 +1331,16 @@ class MongoClient(TinyMongoClient):
             duckdb_config=duckdb_config,
             dsn=dsn,
         )
+        self._canonical_read_values = True
+        self._document_class = document_class
+        self._tz_aware = tz_aware
+        self._tzinfo = tzinfo
 
 
 class TinyMongoDatabase(object):
     """Representation of a Pymongo database"""
 
-    def __init__(self, database, path, storage, engine=None):
+    def __init__(self, database, path, storage, engine=None, client=None):
         """Initialize a TinyDB file named as the db name in the given folder."""
         self.database = database
         self._path = path
@@ -1210,6 +1350,7 @@ class TinyMongoDatabase(object):
             else os.path.dirname(path) or "."
         )
         self._storage = storage
+        self._client = client
         self.engine = engine
         self.tinydb = None if engine is not None else TinyDB(path, storage=storage)
         self._memory_revision = self._current_memory_revision()
@@ -1317,6 +1458,14 @@ class TinyMongoCollection(object):
         self._index_cache = {}
         self._memory_revision = None
 
+    def _materialize_read_value(self, value):
+        """Apply the owning client's public document decoding options."""
+
+        client = getattr(self.parent, "_client", None)
+        if client is None:
+            return copy.deepcopy(value)
+        return client._materialize_read_value(value)
+
     def __repr__(self):
         """Return collection name"""
         return self.tablename
@@ -1389,7 +1538,10 @@ class TinyMongoCollection(object):
             prepared = prepared[1:]
         else:
             documents = self.find({})
-        return TinyMongoCursor(engine.run_prepared(documents, prepared))
+        return TinyMongoCursor(
+            engine.run_prepared(documents, prepared),
+            materializer=self._materialize_read_value,
+        )
 
     def bulk_write(self, *args, **kwargs):
         raise TinyMongoNotSupportedError("Bulk writes are not supported by TinyMongo")
@@ -2652,7 +2804,7 @@ class TinyMongoCollection(object):
             else:
                 self.update_one({"_id": item["_id"]}, update, *args, **write_kwargs)
                 returned = self.find_one({"_id": item["_id"]}) if return_after else item
-            return project_document(returned, projection)
+            return self._materialize_read_value(project_document(returned, projection))
         finally:
             if self.parent.engine is None:
                 self._release_collection_lock(rlock, portalocker_lock)
@@ -2690,7 +2842,7 @@ class TinyMongoCollection(object):
                     if return_after
                     else previous
                 )
-            return project_document(returned, projection)
+            return self._materialize_read_value(project_document(returned, projection))
         finally:
             if self.parent.engine is None:
                 self._release_collection_lock(rlock, portalocker_lock)
@@ -2709,7 +2861,9 @@ class TinyMongoCollection(object):
             if item is None:
                 return None
             self.delete_one({"_id": item["_id"]})
-            return project_document(item, normalize_projection(projection))
+            return self._materialize_read_value(
+                project_document(item, normalize_projection(projection))
+            )
         finally:
             if self.parent.engine is None:
                 self._release_collection_lock(rlock, portalocker_lock)
@@ -3018,6 +3172,7 @@ class TinyMongoCursor(object):
         query=None,
         source_projected=False,
         deferred_loader=None,
+        materializer=None,
     ):
         """Initialize the mongo iterable cursor with data"""
         self._deferred_loader = deferred_loader
@@ -3025,6 +3180,11 @@ class TinyMongoCursor(object):
         self._source_data = list(cursordat) if self._deferred_loaded else []
         self.cursordat = list(self._source_data)
         self.collection = collection
+        self._materializer = materializer or getattr(
+            collection,
+            "_materialize_read_value",
+            None,
+        )
         self.projection = projection
         self.query = copy.deepcopy(query)
         self._source_projected = source_projected
@@ -3051,9 +3211,14 @@ class TinyMongoCursor(object):
         return self._project(self.currentrec)[key]
 
     def _project(self, document):
-        if self.projection is None:
-            return copy.deepcopy(document)
-        return project_document(document, self.projection)
+        projected = (
+            document
+            if self.projection is None
+            else project_document(document, self.projection)
+        )
+        if self._materializer is not None:
+            return self._materializer(projected)
+        return copy.deepcopy(projected)
 
     def _invalidate_deferred_source(self):
         """Discard a loaded SQLite window after cursor options change."""
@@ -3269,12 +3434,14 @@ class TinyMongoCursor(object):
                 query=copy.deepcopy(self.query),
                 source_projected=self._source_projected,
                 deferred_loader=self._deferred_loader,
+                materializer=self._materializer,
             )
         elif self.collection is None:
             clone = type(self)(
                 copy.deepcopy(self._source_data),
                 projection=copy.deepcopy(self.projection),
                 query=copy.deepcopy(self.query),
+                materializer=self._materializer,
             )
         else:
             clone = self.collection.find(copy.deepcopy(self.query))

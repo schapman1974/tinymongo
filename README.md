@@ -71,12 +71,23 @@ rows = list(users.find({}).sort("score", pymongo.DESCENDING))
 
 This is intended for the supported TinyMongo subset of PyMongo operations, not
 for server features such as authentication, replica sets, sessions, or network
-connections. MongoDB URIs, host names, ports, and recognized PyMongo connection
-kwargs are accepted and ignored so existing code can be tried locally. Unknown
-or misspelled kwargs fail eagerly with `ConfigurationError`, matching PyMongo's
-configuration behavior instead of silently selecting the wrong local storage.
-Set `TINYMONGO_HOME` or pass `tinymongo_folder=` to choose where TinyMongo stores
-files. See `examples/pymongo_dropin.py` for a runnable example.
+connections. MongoDB URIs, host names, ports, and recognized network connection
+kwargs are accepted and ignored so existing code can be tried locally. When
+PyMongo is installed, TinyMongo derives those accepted option names from that
+installed version; dependency-free installs use a bundled fallback list.
+Unknown or misspelled kwargs fail eagerly with `ConfigurationError`, matching
+PyMongo's configuration behavior instead of silently selecting the wrong local
+storage. Set `TINYMONGO_HOME` or pass `tinymongo_folder=` to choose where
+TinyMongo stores files. See `examples/pymongo_dropin.py` for a runnable example.
+
+The behavior-bearing read options are not ignored. `document_class` constructs
+top-level and nested result documents—including documents inside arrays—with a
+mutable mapping class such as `OrderedDict` or `bson.SON`. Datetimes are stored
+as signed UTC milliseconds, just like BSON. Results are naive UTC by default;
+set `tz_aware=True` for aware UTC values, and optionally pass `tzinfo=` to
+convert the same instant to another timezone. These rules apply equally to the
+synchronous and asynchronous PyMongo-shaped clients. Raw BSON views via
+`RawBSONDocument` are not part of the embedded-storage document-class subset.
 
 ## Async API
 
@@ -198,9 +209,11 @@ keywords raise `TypeError` instead of being silently ignored. The other
 supported backend configuration keywords are `threads`, `storage_uri`,
 `duckdb_config`, and `dsn`.
 
-The PyMongo-shaped `MongoClient` and `AsyncMongoClient` accept recognized
-PyMongo connection kwargs for drop-in use and ignore their network effects.
-Unknown or misspelled kwargs raise `ConfigurationError` before storage opens.
+The PyMongo-shaped `MongoClient` and `AsyncMongoClient` accept the installed
+PyMongo version's recognized connection kwargs for drop-in use and ignore their
+network effects. Unknown or misspelled kwargs raise `ConfigurationError` before
+storage opens. `document_class`, `tz_aware`, and `tzinfo` are validated before
+storage opens and control returned values recursively.
 
 Parquet can also store collection files in object storage by passing
 `storage_uri` or setting `TINYMONGO_STORAGE_URI`. Object-storage Parquet is
@@ -366,7 +379,8 @@ tinymongo migrate ./tinydb ./unused --to-backend postgres --target-dsn "$TINYMON
 ```
 
 Export and import use the same tagged JSON codec as storage, so supported
-datetime, ObjectId, bytes, and Binary values round-trip. `bytearray` is accepted
+datetime, ObjectId, bytes, and Binary values remain portable. Datetimes use
+BSON's canonical naive-UTC millisecond representation. `bytearray` is accepted
 and imports back as `bytes`. Inspection, collection listing, and migration omit
 TinyDB's internal `_default` table. Export preserves embedded-document field
 order, including document-valued `_id` values. Replace-mode imports and
@@ -628,9 +642,11 @@ MongoDB's broader expression language are not part of this slice yet.
 
 ## ObjectId, datetime, binary, Decimal128, UUID, and regex values
 
-`datetime`, `bytes`, native `uuid.UUID`, and compiled `re.Pattern` values
-round-trip through every backend. `bytearray` is accepted and reads back as
-`bytes`. Install the optional BSON extra to use `bson.ObjectId`,
+`datetime`, `bytes`, native `uuid.UUID`, and compiled `re.Pattern` values are
+supported by every backend. Datetimes are converted to BSON's signed UTC
+millisecond representation; naive inputs are treated as UTC and aware inputs
+are converted to UTC. `bytearray` is accepted and reads back as `bytes`. Install
+the optional BSON extra to use `bson.ObjectId`,
 `bson.Decimal128`, `bson.Regex`, or non-generic `bson.Binary` subtypes without
 making PyMongo a core dependency:
 
@@ -712,9 +728,9 @@ BinData—including UUID—sorts by length, subtype, and then unsigned bytes,
 matching MongoDB; legacy subtype 2 includes its four-byte inner-length prefix
 when its comparison length is calculated. Regex values sort by pattern and
 canonical options after the other supported scalar families. Numeric `NaN`
-sorts below every other numeric value, matching MongoDB. TinyMongo can retain
-Python microseconds on round-trip, but BSON equality, range comparisons, and
-sorting use MongoDB's signed UTC millisecond precision.
+sorts below every other numeric value, matching MongoDB. Persistence, returned
+values, equality, range comparisons, and sorting all use MongoDB's signed UTC
+millisecond precision.
 
 Decimal128 values retain their exact BSON representation and participate in
 numeric equality and range queries, sorting, embedded-backend unique indexes,

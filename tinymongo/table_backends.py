@@ -84,6 +84,28 @@ _FIELD_FILTER_OPERATOR_NAMES = (
 _LOGICAL_FILTER_OPERATORS = frozenset(_LOGICAL_FILTER_OPERATOR_NAMES)
 _IGNORED_FILTER_OPERATORS = frozenset(_IGNORED_FILTER_OPERATOR_NAMES)
 _FIELD_FILTER_OPERATORS = frozenset(_FIELD_FILTER_OPERATOR_NAMES)
+_KNOWN_UNSUPPORTED_FILTER_OPERATORS = frozenset(
+    (
+        "$bitsAllClear",
+        "$bitsAllSet",
+        "$bitsAnyClear",
+        "$bitsAnySet",
+        "$expr",
+        "$geoIntersects",
+        "$geoWithin",
+        "$jsonSchema",
+        "$near",
+        "$nearSphere",
+        "$text",
+        "$where",
+    )
+)
+_KNOWN_MONGODB_FILTER_OPERATORS = (
+    _LOGICAL_FILTER_OPERATORS
+    | _IGNORED_FILTER_OPERATORS
+    | _FIELD_FILTER_OPERATORS
+    | _KNOWN_UNSUPPORTED_FILTER_OPERATORS
+)
 _BSON_QUERY_TYPE_CODES = {
     -1: "minKey",
     1: "double",
@@ -1208,7 +1230,7 @@ def _validate_regex_query_operand(operand, options=""):
         ) from error
 
 
-def _validate_field_filter_operators(expression):
+def _validate_field_filter_operators(expression, *, _inside_elem_match=False):
     """Validate one field's operator document, including nested ``$not``."""
 
     for operator, operand in expression.items():
@@ -1216,6 +1238,13 @@ def _validate_field_filter_operators(expression):
             raise OperationFailure("unknown operator: {0}".format(operator), code=2)
         if operator not in _FIELD_FILTER_OPERATORS:
             if isinstance(operator, str) and operator.startswith("$"):
+                if (
+                    _inside_elem_match
+                    and operator not in _KNOWN_MONGODB_FILTER_OPERATORS
+                ):
+                    raise OperationFailure(
+                        "unknown operator: {0}".format(operator), code=2
+                    )
                 raise TinyMongoNotSupportedError(
                     "Query operator {0} is not supported by TinyMongo".format(operator)
                 )
@@ -1314,7 +1343,10 @@ def _validate_field_filter_operators(expression):
             _validate_regex_query_operand(expression["$regex"], operand)
         if operator == "$not":
             nested = _normalize_not_operand(operand)
-            _validate_field_filter_operators(nested)
+            _validate_field_filter_operators(
+                nested,
+                _inside_elem_match=_inside_elem_match,
+            )
         if operator == "$elemMatch":
             _validate_elem_match_operand(operand)
         if operator == "$mod":
@@ -1329,14 +1361,14 @@ def _validate_elem_match_operand(operand):
     if not isinstance(operand, Mapping):
         raise OperationFailure("$elemMatch requires a query document", code=2)
     if any(key in _LOGICAL_FILTER_OPERATORS for key in operand):
-        validate_filter_operators(operand)
+        validate_filter_operators(operand, _inside_elem_match=True)
     elif any(key in _FIELD_FILTER_OPERATORS for key in operand):
-        _validate_field_filter_operators(operand)
+        _validate_field_filter_operators(operand, _inside_elem_match=True)
     else:
-        validate_filter_operators(operand)
+        validate_filter_operators(operand, _inside_elem_match=True)
 
 
-def validate_filter_operators(filter_doc):
+def validate_filter_operators(filter_doc, *, _inside_elem_match=False):
     """Reject operators the shared Python matcher cannot evaluate safely."""
 
     if not isinstance(filter_doc, Mapping):
@@ -1352,11 +1384,19 @@ def validate_filter_operators(filter_doc):
                     code=2,
                 )
             for specification in expected:
-                validate_filter_operators(specification)
+                validate_filter_operators(
+                    specification,
+                    _inside_elem_match=_inside_elem_match,
+                )
             continue
         if key in _IGNORED_FILTER_OPERATORS:
             continue
         if key.startswith("$"):
+            if _inside_elem_match and (
+                key in _FIELD_FILTER_OPERATORS
+                or key not in _KNOWN_MONGODB_FILTER_OPERATORS
+            ):
+                raise OperationFailure("unknown operator: {0}".format(key), code=2)
             raise TinyMongoNotSupportedError(
                 "Query operator {0} is not supported by TinyMongo".format(key)
             )
@@ -1364,7 +1404,10 @@ def validate_filter_operators(filter_doc):
         if isinstance(expected, Mapping) and any(
             str(operator).startswith("$") for operator in expected
         ):
-            _validate_field_filter_operators(expected)
+            _validate_field_filter_operators(
+                expected,
+                _inside_elem_match=_inside_elem_match,
+            )
         else:
             _validate_regex_literals(
                 expected,

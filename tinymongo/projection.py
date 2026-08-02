@@ -1,7 +1,7 @@
 """Mongo-style inclusion and exclusion projections."""
 
 import copy
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Mapping, MutableMapping, Sequence, Set
 
 from .bson_types import bson_number_truth, is_bson_number
 from .errors import OperationFailure, TinyMongoNotSupportedError
@@ -128,7 +128,7 @@ def normalize_projection(projection):
 def _include_value(value, tree):
     if _LEAF in tree:
         return copy.deepcopy(value)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         result = {}
         for key, child_value in value.items():
             if key not in tree:
@@ -140,7 +140,7 @@ def _include_value(value, tree):
     if isinstance(value, list):
         result = []
         for item in value:
-            if not isinstance(item, (dict, list)):
+            if not isinstance(item, (Mapping, list)):
                 continue
             result.append(_include_value(item, tree))
         return result
@@ -148,7 +148,7 @@ def _include_value(value, tree):
 
 
 def _exclude_value(value, tree):
-    if isinstance(value, dict):
+    if isinstance(value, MutableMapping):
         for key, child_tree in tree.items():
             if key not in value:
                 continue

@@ -322,12 +322,9 @@ def test_valid_datetime_and_object_id_tags_still_decode():
     )
     object_id = bson.ObjectId("000000000000000000000001")
 
-    assert (
-        bson_codec.decode_value(
-            {"__tinymongo_type_v1__": "datetime", "value": moment.isoformat()}
-        )
-        == moment
-    )
+    assert bson_codec.decode_value(
+        {"__tinymongo_type_v1__": "datetime", "value": moment.isoformat()}
+    ) == datetime(2026, 7, 29, 12, 30)
     assert (
         bson_codec.decode_value(
             {"__tinymongo_type_v1__": "objectid", "value": str(object_id)}
