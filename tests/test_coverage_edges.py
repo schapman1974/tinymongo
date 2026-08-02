@@ -45,7 +45,15 @@ def test_result_properties_and_error_classes():
     assert updated.upserted_id is None
     assert deleted.raw_result == 3
     assert deleted.deleted_count == 3
-    assert str(DuplicateKeyError("duplicate"))
+    duplicate = DuplicateKeyError("duplicate")
+    assert str(duplicate)
+    assert duplicate.code == 11000
+    detailed_duplicate = DuplicateKeyError(
+        "duplicate",
+        details={"keyPattern": {"email": 1}},
+    )
+    assert detailed_duplicate.code == 11000
+    assert detailed_duplicate.details == {"keyPattern": {"email": 1}}
     failure = OperationFailure("failed", code=42, details={"ok": False})
     assert str(failure)
     assert failure.code == 42
@@ -625,10 +633,11 @@ def test_direct_helper_and_lock_edges(tmp_path, monkeypatch):
     ] == ["x"]
     with pytest.raises(ValueError):
         core._apply_update_document({"_id": 1, "items": "x"}, {"$pull": {"items": "x"}})
-    with pytest.raises(ValueError):
+    with pytest.raises(WriteError) as caught:
         core._apply_update_document(
             {"_id": 1, "items": "x"}, {"$addToSet": {"items": "x"}}
         )
+    assert caught.value.code == 2
 
     with monkeypatch.context() as ctx:
         ctx.setattr(
@@ -695,7 +704,34 @@ def test_query_operator_branches_without_mongo(tmp_path):
     assert c.find({"$or": [{"name": "alpha"}, {"name": "gamma"}]}).count() == 2
     assert c.find({"missing": {"$exists": False}}).count() == 3
     assert c.find({"tags": [["a"]]}).count() == 0
-    assert c.find({"tags": {"$unknown": ["a"]}}).count() == 0
+    with pytest.raises(TinyMongoNotSupportedError, match=r"\$unknown"):
+        c.find({"tags": {"$unknown": ["a"]}})
+
+
+def test_unknown_query_operator_fails_before_collection_storage_is_created(tmp_path):
+    client = tm.TinyMongoClient(str(tmp_path / "db"), backend="sqlite")
+    collection = client.app.items
+
+    with pytest.raises(TinyMongoNotSupportedError, match=r"\$exsits"):
+        collection.find({"value": {"$exsits": True}})
+
+    assert client.app.list_collection_names() == []
+    client.close()
+
+
+@pytest.mark.parametrize("error", [AttributeError("bad query"), TypeError("bad query")])
+def test_tinydb_native_search_errors_remain_empty_results(tmp_path, monkeypatch, error):
+    client = tm.TinyMongoClient(str(tmp_path / "db"))
+    collection = client.app.items
+    collection.insert_one({"_id": 1, "name": "Ada"})
+    monkeypatch.setattr(
+        collection.table,
+        "search",
+        lambda _condition: (_ for _ in ()).throw(error),
+    )
+
+    assert list(collection.find({"name": {"$gt": "A"}})) == []
+    client.close()
 
 
 def test_collection_write_and_no_match_edges(tmp_path):

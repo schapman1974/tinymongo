@@ -155,9 +155,47 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
         ),
         "expressions": ("$ifNull", "$literal", "$size"),
     }
+    assert capabilities["query_operators"] == {
+        "logical": ("$and", "$or", "$nor"),
+        "field": (
+            "$all",
+            "$elemMatch",
+            "$eq",
+            "$exists",
+            "$gt",
+            "$gte",
+            "$in",
+            "$lt",
+            "$lte",
+            "$ne",
+            "$nin",
+            "$not",
+            "$mod",
+            "$options",
+            "$regex",
+            "$size",
+            "$type",
+        ),
+    }
+    assert capabilities["bson_types"]["native"] == (
+        "array",
+        "binary",
+        "boolean",
+        "datetime",
+        "double",
+        "int",
+        "long",
+        "null",
+        "object",
+        "regex",
+        "string",
+        "uuid",
+    )
     assert capabilities["sessions"] is False
     assert client.supports("multiprocess_writes") is True
     assert client.supports("aggregation") is True
+    assert client.supports("query_operators") is True
+    assert client.supports("bson_types") is True
 
 
 def test_object_storage_capabilities_are_conservative(tmp_path):

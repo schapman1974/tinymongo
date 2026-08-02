@@ -59,24 +59,57 @@ _SAFE_JSON_INTEGER_BITS = 1800
 _SQLITE_UNIQUE_TOKEN_VERSION = 3
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
 _PHYSICAL_ID_PREFIX = "__tinymongo_id_v2__:"
-_LOGICAL_FILTER_OPERATORS = frozenset(("$and", "$or", "$nor"))
-_FIELD_FILTER_OPERATORS = frozenset(
-    (
-        "$all",
-        "$eq",
-        "$exists",
-        "$gt",
-        "$gte",
-        "$in",
-        "$lt",
-        "$lte",
-        "$ne",
-        "$nin",
-        "$not",
-        "$options",
-        "$regex",
-    )
+_LOGICAL_FILTER_OPERATOR_NAMES = ("$and", "$or", "$nor")
+_FIELD_FILTER_OPERATOR_NAMES = (
+    "$all",
+    "$elemMatch",
+    "$eq",
+    "$exists",
+    "$gt",
+    "$gte",
+    "$in",
+    "$lt",
+    "$lte",
+    "$ne",
+    "$nin",
+    "$not",
+    "$mod",
+    "$options",
+    "$regex",
+    "$size",
+    "$type",
 )
+_LOGICAL_FILTER_OPERATORS = frozenset(_LOGICAL_FILTER_OPERATOR_NAMES)
+_FIELD_FILTER_OPERATORS = frozenset(_FIELD_FILTER_OPERATOR_NAMES)
+_BSON_QUERY_TYPE_CODES = {
+    -1: "minKey",
+    1: "double",
+    2: "string",
+    3: "object",
+    4: "array",
+    5: "binData",
+    6: "undefined",
+    7: "objectId",
+    8: "bool",
+    9: "date",
+    10: "null",
+    11: "regex",
+    12: "dbPointer",
+    13: "javascript",
+    14: "symbol",
+    15: "javascriptWithScope",
+    16: "int",
+    17: "timestamp",
+    18: "long",
+    19: "decimal",
+    127: "maxKey",
+}
+_BSON_QUERY_TYPE_ALIASES = frozenset(
+    tuple(_BSON_QUERY_TYPE_CODES.values()) + ("number",)
+)
+_SIGNED_INT64_MIN = -(2**63)
+_SIGNED_INT64_MAX = 2**63 - 1
+_SIGNED_INT32_MAX = 2**31 - 1
 
 
 def _large_numeric_ratio(key):
@@ -456,6 +489,57 @@ def _get_nested(doc, path, default=_MISSING):
     return current
 
 
+def _is_query_array_index(part):
+    return part == "0" or (
+        part
+        and part[0] in "123456789"
+        and all("0" <= character <= "9" for character in part)
+    )
+
+
+def _query_path_match_candidates(value, parts):
+    """Resolve values plus whether a numeric index selected the endpoint."""
+
+    if not parts:
+        return [(value, False)]
+
+    part = parts[0]
+    if isinstance(value, Mapping):
+        if part not in value:
+            return [(_MISSING, False)]
+        if len(parts) == 1:
+            return [(value[part], False)]
+        return _query_path_match_candidates(value[part], parts[1:])
+
+    if isinstance(value, (list, tuple)):
+        candidates = []
+        if _is_query_array_index(part):
+            index = int(part)
+            if index < len(value):
+                if len(parts) == 1:
+                    candidates.append((value[index], True))
+                elif isinstance(value[index], (Mapping, list, tuple)):
+                    candidates.extend(
+                        _query_path_match_candidates(value[index], parts[1:])
+                    )
+
+        for member in value:
+            if isinstance(member, Mapping):
+                candidates.extend(_query_path_match_candidates(member, parts))
+        return candidates
+
+    return [(_MISSING, False)]
+
+
+def _query_path_candidates(value, parts):
+    """Resolve query paths through documents and arrays without flattening endpoints."""
+
+    return [
+        candidate
+        for candidate, _indexed_endpoint in _query_path_match_candidates(value, parts)
+    ]
+
+
 def _values_equal(actual, expected):
     """Compare values recursively with BSON scalar equality semantics."""
 
@@ -463,7 +547,7 @@ def _values_equal(actual, expected):
         return len(actual) == len(expected) and all(
             _values_equal(left, right) for left, right in zip(actual, expected)
         )
-    if isinstance(actual, dict) and isinstance(expected, dict):
+    if isinstance(actual, Mapping) and isinstance(expected, Mapping):
         actual_items = list(actual.items())
         expected_items = list(expected.items())
         return len(actual_items) == len(expected_items) and all(
@@ -483,6 +567,14 @@ def _value_matches(actual, expected):
     return _values_equal(actual, expected)
 
 
+def _query_values_equal(actual, expected, exact=False):
+    """Apply MongoDB's null-equals-missing rule at query boundaries."""
+
+    if actual is _MISSING:
+        return expected is None
+    return (_values_equal if exact else _value_matches)(actual, expected)
+
+
 def _sqlite_unique_token(data, field):
     """Return the same lossless unique token used by Python validation."""
     document = _json_loads(data)
@@ -495,7 +587,7 @@ def _sqlite_unique_token(data, field):
 
 def _simple_scalar_equality(filter_doc):
     """Return one SQL-safe equality pair, or ``None`` for richer filters."""
-    if not isinstance(filter_doc, dict) or len(filter_doc) != 1:
+    if not isinstance(filter_doc, Mapping) or len(filter_doc) != 1:
         return None
     field, expected = next(iter(filter_doc.items()))
     if (
@@ -503,7 +595,7 @@ def _simple_scalar_equality(filter_doc):
         or field.startswith("$")
         or field == "_id"
         or expected is None
-        or isinstance(expected, (dict, list, tuple))
+        or isinstance(expected, (Mapping, list, tuple))
         or not isinstance(expected, (bool, int, float, str))
     ):
         return None
@@ -540,12 +632,12 @@ def _reject_remote_unique_values(documents, specs):
                 )
 
 
-def _comparison_matches(actual, operand, comparison):
+def _comparison_matches(actual, operand, comparison, exact=False):
     operand_identity = bson_identity_key(operand)
     operand_order = bson_scalar_sort_key(operand)
     if operand_identity is None or operand_order is None:
         return False
-    values = actual if isinstance(actual, list) else [actual]
+    values = actual if isinstance(actual, list) and not exact else [actual]
     for value in values:
         value_identity = bson_identity_key(value)
         value_order = bson_scalar_sort_key(value)
@@ -573,7 +665,7 @@ def _comparison_matches(actual, operand, comparison):
     return False
 
 
-def _regex_matches(actual, pattern, options=""):
+def _regex_matches(actual, pattern, options="", exact=False):
     if not isinstance(options, str) or any(option not in "imsxu" for option in options):
         raise OperationFailure("$options supports only i, m, s, u, and x")
     flags = 0
@@ -593,7 +685,7 @@ def _regex_matches(actual, pattern, options=""):
         if option in str(options):
             flags |= flag
     regex_identity = ("regex", (pattern, regex_flags_text(flags)))
-    values = actual if isinstance(actual, list) else [actual]
+    values = actual if isinstance(actual, list) and not exact else [actual]
     if any(
         is_bson_regex(value) and bson_identity_key(value) == regex_identity
         for value in values
@@ -609,15 +701,236 @@ def _regex_matches(actual, pattern, options=""):
     )
 
 
+def _query_integer(value, operator, minimum=None, maximum=None, truncate=False):
+    """Return one finite integral BSON number for a query operator."""
+
+    if not is_bson_number(value):
+        raise OperationFailure("{0} requires numeric values".format(operator), code=2)
+    try:
+        decimal_value = bson_number_decimal(value)
+        if not decimal_value.is_finite():
+            raise ValueError
+        integer = int(decimal_value)
+    except (ArithmeticError, TypeError, ValueError, OverflowError) as error:
+        raise OperationFailure(
+            "{0} requires finite integral values".format(operator), code=2
+        ) from error
+    if not truncate and decimal_value != integer:
+        raise OperationFailure("{0} requires integral values".format(operator), code=2)
+    if minimum is not None and integer < minimum:
+        raise OperationFailure(
+            "{0} value is below the supported range".format(operator), code=2
+        )
+    if maximum is not None and integer > maximum:
+        raise OperationFailure(
+            "{0} value is above the supported range".format(operator), code=2
+        )
+    return integer
+
+
+def _normalize_size_operand(operand):
+    return _query_integer(
+        operand,
+        "$size",
+        minimum=0,
+        maximum=_SIGNED_INT32_MAX,
+    )
+
+
+def _normalize_mod_operand(operand):
+    if not isinstance(operand, (list, tuple)) or len(operand) != 2:
+        raise OperationFailure("$mod requires an array of two numbers", code=2)
+    divisor = _query_integer(
+        operand[0],
+        "$mod",
+        minimum=_SIGNED_INT64_MIN,
+        maximum=_SIGNED_INT64_MAX,
+        truncate=True,
+    )
+    remainder = _query_integer(
+        operand[1],
+        "$mod",
+        minimum=_SIGNED_INT64_MIN,
+        maximum=_SIGNED_INT64_MAX,
+        truncate=True,
+    )
+    if divisor == 0:
+        raise OperationFailure("$mod divisor cannot be zero", code=2)
+    return divisor, remainder
+
+
+def _truncating_remainder(dividend, divisor):
+    quotient = abs(dividend) // abs(divisor)
+    if (dividend < 0) != (divisor < 0):
+        quotient = -quotient
+    return dividend - quotient * divisor
+
+
+def _mod_matches(actual, operand, exact=False):
+    divisor, expected_remainder = _normalize_mod_operand(operand)
+    values = actual if isinstance(actual, list) and not exact else [actual]
+    for value in values:
+        if not is_bson_number(value):
+            continue
+        try:
+            decimal_value = bson_number_decimal(value)
+            if not decimal_value.is_finite():
+                continue
+            dividend = int(decimal_value)
+        except (ArithmeticError, TypeError, ValueError, OverflowError):
+            continue
+        if not _SIGNED_INT64_MIN <= dividend <= _SIGNED_INT64_MAX:
+            continue
+        if _truncating_remainder(dividend, divisor) == expected_remainder:
+            return True
+    return False
+
+
+def _normalize_type_operand(operand):
+    values = operand if isinstance(operand, (list, tuple)) else [operand]
+    if not values:
+        raise OperationFailure("$type must match at least one type", code=9)
+
+    aliases = []
+    for value in values:
+        if isinstance(value, str):
+            if value not in _BSON_QUERY_TYPE_ALIASES:
+                raise OperationFailure(
+                    "Unknown BSON type alias: {0}".format(value), code=2
+                )
+            alias = value
+        elif is_bson_number(value):
+            code = _query_integer(value, "$type")
+            if code not in _BSON_QUERY_TYPE_CODES:
+                raise OperationFailure(
+                    "Invalid numerical BSON type code: {0}".format(code), code=2
+                )
+            alias = _BSON_QUERY_TYPE_CODES[code]
+        else:
+            raise OperationFailure(
+                "$type must be represented as a number or a string", code=14
+            )
+        if alias not in aliases:
+            aliases.append(alias)
+    return frozenset(aliases)
+
+
+def _bson_query_type_names(value):
+    if isinstance(value, Mapping):
+        return frozenset(("object",))
+    if isinstance(value, (list, tuple)):
+        return frozenset(("array",))
+
+    identity = bson_identity_key(value)
+    if identity is None:
+        return frozenset()
+    family = identity[0]
+    if family == "number":
+        if _DECIMAL128 is not None and isinstance(value, _DECIMAL128):
+            exact = "decimal"
+        elif isinstance(value, float):
+            exact = "double"
+        elif _SIGNED_INT32_MAX >= value >= -(2**31):
+            exact = "int"
+        else:
+            exact = "long"
+        return frozenset(("number", exact))
+    return frozenset(
+        (
+            {
+                "binary": "binData",
+                "boolean": "bool",
+                "datetime": "date",
+                "objectid": "objectId",
+            }.get(family, family),
+        )
+    )
+
+
+def _type_matches(actual, operand, exact=False):
+    requested = _normalize_type_operand(operand)
+    if requested.intersection(_bson_query_type_names(actual)):
+        return True
+    return (
+        not exact
+        and isinstance(actual, list)
+        and any(requested.intersection(_bson_query_type_names(item)) for item in actual)
+    )
+
+
+def _elem_match_matches(actual, operand):
+    if not isinstance(actual, list):
+        return False
+    if not operand:
+        return any(isinstance(item, (Mapping, list, tuple)) for item in actual)
+    operator_expression = any(key in _FIELD_FILTER_OPERATORS for key in operand)
+    if operator_expression:
+        return any(_field_matches(item, operand, exact=True) for item in actual)
+    return any(
+        isinstance(item, Mapping)
+        and matches_filter(item, operand)
+        or isinstance(item, (list, tuple))
+        and matches_filter(item, operand, _array_document=True)
+        for item in actual
+    )
+
+
+def _field_path_matches(candidates, expected, exact=False, indexed_endpoints=None):
+    if indexed_endpoints is None:
+        indexed_endpoints = [False] * len(candidates)
+    if len(candidates) == 1:
+        return _field_matches(
+            candidates[0],
+            expected,
+            exact=exact or indexed_endpoints[0],
+        )
+    if not isinstance(expected, Mapping) or not any(
+        str(key).startswith("$") for key in expected
+    ):
+        return any(
+            _field_matches(
+                candidate,
+                expected,
+                exact=exact or indexed_endpoint,
+            )
+            for candidate, indexed_endpoint in zip(candidates, indexed_endpoints)
+        )
+
+    options = expected.get("$options")
+    for operator, operand in expected.items():
+        if operator == "$options":
+            continue
+        clause = {operator: operand}
+        if operator == "$regex" and options is not None:
+            clause["$options"] = options
+        matches = (
+            _field_matches(
+                candidate,
+                clause,
+                exact=exact or indexed_endpoint,
+            )
+            for candidate, indexed_endpoint in zip(candidates, indexed_endpoints)
+        )
+        negative = operator in ("$ne", "$nin", "$not") or (
+            operator == "$exists" and not bool(operand)
+        )
+        if not (all(matches) if negative else any(matches)):
+            return False
+    return True
+
+
 def _field_matches(actual, expected, exact=False):
     exists = actual is not _MISSING
-    equality = _values_equal if exact else _value_matches
-    if not isinstance(expected, dict) or not any(
+
+    def equality(left, right):
+        return _query_values_equal(left, right, exact=exact)
+
+    if not isinstance(expected, Mapping) or not any(
         str(key).startswith("$") for key in expected
     ):
         if is_bson_regex(expected):
-            return exists and _regex_matches(actual, expected)
-        return exists and equality(actual, expected)
+            return exists and _regex_matches(actual, expected, exact=exact)
+        return equality(actual, expected)
 
     options = expected.get("$options", "")
     for operator, operand in expected.items():
@@ -629,34 +942,32 @@ def _field_matches(actual, expected, exact=False):
                 return False
         elif operator == "$gt":
             if not exists or not _comparison_matches(
-                actual, operand, lambda a, b: a > b
+                actual, operand, lambda a, b: a > b, exact=exact
             ):
                 return False
         elif operator == "$gte":
             if not exists or not _comparison_matches(
-                actual, operand, lambda a, b: a >= b
+                actual, operand, lambda a, b: a >= b, exact=exact
             ):
                 return False
         elif operator == "$lt":
             if not exists or not _comparison_matches(
-                actual, operand, lambda a, b: a < b
+                actual, operand, lambda a, b: a < b, exact=exact
             ):
                 return False
         elif operator == "$lte":
             if not exists or not _comparison_matches(
-                actual, operand, lambda a, b: a <= b
+                actual, operand, lambda a, b: a <= b, exact=exact
             ):
                 return False
         elif operator == "$ne":
-            if (not exists and operand is None) or (
-                exists and equality(actual, operand)
-            ):
+            if equality(actual, operand):
                 return False
         elif operator == "$in":
             values = operand if isinstance(operand, (list, tuple)) else [operand]
-            if not exists or not any(
+            if not any(
                 (
-                    _regex_matches(actual, item)
+                    _regex_matches(actual, item, exact=exact)
                     if is_bson_regex(item)
                     else equality(actual, item)
                 )
@@ -665,70 +976,103 @@ def _field_matches(actual, expected, exact=False):
                 return False
         elif operator == "$nin":
             values = operand if isinstance(operand, (list, tuple)) else [operand]
-            if (not exists and any(item is None for item in values)) or (
-                exists
-                and any(
-                    (
-                        _regex_matches(actual, item)
-                        if is_bson_regex(item)
-                        else equality(actual, item)
-                    )
-                    for item in values
+            if any(
+                (
+                    _regex_matches(actual, item, exact=exact)
+                    if is_bson_regex(item)
+                    else equality(actual, item)
                 )
+                for item in values
             ):
                 return False
         elif operator == "$all":
-            actual_values = actual if isinstance(actual, list) else [actual]
+            actual_values = (
+                actual if isinstance(actual, list) and not exact else [actual]
+            )
             if not operand or not all(
                 any(
                     (
-                        _regex_matches(item, value)
-                        if is_bson_regex(value)
-                        else _values_equal(item, value)
+                        _elem_match_matches(actual, value["$elemMatch"])
+                        if isinstance(value, Mapping) and set(value) == {"$elemMatch"}
+                        else (
+                            _regex_matches(item, value, exact=exact)
+                            if is_bson_regex(value)
+                            else _query_values_equal(item, value, exact=True)
+                        )
                     )
                     for item in actual_values
                 )
                 for value in operand
             ):
                 return False
+        elif operator == "$elemMatch":
+            if not exists or not _elem_match_matches(actual, operand):
+                return False
         elif operator == "$regex":
-            if not exists or not _regex_matches(actual, operand, options):
+            if not exists or not _regex_matches(actual, operand, options, exact=exact):
                 return False
         elif operator == "$not":
             nested = (
                 operand
-                if isinstance(operand, dict)
+                if isinstance(operand, Mapping)
                 else {("$regex" if is_bson_regex(operand) else "$eq"): operand}
             )
-            if exists and _field_matches(actual, nested, exact=exact):
+            if _field_matches(actual, nested, exact=exact):
                 return False
         elif operator == "$eq":
-            if not exists or not equality(actual, operand):
+            if not equality(actual, operand):
+                return False
+        elif operator == "$mod":
+            if not exists or not _mod_matches(actual, operand, exact=exact):
+                return False
+        elif operator == "$size":
+            if (
+                not exists
+                or not isinstance(actual, list)
+                or len(actual) != _normalize_size_operand(operand)
+            ):
+                return False
+        elif operator == "$type":
+            if not exists or not _type_matches(actual, operand, exact=exact):
                 return False
         else:
             return False
     return True
 
 
-def matches_filter(doc, filter_doc):
+def matches_filter(doc, filter_doc, _array_document=False):
     if not filter_doc:
         return True
-    if not isinstance(filter_doc, dict):
+    if not isinstance(filter_doc, Mapping):
         return False
 
     for key, expected in filter_doc.items():
         if key == "$and":
-            if not all(matches_filter(doc, spec) for spec in expected):
+            if not all(matches_filter(doc, spec, _array_document) for spec in expected):
                 return False
         elif key == "$or":
-            if not any(matches_filter(doc, spec) for spec in expected):
+            if not any(matches_filter(doc, spec, _array_document) for spec in expected):
                 return False
         elif key == "$nor":
-            if any(matches_filter(doc, spec) for spec in expected):
+            if any(matches_filter(doc, spec, _array_document) for spec in expected):
                 return False
         else:
-            actual = _get_nested(doc, key)
-            if not _field_matches(actual, expected, exact=key == "_id"):
+            parts = key.split(".")
+            resolved = (
+                [(_MISSING, False)]
+                if _array_document
+                and isinstance(doc, (list, tuple))
+                and not _is_query_array_index(parts[0])
+                else _query_path_match_candidates(doc, parts)
+            )
+            candidates = [candidate for candidate, _indexed in resolved]
+            indexed_endpoints = [indexed for _candidate, indexed in resolved]
+            if not _field_path_matches(
+                candidates,
+                expected,
+                exact=key == "_id",
+                indexed_endpoints=indexed_endpoints,
+            ):
                 return False
     return True
 
@@ -820,14 +1164,48 @@ def _validate_field_filter_operators(expression):
             operand, (list, tuple)
         ):
             raise OperationFailure("{0} requires an array".format(operator))
-        if operator in ("$all", "$in", "$nin"):
-            if any(isinstance(item, Mapping) and "$regex" in item for item in operand):
+        if operator in ("$in", "$nin"):
+            nested_operator_documents = [
+                item
+                for item in operand
+                if isinstance(item, Mapping)
+                and any(str(key).startswith("$") for key in item)
+            ]
+            if any("$regex" in item for item in nested_operator_documents):
                 raise OperationFailure(
                     "{0} accepts regex values, not $regex operator documents".format(
                         operator
-                    )
+                    ),
+                    code=2,
+                )
+            if nested_operator_documents:
+                raise OperationFailure(
+                    "{0} cannot contain nested query operator documents".format(
+                        operator
+                    ),
+                    code=2,
                 )
             _validate_regex_literals(operand)
+        if operator == "$all":
+            for item in operand:
+                nested_operators = (
+                    [key for key in item if str(key).startswith("$")]
+                    if isinstance(item, Mapping)
+                    else []
+                )
+                if not nested_operators:
+                    continue
+                if set(item) != {"$elemMatch"}:
+                    if "$regex" in item:
+                        raise OperationFailure(
+                            "$all accepts regex values, not $regex operator documents",
+                            code=2,
+                        )
+                    raise OperationFailure(
+                        "$all cannot contain nested query operator documents",
+                        code=2,
+                    )
+                _validate_elem_match_operand(item["$elemMatch"])
         if operator == "$regex":
             _validate_regex_query_operand(operand, expression.get("$options", ""))
         if operator == "$options" and "$regex" not in expression:
@@ -840,13 +1218,32 @@ def _validate_field_filter_operators(expression):
             and any(str(key).startswith("$") for key in operand)
         ):
             _validate_field_filter_operators(operand)
+        if operator == "$elemMatch":
+            _validate_elem_match_operand(operand)
+        if operator == "$mod":
+            _normalize_mod_operand(operand)
+        if operator == "$size":
+            _normalize_size_operand(operand)
+        if operator == "$type":
+            _normalize_type_operand(operand)
+
+
+def _validate_elem_match_operand(operand):
+    if not isinstance(operand, Mapping):
+        raise OperationFailure("$elemMatch requires a query document", code=2)
+    if any(key in _LOGICAL_FILTER_OPERATORS for key in operand):
+        validate_filter_operators(operand)
+    elif any(str(key).startswith("$") for key in operand):
+        _validate_field_filter_operators(operand)
+    else:
+        validate_filter_operators(operand)
 
 
 def validate_filter_operators(filter_doc):
     """Reject operators the shared Python matcher cannot evaluate safely."""
 
     if not isinstance(filter_doc, Mapping):
-        raise OperationFailure("Filter must be a query document")
+        raise OperationFailure("Filter must be a query document", code=14)
 
     for key, expected in filter_doc.items():
         if not isinstance(key, str):
@@ -870,6 +1267,15 @@ def validate_filter_operators(filter_doc):
             _validate_field_filter_operators(expected)
         else:
             _validate_regex_literals(expected)
+
+
+def query_operator_capabilities():
+    """Return the exact query operators handled by the shared matcher."""
+
+    return {
+        "logical": _LOGICAL_FILTER_OPERATOR_NAMES,
+        "field": _FIELD_FILTER_OPERATOR_NAMES,
+    }
 
 
 def _validate_regex_field_expression(expression):
@@ -917,7 +1323,7 @@ def validate_regex_filter(filter_doc):
 
 
 def _filter_references_id(filter_doc):
-    if not isinstance(filter_doc, dict):
+    if not isinstance(filter_doc, Mapping):
         return False
     if "_id" in filter_doc:
         return True
@@ -926,14 +1332,14 @@ def _filter_references_id(filter_doc):
         for operator in ("$and", "$or", "$nor")
         for item in (
             filter_doc.get(operator, [])
-            if isinstance(filter_doc.get(operator, []), list)
+            if isinstance(filter_doc.get(operator, []), (list, tuple))
             else []
         )
     )
 
 
 def _id_condition_requires_legacy_scan(condition):
-    if not isinstance(condition, dict):
+    if not isinstance(condition, Mapping):
         return _requires_legacy_id_scan(condition)
     if not any(str(key).startswith("$") for key in condition):
         return _requires_legacy_id_scan(condition)
@@ -948,7 +1354,7 @@ def _id_condition_requires_legacy_scan(condition):
 
 
 def _filter_requires_legacy_id_scan(filter_doc):
-    if not isinstance(filter_doc, dict):
+    if not isinstance(filter_doc, Mapping):
         return False
     if "_id" in filter_doc and _id_condition_requires_legacy_scan(filter_doc["_id"]):
         return True
@@ -957,7 +1363,7 @@ def _filter_requires_legacy_id_scan(filter_doc):
         for operator in ("$and", "$or", "$nor")
         for item in (
             filter_doc.get(operator, [])
-            if isinstance(filter_doc.get(operator, []), list)
+            if isinstance(filter_doc.get(operator, []), (list, tuple))
             else []
         )
     )
@@ -973,9 +1379,9 @@ def _postfilter_id_candidates(documents, filter_doc, fallback):
         document for document in documents if matches_filter(document, filter_doc)
     ]
     direct_equality = (
-        isinstance(filter_doc, dict)
+        isinstance(filter_doc, Mapping)
         and set(filter_doc) == {"_id"}
-        and not isinstance(filter_doc["_id"], dict)
+        and not isinstance(filter_doc["_id"], Mapping)
     )
     if direct_equality and matches:
         return matches
@@ -988,8 +1394,10 @@ def _postfilter_id_candidates(documents, filter_doc, fallback):
 
 def requires_python_filter(filter_doc):
     """Return whether SQL JSON scalar comparison could change query meaning."""
-    if not filter_doc or not isinstance(filter_doc, dict):
+    if not filter_doc or not isinstance(filter_doc, Mapping):
         return False
+    if not isinstance(filter_doc, dict):
+        return True
     if contains_extended_value(filter_doc):
         return True
     for field, expected in filter_doc.items():
@@ -1005,10 +1413,14 @@ def requires_python_filter(filter_doc):
         else:
             if field.startswith("$"):
                 return True
-            if field != "_id" and not isinstance(expected, dict):
+            if "." in field:
+                return True
+            if field != "_id" and not isinstance(expected, Mapping):
                 # A JSON scalar comparison cannot also see members of array fields.
                 return True
-            if isinstance(expected, dict):
+            if isinstance(expected, Mapping):
+                if not isinstance(expected, dict):
+                    return True
                 if not any(str(operator).startswith("$") for operator in expected):
                     # Literal embedded-document equality is not an operator
                     # expression and TinyDB/SQL parsers otherwise treat its keys
@@ -1018,13 +1430,17 @@ def requires_python_filter(filter_doc):
                     operator in expected
                     for operator in (
                         "$eq",
+                        "$elemMatch",
                         "$ne",
                         "$in",
                         "$nin",
                         "$all",
+                        "$mod",
                         "$regex",
                         "$not",
                         "$options",
+                        "$size",
+                        "$type",
                     )
                 ):
                     return True
@@ -1711,9 +2127,9 @@ class SQLiteTableBackend(TableBackend):
                 ),
             )
             direct_id_equality = (
-                isinstance(filter_doc, dict)
+                isinstance(filter_doc, Mapping)
                 and set(filter_doc) == {"_id"}
-                and not isinstance(filter_doc["_id"], dict)
+                and not isinstance(filter_doc["_id"], Mapping)
             )
             if direct_id_equality and documents:
                 return documents
@@ -1834,6 +2250,8 @@ class SQLiteTableBackend(TableBackend):
         if equality is None:
             return None
         field, _ = equality
+        if "." in field:
+            return None
         if not any(spec.field == field for spec in self.get_index_specs(collection)):
             return None
 
@@ -2940,9 +3358,9 @@ class RemoteSQLTableBackend(TableBackend):
         if not filter_doc:
             return self._all_docs_unfiltered(collection)
         if (
-            isinstance(filter_doc, dict)
+            isinstance(filter_doc, Mapping)
             and set(filter_doc.keys()) == {"_id"}
-            and not isinstance(filter_doc["_id"], dict)
+            and not isinstance(filter_doc["_id"], Mapping)
             and not is_bson_regex(filter_doc["_id"])
         ):
             doc = self._find_by_id(collection, filter_doc["_id"])
