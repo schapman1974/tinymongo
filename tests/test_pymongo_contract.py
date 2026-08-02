@@ -157,6 +157,7 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
     }
     assert capabilities["query_operators"] == {
         "logical": ("$and", "$or", "$nor"),
+        "ignored": ("$comment",),
         "field": (
             "$all",
             "$elemMatch",

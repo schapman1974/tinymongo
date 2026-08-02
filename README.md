@@ -189,6 +189,13 @@ You can select another backend with the `backend` argument:
     )
 ```
 
+`TinyMongoClient` and `AsyncTinyMongoClient` also accept
+`tinymongo_folder=` as an alias for `foldername`. If a non-default
+`foldername` is also supplied, the two values must agree. Unknown constructor
+keywords raise `TypeError` instead of being silently ignored. The other
+supported backend configuration keywords are `threads`, `storage_uri`,
+`duckdb_config`, and `dsn`.
+
 Parquet can also store collection files in object storage by passing
 `storage_uri` or setting `TINYMONGO_STORAGE_URI`. Object-storage Parquet is
 experimental and currently uses one Parquet file per collection, so
@@ -418,15 +425,19 @@ Query support includes equality (including scalar matches against array
 members), nested document paths, `$gt`, `$gte`, `$lt`, `$lte`, `$ne`,
 `$nin`, `$in`, `$all`, `$and`, `$or`, `$nor`, `$not`, `$regex`,
 case-insensitive `$options`, `$exists`, `$size`, `$elemMatch`, `$type`, and
-`$mod`. `$size` matches an exact array length, while `$elemMatch` requires one
-array member to satisfy the complete nested condition. `$type` accepts MongoDB
-type names, numeric codes, or a list of either; `$mod` follows MongoDB's
+`$mod`. Top-level `$comment` metadata is accepted and ignored while matching.
+`$size` matches an exact array length, while `$elemMatch` requires one array
+member to satisfy the complete nested condition. `$type` accepts MongoDB type
+names, numeric codes, or a list of either; `$mod` follows MongoDB's
 integer-truncation and array-member matching rules.
 
 Every CRUD method that accepts a filter validates it before reading or changing
 storage. Unsupported or misspelled `$`-prefixed query operators raise
 `TinyMongoNotSupportedError` instead of silently returning no matches, and
 malformed operands for recognized operators raise `OperationFailure`.
+`$not` accepts a non-empty query document or a compiled native/BSON regex;
+bare strings, numbers, lists, and empty documents raise `OperationFailure`
+with MongoDB error code `2`.
 
 MongoDB treats missing fields differently depending on the negated value.
 `{"field": {"$ne": None}}` and `$nin` lists containing `None` exclude
@@ -762,6 +773,7 @@ client = TinyMongoClient("./data", backend="sqlite")
 capabilities = client.capabilities()
 print(capabilities)
 print(capabilities["query_operators"]["field"])
+print(capabilities["query_operators"]["ignored"])
 print(capabilities["bson_types"]["pymongo"])
 print(client.supports("multiprocess_writes"))
 ```
@@ -770,11 +782,12 @@ The capability map covers persistence, remote and object storage, table-native
 storage, multiprocess writes, native indexes, projections, bulk writes,
 aggregation, query operators, BSON types, sessions, transactions, and change
 streams. `query_operators` separates top-level logical operators from field
-operators. `bson_types` separates dependency-free `native` families from the
-richer `pymongo` types available when the optional BSON extra is installed.
-These values are structured mappings; use `client.supports()` for a Boolean
-feature check or inspect their tuples when selecting a particular operator or
-type. Unknown capability names raise `ValueError` so configuration mistakes are
+operators and accepted-but-ignored metadata operators such as `$comment`.
+`bson_types` separates dependency-free `native` families from the richer
+`pymongo` types available when the optional BSON extra is installed. These
+values are structured mappings; use `client.supports()` for a Boolean feature
+check or inspect their tuples when selecting a particular operator or type.
+Unknown capability names raise `ValueError` so configuration mistakes are
 visible.
 
 For local persistent backends, `multiprocess_writes=True` promises safe writes,

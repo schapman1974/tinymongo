@@ -786,6 +786,23 @@ def _folder_from_mongo_client_args(host, port, kwargs):
     return host
 
 
+def _resolve_tiny_client_folder(foldername, tinymongo_folder):
+    """Resolve the legacy client's documented PyMongo-style folder alias."""
+
+    if tinymongo_folder is None:
+        return foldername
+
+    configured_folder = os.fspath(foldername)
+    aliased_folder = os.fspath(tinymongo_folder)
+
+    if configured_folder != "tinydb" and configured_folder != aliased_folder:
+        raise TypeError(
+            "TinyMongoClient received different values for foldername and "
+            "tinymongo_folder"
+        )
+    return tinymongo_folder
+
+
 def _memory_namespace(foldername):
     """Return an isolated or explicitly shared process-memory namespace."""
     address = str(foldername or "").strip()
@@ -821,8 +838,19 @@ def _engine_write_locked(method):
 class TinyMongoClient(object):
     """Represents the Tiny `db` client"""
 
-    def __init__(self, foldername="tinydb", backend="tinydb", **kwargs):
+    def __init__(
+        self,
+        foldername="tinydb",
+        backend="tinydb",
+        *,
+        tinymongo_folder=None,
+        threads=None,
+        storage_uri=None,
+        duckdb_config=None,
+        dsn=None,
+    ):
         """Initialize container folder and choose a storage backend."""
+        foldername = _resolve_tiny_client_folder(foldername, tinymongo_folder)
         self._foldername = foldername
         self._backend = backend or "tinydb"
         # Reject unknown names at construction instead of waiting for the first
@@ -834,16 +862,14 @@ class TinyMongoClient(object):
         if backend_name == "memory":
             self._memory_namespace, self._shared_memory = _memory_namespace(foldername)
             self._foldername = self._memory_namespace
-        self._threads = kwargs.get("threads")
-        storage_uri = kwargs.get("storage_uri")
+        self._threads = threads
         if backend_name in ("parquet", "parquetv2"):
             if storage_uri is None:
                 storage_uri = os.environ.get("TINYMONGO_STORAGE_URI")
             self._storage_uri = storage_uri or None
         else:
             self._storage_uri = None
-        self._duckdb_config = kwargs.get("duckdb_config")
-        dsn = kwargs.get("dsn")
+        self._duckdb_config = duckdb_config
         if is_remote_sql_backend(backend_name):
             if dsn is None:
                 dsn = self._dsn_from_env(backend_name)
@@ -1453,8 +1479,13 @@ class TinyMongoCollection(object):
     def _validate_index_compatibility(self, spec):
         by_name = self._index_specs.get(spec.name)
         if by_name is not None and by_name != spec:
+            same_key = (by_name.field, by_name.direction) == (
+                spec.field,
+                spec.direction,
+            )
             raise OperationFailure(
-                "An index with the same name or key has different options"
+                "An index with the same name or key has different options",
+                code=85 if same_key else 86,
             )
         if by_name is not None:
             # Preserve idempotent retries for legacy catalogs which may still
@@ -1592,7 +1623,7 @@ class TinyMongoCollection(object):
     def drop_index(self, key):
         """Drop a durable index by its name or legacy field name."""
         if key in ("_id", "_id_"):
-            raise OperationFailure("The _id index cannot be dropped")
+            raise OperationFailure("The _id index cannot be dropped", code=72)
         if self.parent.engine is not None:
             return self.parent.engine.drop_index(self.tablename, key)
 
@@ -1603,7 +1634,10 @@ class TinyMongoCollection(object):
             self._refresh_table()
             spec = self._find_index_spec(key)
             if spec is None:
-                raise OperationFailure("Index not found: {0}".format(key))
+                raise OperationFailure(
+                    "Index not found: {0}".format(key),
+                    code=27,
+                )
             catalog = self.parent.tinydb.table(INDEX_CATALOG_TABLE)
             self._set_storage_merge_writes(False)
             try:

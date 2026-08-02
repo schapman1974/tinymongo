@@ -129,6 +129,20 @@ with the follow-up audit of his
 - [x] **TM-021:** Raise PyMongo-compatible `WriteError` code `2` when
   `$addToSet` targets a null or non-array field, without partially applying the
   update.
+
+#### Mike's [TM-022 through TM-025 follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5156142848)
+
+- [x] **TM-022:** Accept top-level `$comment` metadata and ignore it while
+  matching, including filters that contain only a comment.
+- [x] **TM-023:** Add MongoDB-compatible codes to query-validation, regex, and
+  index `OperationFailure` paths.
+- [x] **TM-024:** Honor `tinymongo_folder` as the legacy sync/async client's
+  `foldername` alias, detect conflicting values, and reject unknown constructor
+  keywords instead of silently ignoring them.
+- [x] **TM-025:** Reject bare scalar, list, and empty-document `$not` operands
+  with `OperationFailure` code `2` while retaining non-empty query-document and
+  compiled-regex forms.
+
 - [ ] **Remote SQL numeric uniqueness:** Persist canonical BSON numeric tokens
   for remote unique indexes so native constraints can enforce exact
   cross-process equality for every int/float representation; Decimal128

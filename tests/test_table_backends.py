@@ -319,8 +319,8 @@ def test_matches_filter_operator_edges():
     assert not matches_filter(doc, {"name": {"$nin": ["Ada"]}})
     assert matches_filter(doc, {"name": {"$regex": "^A"}})
     assert not matches_filter(doc, {"name": {"$regex": "^Z"}})
-    assert matches_filter(doc, {"name": {"$not": "Grace"}})
-    assert not matches_filter(doc, {"name": {"$not": "Ada"}})
+    assert matches_filter(doc, {"name": {"$not": {"$eq": "Grace"}}})
+    assert not matches_filter(doc, {"name": {"$not": {"$eq": "Ada"}}})
     assert matches_filter(doc, {"nested.x": 2})
     assert not matches_filter(doc, {"tags": "missing"})
     assert not matches_filter(doc, {"missing": {"$in": ["Ada"]}})
@@ -464,8 +464,9 @@ def test_table_backend_abstract_methods(tmp_path):
     )
     assert backend.drop_index("anything", "email_nonunique") is None
     assert backend.drop_index("anything", "email") is None
-    with pytest.raises(OperationFailure, match="Index not found"):
+    with pytest.raises(OperationFailure, match="Index not found") as missing:
         backend.drop_index("anything", "missing")
+    assert missing.value.code == 27
     assert backend.drop_index("anything", "field") is None
     assert backend.list_indexes("anything") == [{"name": "_id_", "key": [("_id", 1)]}]
     with pytest.raises(NotImplementedError):
@@ -1284,8 +1285,9 @@ def test_postgres_indexes_are_native_durable_unique_and_droppable(monkeypatch):
     backend.drop_index("users", "email_1")
     assert backend.list_indexes("users") == [{"name": "_id_", "key": [("_id", 1)]}]
     assert any(sql.startswith("DROP INDEX IF EXISTS") for sql in store.index_ddl)
-    with pytest.raises(OperationFailure, match="Index not found"):
+    with pytest.raises(OperationFailure, match="Index not found") as missing:
         backend.drop_index("users", "email")
+    assert missing.value.code == 27
 
 
 def test_remote_unique_creation_preflights_and_drop_cleans_catalog(monkeypatch):
@@ -1305,8 +1307,9 @@ def test_remote_unique_creation_preflights_and_drop_cleans_catalog(monkeypatch):
     assert not store.index_ddl
 
     backend.create_index("users", parse_index_spec("email"))
-    with pytest.raises(OperationFailure, match="different options"):
+    with pytest.raises(OperationFailure, match="different options") as conflict:
         backend.create_index("users", parse_index_spec("email", unique=True))
+    assert conflict.value.code == 85
     assert backend.drop_collection("users") is True
     assert not store.indexes
 
