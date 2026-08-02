@@ -1,9 +1,11 @@
 """Query-validation and write-error contracts shared by every target."""
 
+import re
 from collections import UserDict
 
 import pytest
 
+from tinymongo.bson_types import regex_type
 from tinymongo.errors import DuplicateKeyError as TinyMongoDuplicateKeyError
 from tinymongo.errors import OperationFailure as TinyMongoOperationFailure
 from tinymongo.errors import TinyMongoNotSupportedError
@@ -457,6 +459,91 @@ def test_recognized_query_operators_reject_malformed_operands(contract_target):
     for query in malformed_queries:
         with pytest.raises(_OPERATION_ERRORS):
             list(collection.find(query))
+
+
+def test_comment_is_accepted_and_ignored_while_matching(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "first", "value": 1},
+            {"_id": "second", "value": 2},
+        ]
+    )
+
+    assert _ids(collection.find({"$comment": "application context"})) == [
+        "first",
+        "second",
+    ]
+    assert _ids(collection.find({"value": 2, "$comment": "application context"})) == [
+        "second"
+    ]
+
+
+@pytest.mark.parametrize("operand", ["text", 7, ["text"], {}, {"literal": 1}])
+def test_not_rejects_non_regex_and_empty_operands_with_code_2(
+    contract_target,
+    operand,
+):
+    collection = contract_target.collection
+    collection.insert_one({"_id": "original", "value": "text"})
+
+    with pytest.raises(_OPERATION_ERRORS) as caught:
+        list(collection.find({"value": {"$not": operand}}))
+
+    assert caught.value.code == 2
+
+
+def test_not_accepts_operator_documents_and_compiled_regexes(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "text", "value": "text"},
+            {"_id": "other", "value": "other"},
+            {"_id": "missing"},
+        ]
+    )
+
+    expected = ["missing", "other"]
+    assert _ids(collection.find({"value": {"$not": {"$eq": "text"}}})) == expected
+    assert _ids(collection.find({"value": {"$not": {"$regex": "^text$"}}})) == expected
+    assert _ids(collection.find({"value": {"$not": re.compile("^text$")}})) == expected
+    bson_regex = regex_type()
+    if bson_regex is not None:
+        assert (
+            _ids(collection.find({"value": {"$not": bson_regex("^text$")}})) == expected
+        )
+
+
+def test_every_filtering_crud_entrypoint_rejects_invalid_not_operands(
+    contract_target,
+):
+    collection = contract_target.collection
+    original = {"_id": "original", "value": "text"}
+    collection.insert_one(original)
+    operations = (
+        "find",
+        "find_one",
+        "count_documents",
+        "distinct",
+        "update_one",
+        "update_many",
+        "replace_one",
+        "delete_one",
+        "delete_many",
+        "find_one_and_update",
+        "find_one_and_replace",
+        "find_one_and_delete",
+    )
+
+    for operation in operations:
+        with pytest.raises(_OPERATION_ERRORS) as caught:
+            _run_filter_operation(
+                collection,
+                operation,
+                {"value": {"$not": "text"}},
+            )
+        assert caught.value.code == 2
+        assert collection.find_one({"_id": "original"}) == original
 
 
 def test_find_rejects_top_level_and_field_operator_typos(contract_target):

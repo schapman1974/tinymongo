@@ -61,6 +61,7 @@ _REMOTE_UNIQUE_TOKEN_VERSION = 1
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
 _PHYSICAL_ID_PREFIX = "__tinymongo_id_v2__:"
 _LOGICAL_FILTER_OPERATOR_NAMES = ("$and", "$or", "$nor")
+_IGNORED_FILTER_OPERATOR_NAMES = ("$comment",)
 _FIELD_FILTER_OPERATOR_NAMES = (
     "$all",
     "$elemMatch",
@@ -81,6 +82,7 @@ _FIELD_FILTER_OPERATOR_NAMES = (
     "$type",
 )
 _LOGICAL_FILTER_OPERATORS = frozenset(_LOGICAL_FILTER_OPERATOR_NAMES)
+_IGNORED_FILTER_OPERATORS = frozenset(_IGNORED_FILTER_OPERATOR_NAMES)
 _FIELD_FILTER_OPERATORS = frozenset(_FIELD_FILTER_OPERATOR_NAMES)
 _BSON_QUERY_TYPE_CODES = {
     -1: "minKey",
@@ -687,14 +689,27 @@ def _comparison_matches(actual, operand, comparison, exact=False):
     return False
 
 
+def _validate_regex_options(options):
+    if not isinstance(options, str):
+        raise OperationFailure(
+            "$options supports only i, m, s, u, and x",
+            code=2,
+        )
+    if any(option not in "imsxu" for option in options):
+        raise OperationFailure(
+            "$options supports only i, m, s, u, and x",
+            code=51108,
+        )
+
+
 def _regex_matches(actual, pattern, options="", exact=False):
-    if not isinstance(options, str) or any(option not in "imsxu" for option in options):
-        raise OperationFailure("$options supports only i, m, s, u, and x")
+    _validate_regex_options(options)
     flags = 0
     if is_bson_regex(pattern):
         if options and regex_flags_text(pattern.flags):
             raise OperationFailure(
-                "$options cannot be combined with flags embedded in $regex"
+                "$options cannot be combined with flags embedded in $regex",
+                code=2,
             )
         pattern, flags = regex_compile_components(pattern)
     for option, flag in (
@@ -941,6 +956,24 @@ def _field_path_matches(candidates, expected, exact=False, indexed_endpoints=Non
     return True
 
 
+def _normalize_not_operand(operand):
+    """Return a matcher expression for one MongoDB-valid ``$not`` operand."""
+
+    if is_bson_regex(operand):
+        return {"$regex": operand}
+    if not isinstance(operand, Mapping):
+        raise OperationFailure(
+            "$not argument must be a regex or an object",
+            code=2,
+        )
+    if not operand:
+        raise OperationFailure(
+            "$not argument must be a non-empty object",
+            code=2,
+        )
+    return operand
+
+
 def _field_matches(actual, expected, exact=False):
     exists = actual is not _MISSING
 
@@ -1034,11 +1067,7 @@ def _field_matches(actual, expected, exact=False):
             if not exists or not _regex_matches(actual, operand, options, exact=exact):
                 return False
         elif operator == "$not":
-            nested = (
-                operand
-                if isinstance(operand, Mapping)
-                else {("$regex" if is_bson_regex(operand) else "$eq"): operand}
-            )
+            nested = _normalize_not_operand(operand)
             if _field_matches(actual, nested, exact=exact):
                 return False
         elif operator == "$eq":
@@ -1078,6 +1107,8 @@ def matches_filter(doc, filter_doc, _array_document=False):
         elif key == "$nor":
             if any(matches_filter(doc, spec, _array_document) for spec in expected):
                 return False
+        elif key in _IGNORED_FILTER_OPERATORS:
+            continue
         else:
             parts = key.split(".")
             resolved = (
@@ -1106,10 +1137,14 @@ def _validate_regex_literal(value):
         pattern, options = regex_components(value)
     except (TypeError, UnicodeDecodeError) as error:
         raise OperationFailure(
-            "Regular-expression patterns must be valid UTF-8 BSON text"
+            "Regular-expression patterns must be valid UTF-8 BSON text",
+            code=2,
         ) from error
     if "\x00" in pattern:
-        raise OperationFailure("Regular-expression patterns cannot contain NUL")
+        raise OperationFailure(
+            "Regular-expression patterns cannot contain NUL",
+            code=2,
+        )
     if is_native_regex(value) or "l" in options:
         return
     compile_pattern, flags = regex_compile_components(value)
@@ -1117,7 +1152,8 @@ def _validate_regex_literal(value):
         re.compile(compile_pattern, flags)
     except (TypeError, ValueError, re.error) as error:
         raise OperationFailure(
-            "Regular expression is not valid for TinyMongo's Python regex engine"
+            "Regular expression is not valid for TinyMongo's Python regex engine",
+            code=51091,
         ) from error
 
 
@@ -1133,8 +1169,7 @@ def _validate_regex_literals(value):
 
 
 def _regex_query_flags(options):
-    if not isinstance(options, str) or any(option not in "imsxu" for option in options):
-        raise OperationFailure("$options supports only i, m, s, u, and x")
+    _validate_regex_options(options)
     flags = 0
     for option, flag in (
         ("i", re.IGNORECASE),
@@ -1154,18 +1189,26 @@ def _validate_regex_query_operand(operand, options=""):
         _validate_regex_literal(operand)
         if options and regex_flags_text(operand.flags):
             raise OperationFailure(
-                "$options cannot be combined with flags embedded in $regex"
+                "$options cannot be combined with flags embedded in $regex",
+                code=2,
             )
         return
     if not isinstance(operand, str):
-        raise OperationFailure("$regex requires a string or compiled regex value")
+        raise OperationFailure(
+            "$regex requires a string or compiled regex value",
+            code=2,
+        )
     if "\x00" in operand:
-        raise OperationFailure("Regular-expression patterns cannot contain NUL")
+        raise OperationFailure(
+            "Regular-expression patterns cannot contain NUL",
+            code=2,
+        )
     try:
         re.compile(operand, flags)
     except (TypeError, ValueError, re.error) as error:
         raise OperationFailure(
-            "$regex pattern is not valid for TinyMongo's Python regex engine"
+            "$regex pattern is not valid for TinyMongo's Python regex engine",
+            code=51091,
         ) from error
 
 
@@ -1179,13 +1222,17 @@ def _validate_field_filter_operators(expression):
                     "Query operator {0} is not supported by TinyMongo".format(operator)
                 )
             raise OperationFailure(
-                "Field query documents cannot mix operators and literal fields"
+                "Field query documents cannot mix operators and literal fields",
+                code=2,
             )
         _validate_regex_literals(operand)
         if operator in ("$all", "$in", "$nin") and not isinstance(
             operand, (list, tuple)
         ):
-            raise OperationFailure("{0} requires an array".format(operator))
+            raise OperationFailure(
+                "{0} requires an array".format(operator),
+                code=2,
+            )
         if operator in ("$in", "$nin"):
             nested_operator_documents = [
                 item
@@ -1231,15 +1278,15 @@ def _validate_field_filter_operators(expression):
         if operator == "$regex":
             _validate_regex_query_operand(operand, expression.get("$options", ""))
         if operator == "$options" and "$regex" not in expression:
-            raise OperationFailure("$options requires $regex in the same query")
+            raise OperationFailure(
+                "$options requires $regex in the same query",
+                code=2,
+            )
         if operator == "$options":
             _validate_regex_query_operand(expression["$regex"], operand)
-        if (
-            operator == "$not"
-            and isinstance(operand, Mapping)
-            and any(str(key).startswith("$") for key in operand)
-        ):
-            _validate_field_filter_operators(operand)
+        if operator == "$not":
+            nested = _normalize_not_operand(operand)
+            _validate_field_filter_operators(nested)
         if operator == "$elemMatch":
             _validate_elem_match_operand(operand)
         if operator == "$mod":
@@ -1269,14 +1316,17 @@ def validate_filter_operators(filter_doc):
 
     for key, expected in filter_doc.items():
         if not isinstance(key, str):
-            raise OperationFailure("Filter field names must be strings")
+            raise OperationFailure("Filter field names must be strings", code=2)
         if key in _LOGICAL_FILTER_OPERATORS:
             if not isinstance(expected, (list, tuple)) or not expected:
                 raise OperationFailure(
-                    "{0} requires a non-empty array of query documents".format(key)
+                    "{0} requires a non-empty array of query documents".format(key),
+                    code=2,
                 )
             for specification in expected:
                 validate_filter_operators(specification)
+            continue
+        if key in _IGNORED_FILTER_OPERATORS:
             continue
         if key.startswith("$"):
             raise TinyMongoNotSupportedError(
@@ -1296,6 +1346,7 @@ def query_operator_capabilities():
 
     return {
         "logical": _LOGICAL_FILTER_OPERATOR_NAMES,
+        "ignored": _IGNORED_FILTER_OPERATOR_NAMES,
         "field": _FIELD_FILTER_OPERATOR_NAMES,
     }
 
@@ -1315,7 +1366,8 @@ def _validate_regex_field_expression(expression):
             raise OperationFailure(
                 "{0} accepts regex values, not $regex operator documents".format(
                     operator
-                )
+                ),
+                code=2,
             )
         _validate_regex_literals(operand)
     not_operand = expression.get("$not")
@@ -1740,8 +1792,13 @@ class TableBackend(object):
             None,
         )
         if by_name is not None and by_name != spec:
+            same_key = (by_name.field, by_name.direction) == (
+                spec.field,
+                spec.direction,
+            )
             raise OperationFailure(
-                "An index with the same name or key has different options"
+                "An index with the same name or key has different options",
+                code=85 if same_key else 86,
             )
         if by_name is not None:
             # Older releases allowed equivalent specs under different names.
@@ -1780,7 +1837,10 @@ class TableBackend(object):
             if name_or_field in (name, spec.field):
                 indexes.pop(name, None)
                 return None
-        raise OperationFailure("Index not found: {0}".format(name_or_field))
+        raise OperationFailure(
+            "Index not found: {0}".format(name_or_field),
+            code=27,
+        )
 
     def list_indexes(self, collection):
         indexes = [{"name": "_id_", "key": [("_id", 1)]}]
@@ -2635,7 +2695,10 @@ class SQLiteTableBackend(TableBackend):
             None,
         )
         if spec is None:
-            raise OperationFailure("Index not found: {0}".format(name_or_field))
+            raise OperationFailure(
+                "Index not found: {0}".format(name_or_field),
+                code=27,
+            )
         physical_name = self._physical_index_name(collection, spec)
         conn = self._connect()
         try:
@@ -2958,7 +3021,10 @@ class DuckDBTableBackend(TableBackend):
             None,
         )
         if spec is None:
-            raise OperationFailure("Index not found: {0}".format(name_or_field))
+            raise OperationFailure(
+                "Index not found: {0}".format(name_or_field),
+                code=27,
+            )
         conn = self._connect()
         try:
             self._ensure_index_catalog(conn)
@@ -3260,7 +3326,10 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
                 None,
             )
             if spec is None:
-                raise OperationFailure("Index not found: {0}".format(name_or_field))
+                raise OperationFailure(
+                    "Index not found: {0}".format(name_or_field),
+                    code=27,
+                )
             rows = [
                 row
                 for row in self._read_all_rows(INDEX_CATALOG_TABLE)
@@ -4030,7 +4099,10 @@ class RemoteSQLTableBackend(TableBackend):
             None,
         )
         if spec is None:
-            raise OperationFailure("Index not found: {0}".format(name_or_field))
+            raise OperationFailure(
+                "Index not found: {0}".format(name_or_field),
+                code=27,
+            )
 
         conn = self._connect()
         try:

@@ -695,7 +695,7 @@ def test_query_operator_branches_without_mongo(tmp_path):
     assert c.find({"count": {"$gte": 5, "$lte": 10}}).count() == 2
     assert c.find({"name": {"$ne": "alpha"}}).count() == 2
     assert c.find({"name": {"$regex": "^a"}}).count() == 1
-    assert c.find({"name": {"$not": "alpha"}}).count() == 2
+    assert c.find({"name": {"$not": {"$eq": "alpha"}}}).count() == 2
     assert c.find({"count": {"$not": {"$gt": 5}}}).count() == 2
     assert c.find({"tags": {"$in": ["c", "missing"]}}).count() == 1
     assert (

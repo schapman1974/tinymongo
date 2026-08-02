@@ -34,10 +34,11 @@
   value. The value therefore changed from falsey `False` to a truthy structured
   mapping; use `client.supports("aggregation")` for a Boolean check or inspect
   the mapping when selecting individual features.
-- Query capability reporting now enumerates logical and field operators.
-  `bson_types` likewise changed from a Boolean to a structured mapping of
-  dependency-free `native` families and installed optional `pymongo` types;
-  inspect its `pymongo` tuple when detecting optional BSON support.
+- Query capability reporting now enumerates logical, field, and
+  accepted-but-ignored metadata operators. `bson_types` likewise changed from
+  a Boolean to a structured mapping of dependency-free `native` families and
+  installed optional `pymongo` types; inspect its `pymongo` tuple when detecting
+  optional BSON support.
 - Remote SQL unique indexes now materialize versioned canonical BSON token
   digests protected by native constraints, preserving exact int/float identity
   across concurrent PostgreSQL and MariaDB/MySQL writers. Decimal128 and arrays
@@ -57,6 +58,17 @@
 - **TM-021:** Applying `$addToSet` to a null or non-array field now raises
   PyMongo-compatible `WriteError` code `2` instead of a bare `ValueError`, while
   preserving update atomicity.
+- **TM-022:** Top-level `$comment` metadata is accepted and ignored while
+  matching, including filters that contain only a comment.
+- **TM-023:** Query-validation and regex `OperationFailure` exceptions now
+  expose MongoDB-compatible codes, as do conflicting or missing index
+  operations and attempts to drop the `_id` index.
+- **TM-024:** Legacy synchronous and asynchronous clients now honor
+  `tinymongo_folder` as a `foldername` alias, detect conflicting values, and
+  reject unknown constructor keywords instead of silently ignoring them.
+- **TM-025:** `$not` now rejects bare scalars, lists, and empty documents with
+  `OperationFailure` code `2`, while continuing to accept non-empty query
+  documents and compiled native or BSON regexes.
 - Aggregation field references no longer cross a raw array nested directly
   inside another array before reaching the requested field.
 - Aggregation projections preserve source BSON field order for retained fields

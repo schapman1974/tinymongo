@@ -88,6 +88,23 @@ def test_type_names_cover_unregistered_and_decimal_values():
     assert backends.matches_filter({"value": value}, {"value": {"$type": 19}})
 
 
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        ({1: "value"}, "field names must be strings"),
+        ({"$and": []}, "requires a non-empty array"),
+        ({"value": {"$eq": 1, "literal": 1}}, "cannot mix operators"),
+        ({"value": {"$in": 1}}, "requires an array"),
+        ({"value": {"$options": "i"}}, "requires.*regex"),
+    ],
+)
+def test_malformed_query_shapes_use_mongodb_parse_error_code(query, message):
+    with pytest.raises(OperationFailure, match=message) as caught:
+        backends.validate_filter_operators(query)
+
+    assert caught.value.code == 2
+
+
 def test_empty_elem_match_matches_only_container_array_members():
     query = {"value": {"$elemMatch": {}}}
     backends.validate_filter_operators(query)
@@ -227,5 +244,7 @@ def test_get_nested_returns_custom_default_for_missing_paths():
 def test_regex_compatibility_validator_rejects_operator_documents_in_arrays(
     operator,
 ):
-    with pytest.raises(OperationFailure, match="accepts regex values"):
+    with pytest.raises(OperationFailure, match="accepts regex values") as caught:
         backends.validate_regex_filter({"value": {operator: [{"$regex": "^value"}]}})
+
+    assert caught.value.code == 2
