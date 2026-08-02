@@ -2,7 +2,13 @@ import asyncio
 
 import pytest
 
-from tinymongo import AsyncMongoClient, AsyncTinyMongoClient, TinyMongoClient
+from tinymongo import (
+    AsyncMongoClient,
+    AsyncTinyMongoClient,
+    MongoClient,
+    TinyMongoClient,
+)
+from tinymongo.errors import ConfigurationError
 
 
 def test_tiny_client_honors_tinymongo_folder_alias(tmp_path, monkeypatch):
@@ -58,6 +64,44 @@ def test_tiny_clients_reject_unexpected_options(client_class):
         TypeError, match="unexpected keyword argument 'tinymongo_fodler'"
     ):
         client_class(tinymongo_fodler="misspelled")
+
+
+@pytest.mark.parametrize("client_class", [MongoClient, AsyncMongoClient])
+def test_pymongo_shaped_clients_reject_unknown_options_immediately(
+    tmp_path,
+    monkeypatch,
+    client_class,
+):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigurationError, match="Unknown option: tinymongo_fodler"):
+        client_class(tinymongo_fodler=str(tmp_path / "configured"))
+
+    assert not (tmp_path / "configured").exists()
+    assert not (tmp_path / "tinydb").exists()
+
+
+@pytest.mark.parametrize("client_class", [MongoClient, AsyncMongoClient])
+def test_pymongo_shaped_clients_keep_recognized_connection_options(
+    tmp_path,
+    client_class,
+):
+    client = client_class(
+        "mongodb://localhost:27017",
+        tinymongo_folder=str(tmp_path / "configured"),
+        serverSelectionTimeoutMS=50,
+        connectTimeoutMS=50,
+        retryWrites=False,
+        appName="tinymongo-tests",
+        event_listeners=[],
+        server_selector=lambda servers: servers,
+        server_api=None,
+    )
+
+    if client_class is AsyncMongoClient:
+        asyncio.run(client.close())
+    else:
+        client.close()
 
 
 @pytest.mark.parametrize("client_class", [TinyMongoClient, AsyncTinyMongoClient])

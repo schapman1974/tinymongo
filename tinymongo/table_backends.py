@@ -709,7 +709,7 @@ def _regex_matches(actual, pattern, options="", exact=False):
         if options and regex_flags_text(pattern.flags):
             raise OperationFailure(
                 "$options cannot be combined with flags embedded in $regex",
-                code=2,
+                code=51075,
             )
         pattern, flags = regex_compile_components(pattern)
     for option, flag in (
@@ -1190,7 +1190,7 @@ def _validate_regex_query_operand(operand, options=""):
         if options and regex_flags_text(operand.flags):
             raise OperationFailure(
                 "$options cannot be combined with flags embedded in $regex",
-                code=2,
+                code=51075,
             )
         return
     if not isinstance(operand, str):
@@ -1216,6 +1216,8 @@ def _validate_field_filter_operators(expression):
     """Validate one field's operator document, including nested ``$not``."""
 
     for operator, operand in expression.items():
+        if operator in _IGNORED_FILTER_OPERATORS:
+            raise OperationFailure("unknown operator: {0}".format(operator), code=2)
         if operator not in _FIELD_FILTER_OPERATORS:
             if isinstance(operator, str) and operator.startswith("$"):
                 raise TinyMongoNotSupportedError(
@@ -1302,7 +1304,7 @@ def _validate_elem_match_operand(operand):
         raise OperationFailure("$elemMatch requires a query document", code=2)
     if any(key in _LOGICAL_FILTER_OPERATORS for key in operand):
         validate_filter_operators(operand)
-    elif any(str(key).startswith("$") for key in operand):
+    elif any(key in _FIELD_FILTER_OPERATORS for key in operand):
         _validate_field_filter_operators(operand)
     else:
         validate_filter_operators(operand)
@@ -1792,13 +1794,9 @@ class TableBackend(object):
             None,
         )
         if by_name is not None and by_name != spec:
-            same_key = (by_name.field, by_name.direction) == (
-                spec.field,
-                spec.direction,
-            )
             raise OperationFailure(
                 "An index with the same name or key has different options",
-                code=85 if same_key else 86,
+                code=86,
             )
         if by_name is not None:
             # Older releases allowed equivalent specs under different names.

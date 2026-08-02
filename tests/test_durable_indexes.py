@@ -377,7 +377,7 @@ def test_index_creation_is_idempotent_and_rejects_conflicts(
         OperationFailure, match="different options"
     ) as different_options:
         users.create_index("email", name="login_email", unique=False)
-    assert different_options.value.code == 85
+    assert different_options.value.code == 86
 
     assert set(_indexes_by_name(users)) == {"_id_", "login_email"}
 

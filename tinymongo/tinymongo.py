@@ -51,6 +51,7 @@ from .storage_backends import (
 from .results import InsertOneResult, InsertManyResult, UpdateResult, DeleteResult
 from .errors import (
     BulkWriteError,
+    ConfigurationError,
     DuplicateKeyError,
     InvalidDocument as InvalidDocument,
     InvalidOperation,
@@ -786,6 +787,66 @@ def _folder_from_mongo_client_args(host, port, kwargs):
     return host
 
 
+_TINYMONGO_MONGO_CLIENT_OPTIONS = frozenset(
+    (
+        "backend",
+        "storage_uri",
+        "threads",
+        "duckdb_config",
+        "dsn",
+        "tinymongo_folder",
+        "tinymongo_path",
+        "foldername",
+    )
+)
+_PYMONGO_CLIENT_PARAMETERS = frozenset(
+    (
+        "host",
+        "port",
+        "document_class",
+        "tz_aware",
+        "connect",
+        "type_registry",
+    )
+)
+_PYMONGO_CONNECTION_OPTIONS = frozenset(
+    """
+    appname authmechanism authmechanismproperties authoidcallowedhosts
+    authsource auto_encryption_opts compressors connect connecttimeoutms
+    datetime_conversion directconnection document_class driver
+    enable_overload_retargeting enableoverloadretargeting event_listeners fsync
+    heartbeatfrequencyms journal loadbalanced localthresholdms
+    max_adaptive_retries maxadaptiveretries maxconnecting maxidletimems
+    maxpoolsize maxstalenessseconds minpoolsize password read_preference
+    readconcernlevel readpreference readpreferencetags replicaset retryreads
+    retrywrites server_api server_selector servermonitoringmode
+    serverselectiontimeoutms sockettimeoutms srvmaxhosts srvservicename ssl
+    timeoutms tls tlsallowinvalidcertificates tlsallowinvalidhostnames
+    tlscafile tlscertificatekeyfile tlscertificatekeyfilepassword tlscrlfile
+    tlsdisableocspendpointcheck tlsinsecure type_registry tz_aware tzinfo
+    unicode_decode_error_handler username uuidrepresentation w
+    waitqueuemultiple waitqueuetimeoutms wtimeoutms zlibcompressionlevel
+    """.split()
+)
+
+
+def _validate_mongo_client_kwargs(options):
+    """Reject unknown PyMongo-shaped options before storage can be opened."""
+
+    unknown = next(
+        (
+            name
+            for name in options
+            if name not in _TINYMONGO_MONGO_CLIENT_OPTIONS
+            and name not in _PYMONGO_CLIENT_PARAMETERS
+            and name.lower() not in _PYMONGO_CONNECTION_OPTIONS
+        ),
+        None,
+    )
+    if unknown is not None:
+        raise ConfigurationError("Unknown option: {0}".format(unknown))
+
+
 def _resolve_tiny_client_folder(foldername, tinymongo_folder):
     """Resolve the legacy client's documented PyMongo-style folder alias."""
 
@@ -1149,6 +1210,7 @@ class MongoClient(TinyMongoClient):
         type_registry=None,
         **kwargs,
     ):
+        _validate_mongo_client_kwargs(kwargs)
         backend = kwargs.pop("backend", "tinydb")
         storage_uri = kwargs.pop("storage_uri", None)
         threads = kwargs.pop("threads", None)
@@ -1479,13 +1541,9 @@ class TinyMongoCollection(object):
     def _validate_index_compatibility(self, spec):
         by_name = self._index_specs.get(spec.name)
         if by_name is not None and by_name != spec:
-            same_key = (by_name.field, by_name.direction) == (
-                spec.field,
-                spec.direction,
-            )
             raise OperationFailure(
                 "An index with the same name or key has different options",
-                code=85 if same_key else 86,
+                code=86,
             )
         if by_name is not None:
             # Preserve idempotent retries for legacy catalogs which may still

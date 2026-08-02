@@ -69,6 +69,17 @@
 - **TM-025:** `$not` now rejects bare scalars, lists, and empty documents with
   `OperationFailure` code `2`, while continuing to accept non-empty query
   documents and compiled native or BSON regexes.
+- **TM-026:** PyMongo-shaped synchronous and asynchronous clients now reject
+  unknown or misspelled connection kwargs with `ConfigurationError` before
+  opening storage, while continuing to accept recognized PyMongo options.
+- **TM-027:** Same-name index conflicts now consistently report MongoDB error
+  code `86`; same-key specifications requested under another name retain code
+  `85`.
+- **TM-028:** Combining `$options` with flags embedded in a native or BSON regex
+  now reports MongoDB error code `51075`.
+- **TM-029:** `$comment` is now accepted and ignored inside document-form
+  `$elemMatch` filters, while field-operator use raises `OperationFailure` code
+  `2`.
 - Aggregation field references no longer cross a raw array nested directly
   inside another array before reaching the requested field.
 - Aggregation projections preserve source BSON field order for retained fields
