@@ -57,6 +57,7 @@ _DECIMAL128 = decimal128_type()
 _ID_RATIO_HEX_TAG = "exact-ratio-hex-v1"
 _SAFE_JSON_INTEGER_BITS = 1800
 _SQLITE_UNIQUE_TOKEN_VERSION = 3
+_REMOTE_UNIQUE_TOKEN_VERSION = 1
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
 _PHYSICAL_ID_PREFIX = "__tinymongo_id_v2__:"
 _LOGICAL_FILTER_OPERATOR_NAMES = ("$and", "$or", "$nor")
@@ -619,17 +620,38 @@ def _reject_remote_unique_values(documents, specs):
             if _DECIMAL128 is not None and isinstance(value, _DECIMAL128):
                 raise TinyMongoNotSupportedError(
                     "Remote SQL unique index {0!r} does not support Decimal128 "
-                    "values; its native JSON constraint cannot guarantee "
-                    "cross-process MongoDB numeric uniqueness".format(spec.name)
+                    "values; TinyMongo cannot yet derive the same safe native "
+                    "token from Decimal128 BID data".format(spec.name)
                 )
             identity = bson_identity_key(value)
             if identity is not None and identity[0] in ("binary", "regex"):
                 raise TinyMongoNotSupportedError(
                     "Remote SQL unique index {0!r} does not support UUID, "
-                    "Binary, or regular-expression values; its native JSON "
-                    "constraint cannot guarantee cross-process BSON "
-                    "identity".format(spec.name)
+                    "Binary, or regular-expression values; its native token "
+                    "constraint cannot guarantee cross-process BSON identity".format(
+                        spec.name
+                    )
                 )
+
+
+def _remote_unique_token(document, spec):
+    """Return one fixed-width exact BSON token for a remote unique index."""
+
+    _reject_remote_unique_values([document], [spec])
+    tokens = index_tokens(document, spec.field)
+    if len(tokens) != 1:
+        # Arrays are rejected above. Keep this guard explicit so a future
+        # multikey expansion cannot silently weaken the one-column native
+        # constraint used by the remote backends.
+        raise TinyMongoNotSupportedError(
+            "Remote SQL unique index {0!r} requires exactly one scalar token "
+            "per document".format(spec.name)
+        )
+    canonical = "remote-unique-v{0}\x00{1}".format(
+        _REMOTE_UNIQUE_TOKEN_VERSION,
+        tokens[0],
+    )
+    return hashlib.sha256(canonical.encode("utf8")).hexdigest()
 
 
 def _comparison_matches(actual, operand, comparison, exact=False):
@@ -1710,8 +1732,9 @@ class TableBackend(object):
     def _coerce_index_spec(self, spec):
         return spec if isinstance(spec, IndexSpec) else parse_index_spec(spec)
 
-    def _check_index_compatibility(self, collection, spec):
-        specs = self.get_index_specs(collection)
+    def _check_index_compatibility(self, collection, spec, specs=None):
+        if specs is None:
+            specs = self.get_index_specs(collection)
         by_name = next(
             (current for current in specs if current.name == spec.name),
             None,
@@ -3315,6 +3338,12 @@ class RemoteSQLTableBackend(TableBackend):
     def _commit(self, conn):
         conn.commit()
 
+    def _rollback(self, conn):
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
     def _close_cursor(self, cursor):
         try:
             cursor.close()
@@ -3353,32 +3382,55 @@ class RemoteSQLTableBackend(TableBackend):
             "index_name VARCHAR(255) NOT NULL, "
             "field_name VARCHAR(512) NOT NULL, "
             "unique_flag BOOLEAN NOT NULL, "
+            "token_version INTEGER NOT NULL DEFAULT 0, "
             "PRIMARY KEY (database_name, collection_name, index_name))".format(
                 self._quote(self.index_catalog_table)
             ),
         )
+        self._ensure_index_catalog_token_version(conn)
         self._commit(conn)
+
+    def _ensure_index_catalog_token_version(self, conn):
+        """Upgrade the remote index catalog in a dialect-safe way."""
+
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
+
+    @contextmanager
+    def _collection_schema_lock(self, conn, collection):
+        """Serialize per-collection index DDL in the concrete database."""
+
+        yield
+
+    @contextmanager
+    def _collection_write_lock(self, conn, collection):
+        """Coordinate writes with non-transactional index DDL when required."""
+
+        yield
+
+    def _index_specs_on_connection(self, conn, collection):
+        cursor = self._execute(
+            conn,
+            "SELECT index_name, field_name, unique_flag FROM {0} "
+            "WHERE database_name = {1} AND collection_name = {1} "
+            "ORDER BY index_name".format(
+                self._quote(self.index_catalog_table), self.placeholder
+            ),
+            (self.database, collection),
+        )
+        try:
+            return [
+                IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
+                for row in cursor.fetchall()
+            ]
+        finally:
+            self._close_cursor(cursor)
 
     def get_index_specs(self, collection):
         conn = self._connect()
         try:
             self._ensure_index_catalog(conn)
-            cursor = self._execute(
-                conn,
-                "SELECT index_name, field_name, unique_flag FROM {0} "
-                "WHERE database_name = {1} AND collection_name = {1} "
-                "ORDER BY index_name".format(
-                    self._quote(self.index_catalog_table), self.placeholder
-                ),
-                (self.database, collection),
-            )
-            try:
-                return [
-                    IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
-                    for row in cursor.fetchall()
-                ]
-            finally:
-                self._close_cursor(cursor)
+            self._migrate_legacy_unique_indexes(conn, collection)
+            return self._index_specs_on_connection(conn, collection)
         finally:
             conn.close()
 
@@ -3388,6 +3440,151 @@ class RemoteSQLTableBackend(TableBackend):
         )
         digest = hashlib.sha256(identity.encode("utf8")).hexdigest()[:32]
         return "__tm_idx_{0}".format(digest)
+
+    def _unique_token_column(self, collection, spec):
+        identity = "{0}\x00{1}\x00{2}".format(
+            self.database or "default", collection, spec.name
+        )
+        digest = hashlib.sha256(identity.encode("utf8")).hexdigest()[:32]
+        return "__tm_utk_{0}".format(digest)
+
+    def _add_unique_token_column(self, conn, collection, spec):
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
+
+    def _set_unique_token_not_null(self, conn, collection, spec):
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
+
+    def _drop_unique_token_column(self, conn, collection, spec):
+        raise NotImplementedError  # pragma: no cover - implemented by drivers
+
+    def _drop_legacy_native_index(self, conn, collection, spec):
+        """Remove the pre-token native index during a catalog migration."""
+
+        self._drop_native_index(conn, collection, spec)
+
+    def _remove_orphan_native_index(self, conn, collection, spec):
+        """Clean an incomplete non-transactional build before retrying."""
+
+    def _cleanup_failed_native_index_creation(self, conn, collection, spec):
+        """Undo non-transactional DDL while the collection lock is held."""
+
+    def _legacy_unique_specs(self, conn, collection):
+        cursor = self._execute(
+            conn,
+            "SELECT index_name, field_name FROM {0} "
+            "WHERE database_name = {1} AND collection_name = {1} "
+            "AND unique_flag = {1} AND token_version < {1} "
+            "ORDER BY index_name".format(
+                self._quote(self.index_catalog_table), self.placeholder
+            ),
+            (
+                self.database,
+                collection,
+                True,
+                _REMOTE_UNIQUE_TOKEN_VERSION,
+            ),
+        )
+        try:
+            return [
+                IndexSpec(field=row[1], name=row[0], unique=True)
+                for row in cursor.fetchall()
+            ]
+        finally:
+            self._close_cursor(cursor)
+
+    def _stored_documents_on_connection(self, conn, collection):
+        cursor = self._execute(
+            conn,
+            "SELECT _id, data_ordered, data FROM {0}".format(
+                self._quote(self._table_name(collection))
+            ),
+        )
+        try:
+            rows = cursor.fetchall()
+        finally:
+            self._close_cursor(cursor)
+        return [
+            (
+                row[0],
+                _restore_legacy_document_id(
+                    row[0],
+                    self._decode_data_value(
+                        row[-1],
+                        ordered_data=row[1] if len(row) > 2 else None,
+                    ),
+                ),
+            )
+            for row in rows
+        ]
+
+    def _prepare_unique_token_column(self, conn, collection, spec):
+        # PostgreSQL's ADD COLUMN takes an ACCESS EXCLUSIVE lock that remains
+        # held through this transaction. Adding before the scan prevents a
+        # concurrent insert from appearing after backfill with a NULL token.
+        # MariaDB uses the named collection lock implemented below.
+        self._add_unique_token_column(conn, collection, spec)
+        stored_documents = self._stored_documents_on_connection(conn, collection)
+        documents = [document for _stored_id, document in stored_documents]
+        _reject_remote_unique_values(documents, [spec])
+        validate_unique_documents(documents, [spec])
+        if stored_documents:
+            self._executemany(
+                conn,
+                "UPDATE {0} SET {1} = {2} WHERE _id = {2}".format(
+                    self._quote(self._table_name(collection)),
+                    self._quote(self._unique_token_column(collection, spec)),
+                    self.placeholder,
+                ),
+                [
+                    (_remote_unique_token(document, spec), stored_id)
+                    for stored_id, document in stored_documents
+                ],
+            )
+        self._set_unique_token_not_null(conn, collection, spec)
+
+    def _migrate_legacy_unique_indexes(self, conn, collection):
+        # The overwhelmingly common path must not take a table/advisory lock.
+        # If a stale row is observed, acquire the database lock and then query
+        # again because another client may complete the upgrade while we wait.
+        if not self._legacy_unique_specs(conn, collection):
+            return
+        # End the optimistic read transaction before waiting. In particular,
+        # MariaDB's default repeatable-read isolation must not carry the stale
+        # catalog snapshot into the locked recheck.
+        self._commit(conn)
+        try:
+            with self._collection_schema_lock(conn, collection):
+                # Re-read after taking the database lock. Another client may
+                # have completed the migration while this one was waiting.
+                stale = self._legacy_unique_specs(conn, collection)
+                for spec in stale:
+                    self._prepare_unique_token_column(conn, collection, spec)
+                    self._drop_legacy_native_index(conn, collection, spec)
+                    self._create_native_index(conn, collection, spec)
+                    self._execute(
+                        conn,
+                        "UPDATE {0} SET token_version = {1} "
+                        "WHERE database_name = {1} AND collection_name = {1} "
+                        "AND index_name = {1}".format(
+                            self._quote(self.index_catalog_table), self.placeholder
+                        ),
+                        (
+                            _REMOTE_UNIQUE_TOKEN_VERSION,
+                            self.database,
+                            collection,
+                            spec.name,
+                        ),
+                    )
+                self._commit(conn)
+        except Exception as exc:
+            self._rollback(conn)
+            if self._is_duplicate_error(exc) or isinstance(exc, DuplicateKeyError):
+                raise DuplicateKeyError(
+                    "Cannot upgrade remote unique indexes on collection {0!r}: "
+                    "existing values conflict under exact BSON numeric "
+                    "identity".format(collection)
+                ) from exc
+            raise
 
     def _create_native_index(self, conn, collection, spec):
         raise NotImplementedError  # pragma: no cover - implemented by drivers
@@ -3462,6 +3659,8 @@ class RemoteSQLTableBackend(TableBackend):
             needs_ordered_data = collection not in self._ordered_data_collections
             if needs_ordered_data:
                 self._ensure_ordered_data_column(conn, collection, table)
+            self._ensure_index_catalog(conn)
+            self._migrate_legacy_unique_indexes(conn, collection)
             self._record_collection(conn, collection)
             self._commit(conn)
             if needs_ordered_data:
@@ -3514,20 +3713,47 @@ class RemoteSQLTableBackend(TableBackend):
         current = self._all_docs_unfiltered(collection)
         self.validate_unique_post_image(collection, current + docs)
         _validate_physical_ids(current, docs)
-        rows = [(_physical_id_key(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
-            self._insert_rows(conn, collection, rows, bypass_document_validation)
-            self._commit(conn)
+            with self._collection_write_lock(conn, collection):
+                unique_specs = tuple(
+                    spec
+                    for spec in self._index_specs_on_connection(conn, collection)
+                    if spec.unique
+                )
+                rows = [
+                    (
+                        _physical_id_key(doc["_id"]),
+                        _json_dumps(doc),
+                        tuple(_remote_unique_token(doc, spec) for spec in unique_specs),
+                    )
+                    for doc in docs
+                ]
+                self._insert_rows(
+                    conn,
+                    collection,
+                    rows,
+                    unique_specs,
+                    bypass_document_validation,
+                )
+                self._commit(conn)
             return list(range(len(rows)))
         except Exception as exc:
+            self._rollback(conn)
             if self._is_duplicate_error(exc):
                 raise DuplicateKeyError(str(exc))
             raise
         finally:
             conn.close()
 
-    def _insert_rows(self, conn, collection, rows, bypass_document_validation):
+    def _insert_rows(
+        self,
+        conn,
+        collection,
+        rows,
+        unique_specs,
+        bypass_document_validation,
+    ):
         raise NotImplementedError  # pragma: no cover - implemented by drivers
 
     def _data_placeholder(self):
@@ -3670,22 +3896,40 @@ class RemoteSQLTableBackend(TableBackend):
         conn = self._connect()
         try:
             try:
-                self._execute(
-                    conn,
-                    "UPDATE {0} SET data = {1}, data_ordered = {2} "
-                    "WHERE _id = {2}".format(
-                        self._quote(self._table_name(collection)),
-                        self._data_placeholder(),
-                        self.placeholder,
-                    ),
-                    (
-                        _json_dumps(replacement),
-                        _json_dumps(replacement),
-                        stored_id,
-                    ),
-                )
-                self._commit(conn)
+                with self._collection_write_lock(conn, collection):
+                    unique_specs = tuple(
+                        spec
+                        for spec in self._index_specs_on_connection(conn, collection)
+                        if spec.unique
+                    )
+                    token_assignments = "".join(
+                        ", {0} = {1}".format(
+                            self._quote(self._unique_token_column(collection, spec)),
+                            self.placeholder,
+                        )
+                        for spec in unique_specs
+                    )
+                    self._execute(
+                        conn,
+                        "UPDATE {0} SET data = {1}, data_ordered = {2}{3} "
+                        "WHERE _id = {2}".format(
+                            self._quote(self._table_name(collection)),
+                            self._data_placeholder(),
+                            self.placeholder,
+                            token_assignments,
+                        ),
+                        tuple(
+                            [_json_dumps(replacement), _json_dumps(replacement)]
+                            + [
+                                _remote_unique_token(replacement, spec)
+                                for spec in unique_specs
+                            ]
+                            + [stored_id]
+                        ),
+                    )
+                    self._commit(conn)
             except Exception as exc:
+                self._rollback(conn)
                 if self._is_duplicate_error(exc):
                     raise DuplicateKeyError(str(exc))
                 raise
@@ -3699,14 +3943,18 @@ class RemoteSQLTableBackend(TableBackend):
         stored_ids = [self._stored_row_by_id(collection, doc_id)[0] for doc_id in ids]
         conn = self._connect()
         try:
-            self._executemany(
-                conn,
-                "DELETE FROM {0} WHERE _id = {1}".format(
-                    self._quote(self._table_name(collection)), self.placeholder
-                ),
-                [(stored_id,) for stored_id in stored_ids if stored_id is not None],
-            )
-            self._commit(conn)
+            with self._collection_write_lock(conn, collection):
+                self._executemany(
+                    conn,
+                    "DELETE FROM {0} WHERE _id = {1}".format(
+                        self._quote(self._table_name(collection)), self.placeholder
+                    ),
+                    [(stored_id,) for stored_id in stored_ids if stored_id is not None],
+                )
+                self._commit(conn)
+        except Exception:
+            self._rollback(conn)
+            raise
         finally:
             conn.close()
 
@@ -3716,26 +3964,55 @@ class RemoteSQLTableBackend(TableBackend):
         existing = self._check_index_compatibility(collection, spec)
         if existing is not None:
             return existing.name
-        if spec.unique:
-            documents = self.find(collection, {})
-            _reject_remote_unique_values(documents, [spec])
-            validate_unique_documents(documents, [spec])
 
         conn = self._connect()
         try:
             self._ensure_index_catalog(conn)
-            self._create_native_index(conn, collection, spec)
-            self._execute(
-                conn,
-                "INSERT INTO {0} "
-                "(database_name, collection_name, index_name, field_name, unique_flag) "
-                "VALUES ({1}, {1}, {1}, {1}, {1})".format(
-                    self._quote(self.index_catalog_table), self.placeholder
-                ),
-                (self.database, collection, spec.name, spec.field, spec.unique),
-            )
-            self._commit(conn)
+            with self._collection_schema_lock(conn, collection):
+                # The optimistic check above avoids DDL for ordinary retries;
+                # this locked recheck closes the cross-client creation race.
+                existing = self._check_index_compatibility(
+                    collection,
+                    spec,
+                    specs=self._index_specs_on_connection(conn, collection),
+                )
+                if existing is not None:
+                    return existing.name
+                self._remove_orphan_native_index(conn, collection, spec)
+                try:
+                    if spec.unique:
+                        self._prepare_unique_token_column(conn, collection, spec)
+                    self._create_native_index(conn, collection, spec)
+                    self._execute(
+                        conn,
+                        "INSERT INTO {0} "
+                        "(database_name, collection_name, index_name, field_name, "
+                        "unique_flag, token_version) "
+                        "VALUES ({1}, {1}, {1}, {1}, {1}, {1})".format(
+                            self._quote(self.index_catalog_table), self.placeholder
+                        ),
+                        (
+                            self.database,
+                            collection,
+                            spec.name,
+                            spec.field,
+                            spec.unique,
+                            _REMOTE_UNIQUE_TOKEN_VERSION if spec.unique else 0,
+                        ),
+                    )
+                    self._commit(conn)
+                except Exception:
+                    self._rollback(conn)
+                    try:
+                        self._cleanup_failed_native_index_creation(
+                            conn, collection, spec
+                        )
+                        self._commit(conn)
+                    except Exception:
+                        self._rollback(conn)
+                    raise
         except Exception as exc:
+            self._rollback(conn)
             if spec.unique and self._is_duplicate_error(exc):
                 raise DuplicateKeyError(str(exc))
             raise
@@ -3758,16 +4035,20 @@ class RemoteSQLTableBackend(TableBackend):
         conn = self._connect()
         try:
             self._ensure_index_catalog(conn)
-            self._drop_native_index(conn, collection, spec)
-            self._execute(
-                conn,
-                "DELETE FROM {0} WHERE database_name = {1} "
-                "AND collection_name = {1} AND index_name = {1}".format(
-                    self._quote(self.index_catalog_table), self.placeholder
-                ),
-                (self.database, collection, spec.name),
-            )
-            self._commit(conn)
+            with self._collection_schema_lock(conn, collection):
+                self._drop_native_index(conn, collection, spec)
+                self._execute(
+                    conn,
+                    "DELETE FROM {0} WHERE database_name = {1} "
+                    "AND collection_name = {1} AND index_name = {1}".format(
+                        self._quote(self.index_catalog_table), self.placeholder
+                    ),
+                    (self.database, collection, spec.name),
+                )
+                self._commit(conn)
+        except Exception:
+            self._rollback(conn)
+            raise
         finally:
             conn.close()
 
@@ -3797,16 +4078,99 @@ class PostgresTableBackend(RemoteSQLTableBackend):
     def _data_placeholder(self):
         return self.placeholder + "::jsonb"
 
-    def _create_native_index(self, conn, collection, spec):
-        path = ", ".join(_sql_literal(part) for part in spec.field.split("."))
-        expression = "COALESCE(jsonb_extract_path(data, {0}), 'null'::jsonb)".format(
-            path
+    @contextmanager
+    def _collection_schema_lock(self, conn, collection):
+        cursor = self._execute(
+            conn,
+            "LOCK TABLE {0} IN ACCESS EXCLUSIVE MODE".format(
+                self._quote(self._table_name(collection))
+            ),
         )
-        # JSONB equality is type-aware and normalizes equivalent numbers. Arrays
-        # are indexed whole; Python validation supplies Mongo-like multikey fan-out.
+        self._close_cursor(cursor)
+        yield
+
+    @contextmanager
+    def _collection_write_lock(self, conn, collection):
+        # ROW EXCLUSIVE locks are compatible with one another, so writers stay
+        # concurrent while schema changes wait for (or precede) the write.
+        cursor = self._execute(
+            conn,
+            "LOCK TABLE {0} IN ROW EXCLUSIVE MODE".format(
+                self._quote(self._table_name(collection))
+            ),
+        )
+        self._close_cursor(cursor)
+        yield
+
+    def _ensure_index_catalog_token_version(self, conn):
+        cursor = self._execute(
+            conn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = {0} "
+            "AND column_name = 'token_version' LIMIT 1".format(self.placeholder),
+            (self.index_catalog_table,),
+        )
+        try:
+            exists = cursor.fetchone() is not None
+        finally:
+            self._close_cursor(cursor)
+        if exists:
+            return
         self._execute(
             conn,
-            "CREATE {0}INDEX {1} ON {2} (({3}))".format(
+            "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS "
+            "token_version INTEGER NOT NULL DEFAULT 0".format(
+                self._quote(self.index_catalog_table)
+            ),
+        )
+
+    def _add_unique_token_column(self, conn, collection, spec):
+        self._execute(
+            conn,
+            "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS {1} VARCHAR(64)".format(
+                self._quote(self._table_name(collection)),
+                self._quote(self._unique_token_column(collection, spec)),
+            ),
+        )
+
+    def _set_unique_token_not_null(self, conn, collection, spec):
+        self._execute(
+            conn,
+            "ALTER TABLE {0} ALTER COLUMN {1} SET NOT NULL".format(
+                self._quote(self._table_name(collection)),
+                self._quote(self._unique_token_column(collection, spec)),
+            ),
+        )
+
+    def _drop_unique_token_column(self, conn, collection, spec):
+        self._execute(
+            conn,
+            "ALTER TABLE {0} DROP COLUMN IF EXISTS {1}".format(
+                self._quote(self._table_name(collection)),
+                self._quote(self._unique_token_column(collection, spec)),
+            ),
+        )
+
+    def _drop_legacy_native_index(self, conn, collection, spec):
+        self._execute(
+            conn,
+            "DROP INDEX IF EXISTS {0}".format(
+                self._quote(self._physical_index_name(collection, spec))
+            ),
+        )
+
+    def _create_native_index(self, conn, collection, spec):
+        if spec.unique:
+            expression = self._quote(self._unique_token_column(collection, spec))
+        else:
+            path = ", ".join(_sql_literal(part) for part in spec.field.split("."))
+            expression = (
+                "(COALESCE(jsonb_extract_path(data, {0}), "
+                "'null'::jsonb))".format(path)
+            )
+        self._execute(
+            conn,
+            "CREATE {0}INDEX {1} ON {2} ({3})".format(
                 "UNIQUE " if spec.unique else "",
                 self._quote(self._physical_index_name(collection, spec)),
                 self._quote(self._table_name(collection)),
@@ -3821,6 +4185,8 @@ class PostgresTableBackend(RemoteSQLTableBackend):
                 self._quote(self._physical_index_name(collection, spec))
             ),
         )
+        if spec.unique:
+            self._drop_unique_token_column(conn, collection, spec)
 
     def _insert_metadata(self, conn, collection):
         self._execute(
@@ -3832,18 +4198,37 @@ class PostgresTableBackend(RemoteSQLTableBackend):
             (self.database, collection),
         )
 
-    def _insert_rows(self, conn, collection, rows, bypass_document_validation):
+    def _insert_rows(
+        self,
+        conn,
+        collection,
+        rows,
+        unique_specs,
+        bypass_document_validation,
+    ):
+        token_columns = "".join(
+            ", {0}".format(self._quote(self._unique_token_column(collection, spec)))
+            for spec in unique_specs
+        )
+        token_placeholders = "".join(
+            ", {0}".format(self.placeholder) for _ in unique_specs
+        )
         sql = (
-            "INSERT INTO {0} (_id, data, data_ordered) " "VALUES ({1}, {2}, {1})"
+            "INSERT INTO {0} (_id, data, data_ordered{1}) " "VALUES ({2}, {3}, {2}{4})"
         ).format(
             self._quote(self._table_name(collection)),
+            token_columns,
             self.placeholder,
             self._data_placeholder(),
+            token_placeholders,
         )
         self._executemany(
             conn,
             sql,
-            [(doc_id, data, data) for doc_id, data in rows],
+            [
+                tuple([doc_id, data, data] + list(tokens))
+                for doc_id, data, tokens in rows
+            ],
         )
 
 
@@ -3885,8 +4270,131 @@ class MySQLTableBackend(RemoteSQLTableBackend):
             return self.pymysql.connect(**kwargs)
         return self.pymysql.connect(host=self.dsn)
 
+    def _collection_lock_name(self, collection):
+        identity = "{0}\x00{1}".format(self.database or "default", collection)
+        return "tinymongo:{0}".format(
+            hashlib.sha256(identity.encode("utf8")).hexdigest()[:48]
+        )
+
+    @contextmanager
+    def _mysql_collection_lock(self, conn, collection):
+        name = self._collection_lock_name(collection)
+        cursor = self._execute(
+            conn,
+            "SELECT GET_LOCK({0}, {0})".format(self.placeholder),
+            (name, 60),
+        )
+        try:
+            row = cursor.fetchone()
+        finally:
+            self._close_cursor(cursor)
+        if row is None or row[0] != 1:
+            raise OperationFailure(
+                "Timed out waiting for the remote SQL collection lock"
+            )
+        try:
+            yield
+        finally:
+            try:
+                cursor = self._execute(
+                    conn,
+                    "SELECT RELEASE_LOCK({0})".format(self.placeholder),
+                    (name,),
+                )
+                self._close_cursor(cursor)
+            except Exception:
+                # Closing the connection also releases named locks. Preserve
+                # the operation's original exception if the connection broke.
+                pass
+
+    def _collection_schema_lock(self, conn, collection):
+        return self._mysql_collection_lock(conn, collection)
+
+    def _collection_write_lock(self, conn, collection):
+        return self._mysql_collection_lock(conn, collection)
+
+    def _mysql_column_exists(self, conn, table, column):
+        cursor = self._execute(
+            conn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = {0} "
+            "AND column_name = {0} LIMIT 1".format(self.placeholder),
+            (table, column),
+        )
+        try:
+            return cursor.fetchone() is not None
+        finally:
+            self._close_cursor(cursor)
+
+    def _mysql_index_exists(self, conn, table, index):
+        cursor = self._execute(
+            conn,
+            "SELECT 1 FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = {0} "
+            "AND index_name = {0} LIMIT 1".format(self.placeholder),
+            (table, index),
+        )
+        try:
+            return cursor.fetchone() is not None
+        finally:
+            self._close_cursor(cursor)
+
+    def _ensure_index_catalog_token_version(self, conn):
+        if self._mysql_column_exists(conn, self.index_catalog_table, "token_version"):
+            return
+        try:
+            self._execute(
+                conn,
+                "ALTER TABLE {0} ADD COLUMN token_version INTEGER "
+                "NOT NULL DEFAULT 0".format(self._quote(self.index_catalog_table)),
+            )
+        except Exception as exc:
+            code = exc.args[0] if getattr(exc, "args", ()) else None
+            if code != 1060 and "duplicate column" not in str(exc).lower():
+                raise
+
     def _generated_index_column(self, collection, spec):
         return self._physical_index_name(collection, spec).replace("_idx_", "_key_")
+
+    def _add_unique_token_column(self, conn, collection, spec):
+        table_name = self._table_name(collection)
+        column_name = self._unique_token_column(collection, spec)
+        if self._mysql_column_exists(conn, table_name, column_name):
+            return
+        try:
+            self._execute(
+                conn,
+                "ALTER TABLE {0} ADD COLUMN {1} CHAR(64) "
+                "CHARACTER SET ascii COLLATE ascii_bin NULL".format(
+                    self._quote(table_name), self._quote(column_name)
+                ),
+            )
+        except Exception as exc:
+            code = exc.args[0] if getattr(exc, "args", ()) else None
+            if code != 1060 and "duplicate column" not in str(exc).lower():
+                raise
+
+    def _set_unique_token_not_null(self, conn, collection, spec):
+        self._execute(
+            conn,
+            "ALTER TABLE {0} MODIFY COLUMN {1} CHAR(64) "
+            "CHARACTER SET ascii COLLATE ascii_bin NOT NULL".format(
+                self._quote(self._table_name(collection)),
+                self._quote(self._unique_token_column(collection, spec)),
+            ),
+        )
+
+    def _drop_unique_token_column(self, conn, collection, spec):
+        table_name = self._table_name(collection)
+        column_name = self._unique_token_column(collection, spec)
+        if not self._mysql_column_exists(conn, table_name, column_name):
+            return
+        self._execute(
+            conn,
+            "ALTER TABLE {0} DROP COLUMN {1}".format(
+                self._quote(table_name), self._quote(column_name)
+            ),
+        )
 
     def _ensure_ordered_data_column(self, conn, collection, table):
         # MySQL 8 does not accept ADD COLUMN IF NOT EXISTS. Querying the active
@@ -3918,6 +4426,16 @@ class MySQLTableBackend(RemoteSQLTableBackend):
                 raise
 
     def _create_native_index(self, conn, collection, spec):
+        if spec.unique:
+            self._execute(
+                conn,
+                "CREATE UNIQUE INDEX {0} ON {1} ({2})".format(
+                    self._quote(self._physical_index_name(collection, spec)),
+                    self._quote(self._table_name(collection)),
+                    self._quote(self._unique_token_column(collection, spec)),
+                ),
+            )
+            return
         json_path = "$" + "".join(
             "." + json.dumps(part, ensure_ascii=False) for part in spec.field.split(".")
         )
@@ -3957,19 +4475,42 @@ class MySQLTableBackend(RemoteSQLTableBackend):
         )
 
     def _drop_native_index(self, conn, collection, spec):
-        table = self._quote(self._table_name(collection))
-        self._execute(
-            conn,
-            "DROP INDEX {0} ON {1}".format(
-                self._quote(self._physical_index_name(collection, spec)), table
-            ),
-        )
-        self._execute(
-            conn,
-            "ALTER TABLE {0} DROP COLUMN {1}".format(
-                table, self._quote(self._generated_index_column(collection, spec))
-            ),
-        )
+        table_name = self._table_name(collection)
+        physical_name = self._physical_index_name(collection, spec)
+        table = self._quote(table_name)
+        if self._mysql_index_exists(conn, table_name, physical_name):
+            self._execute(
+                conn,
+                "DROP INDEX {0} ON {1}".format(self._quote(physical_name), table),
+            )
+        if spec.unique:
+            self._drop_unique_token_column(conn, collection, spec)
+            return
+        generated = self._generated_index_column(collection, spec)
+        if self._mysql_column_exists(conn, table_name, generated):
+            self._execute(
+                conn,
+                "ALTER TABLE {0} DROP COLUMN {1}".format(table, self._quote(generated)),
+            )
+
+    def _drop_legacy_native_index(self, conn, collection, spec):
+        table_name = self._table_name(collection)
+        physical_name = self._physical_index_name(collection, spec)
+        table = self._quote(table_name)
+        generated = self._generated_index_column(collection, spec)
+        clauses = []
+        if self._mysql_index_exists(conn, table_name, physical_name):
+            clauses.append("DROP INDEX {0}".format(self._quote(physical_name)))
+        if self._mysql_column_exists(conn, table_name, generated):
+            clauses.append("DROP COLUMN {0}".format(self._quote(generated)))
+        if clauses:
+            self._execute(conn, "ALTER TABLE {0} {1}".format(table, ", ".join(clauses)))
+
+    def _remove_orphan_native_index(self, conn, collection, spec):
+        self._drop_native_index(conn, collection, spec)
+
+    def _cleanup_failed_native_index_creation(self, conn, collection, spec):
+        self._drop_native_index(conn, collection, spec)
 
     def _insert_metadata(self, conn, collection):
         self._execute(
@@ -3981,12 +4522,34 @@ class MySQLTableBackend(RemoteSQLTableBackend):
             (self.database, collection),
         )
 
-    def _insert_rows(self, conn, collection, rows, bypass_document_validation):
+    def _insert_rows(
+        self,
+        conn,
+        collection,
+        rows,
+        unique_specs,
+        bypass_document_validation,
+    ):
+        token_columns = "".join(
+            ", {0}".format(self._quote(self._unique_token_column(collection, spec)))
+            for spec in unique_specs
+        )
+        token_placeholders = "".join(
+            ", {0}".format(self.placeholder) for _ in unique_specs
+        )
         sql = (
-            "INSERT INTO {0} (_id, data, data_ordered) " "VALUES ({1}, {1}, {1})"
-        ).format(self._quote(self._table_name(collection)), self.placeholder)
+            "INSERT INTO {0} (_id, data, data_ordered{1}) " "VALUES ({2}, {2}, {2}{3})"
+        ).format(
+            self._quote(self._table_name(collection)),
+            token_columns,
+            self.placeholder,
+            token_placeholders,
+        )
         self._executemany(
             conn,
             sql,
-            [(doc_id, data, data) for doc_id, data in rows],
+            [
+                tuple([doc_id, data, data] + list(tokens))
+                for doc_id, data, tokens in rows
+            ],
         )

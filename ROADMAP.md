@@ -129,11 +129,14 @@ with the follow-up audit of his
 - [x] **TM-021:** Raise PyMongo-compatible `WriteError` code `2` when
   `$addToSet` targets a null or non-array field, without partially applying the
   update.
-- [ ] **Remote SQL numeric uniqueness:** Persist canonical BSON numeric tokens
-  for remote unique indexes so native constraints can enforce exact
-  cross-process equality for every int/float representation; Decimal128
-  remains fail-closed there until the same token can be derived safely from its
-  BID representation.
+- [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
+  of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
+  indexes. Native constraints now enforce exact cross-process equality for
+  every int/float representation while keeping booleans distinct. Legacy
+  unique indexes are locked, preflighted, backfilled, and upgraded lazily;
+  conflicting legacy values fail closed without advancing the catalog version.
+  Decimal128 remains fail-closed until the same token can be derived safely
+  from its BID representation.
 - [ ] Update Mike's agent guide against the `v1.2.1` tag and describe the
   expanded API as available from PyPI.
   Correct its list-only `insert_many()` signature

@@ -120,8 +120,13 @@ Each table has:
 
 TinyMongo also creates `__tinymongo_collections` to track database and
 collection names and `__tinymongo_indexes` to persist index definitions.
-Supported indexes are backed by native SQL indexes over the unchanged `data`
-JSON object.
+Non-unique indexes are backed by native SQL indexes derived from the unchanged
+`data` JSON object. Each unique index also has a private 64-character token
+column. TinyMongo derives that token from its canonical BSON scalar identity,
+so the database can enforce exact int/float equality across processes without
+rounding large values through a SQL numeric type. Booleans remain distinct
+from numbers. Arrays, Decimal128, UUID/Binary, and regex values remain
+fail-closed under remote unique indexes.
 
 When TinyMongo first opens a table created before 1.2.1, it adds
 `data_ordered` automatically. The database account therefore needs
@@ -132,6 +137,15 @@ may already have normalized field order in legacy rows. TinyMongo can recover a
 literal container `_id` from its legacy physical row key; other legacy mappings
 retain the order PostgreSQL returns, not necessarily the document's original
 application order.
+
+Older remote unique indexes are upgraded on first access. TinyMongo locks the
+collection, checks existing values under current BSON identity rules, adds and
+backfills the token column, swaps the native unique index, and records the new
+token version. If legacy values such as `int(1e23)` and `1e23` are exact BSON
+duplicates, the upgrade raises `DuplicateKeyError` and leaves the catalog row
+stale so a later retry also fails closed. The account needs permission to alter
+tables and create or drop indexes. Do not mix older and newer TinyMongo writers
+during this schema upgrade.
 
 ## Query Behavior
 

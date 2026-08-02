@@ -252,6 +252,7 @@ def test_remote_backend_maps_insert_conflicts_and_ignores_missing_replacements(
     monkeypatch.setattr(backend, "create_collection", lambda _collection: None)
     monkeypatch.setattr(backend, "_all_docs_unfiltered", lambda _collection: [])
     monkeypatch.setattr(backend, "validate_unique_post_image", lambda *_args: None)
+    monkeypatch.setattr(backend, "_index_specs_on_connection", lambda *_args: [])
     monkeypatch.setattr(backend, "_connect", _RemoteConnection)
     monkeypatch.setattr(
         backend,

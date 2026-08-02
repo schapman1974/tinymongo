@@ -505,10 +505,12 @@ Unique indexes support JSON scalar values, Decimal128, UUID/Binary, regex, and
 flat arrays on embedded backends; missing and `null` share one unique key.
 Object values, ObjectId, datetime, nested arrays, non-finite numbers, and array
 traversal inside a dotted index path are not supported for unique indexes yet.
-Remote SQL uses native constraints for ordinary JSON scalar races. It rejects
-array, Decimal128, UUID/Binary, and regex values under unique indexes because
-its native JSON indexes cannot yet guarantee cross-process MongoDB multikey,
-numeric, or BSON identity.
+Remote SQL stores a versioned canonical token digest beside each unique-indexed
+value and protects it with a native constraint. This preserves exact int/float
+numeric identity across processes, including very large integers and doubles,
+while keeping booleans distinct from numbers. Remote SQL still rejects array,
+Decimal128, UUID/Binary, and regex values under unique indexes because those
+tokens cannot yet guarantee MongoDB multikey or BSON identity.
 
 SQL, DuckDB, and Parquet storage uses typed physical `_id` keys for new rows.
 Existing databases with older stringified keys remain readable and mutable.

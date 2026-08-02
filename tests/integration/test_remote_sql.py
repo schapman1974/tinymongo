@@ -1,8 +1,10 @@
 import asyncio
 from collections import UserDict
+from concurrent.futures import ThreadPoolExecutor
 import os
 import math
 import re
+import threading
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,7 +17,7 @@ from tinymongo.errors import (
     TinyMongoNotSupportedError,
     WriteError,
 )
-from tinymongo.table_backends import _json_dumps
+from tinymongo.table_backends import _json_dumps, _REMOTE_UNIQUE_TOKEN_VERSION
 
 
 pytestmark = pytest.mark.integration
@@ -672,6 +674,182 @@ def test_remote_sql_native_index_catalog_and_unique_enforcement(backend, env_nam
         multikey.drop()
         scalar.drop()
         client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_unique_indexes_preserve_exact_numeric_identity(backend, env_name):
+    dsn, database, prefix = _remote_target(backend, env_name)
+    client = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = client[database][prefix + "_numeric_identity"]
+
+    try:
+        docs.create_index("value", name="value_unique", unique=True)
+
+        # These pairs are distinct in BSON even though JSON/SQL numeric casts can
+        # round them onto the same database value.
+        docs.insert_many(
+            [
+                {"_id": "exact-integer", "value": 10**23},
+                {"_id": "rounded-double", "value": 1e23},
+                {"_id": "boolean", "value": True},
+                {"_id": "integer-one", "value": 1},
+                {"_id": "zero", "value": 0},
+                {"_id": "subnormal", "value": 5e-324},
+            ]
+        )
+        assert docs.count_documents({}) == 6
+
+        # Python exposes the double's exact integer value here. A native unique
+        # constraint must therefore reject it as the same BSON number as 1e23.
+        with pytest.raises(DuplicateKeyError):
+            docs.insert_one({"_id": "equivalent-integer", "value": int(1e23)})
+        with pytest.raises(DuplicateKeyError):
+            docs.insert_one({"_id": "negative-zero", "value": -0.0})
+
+        assert docs.count_documents({}) == 6
+    finally:
+        docs.drop()
+        client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_async_unique_indexes_preserve_exact_numeric_identity(
+    backend, env_name
+):
+    dsn, database, prefix = _remote_target(backend, env_name)
+    collection = prefix + "_async_numeric_identity"
+
+    async def scenario():
+        client = AsyncTinyMongoClient(backend=backend, dsn=dsn)
+        docs = client[database][collection]
+        try:
+            await docs.create_index("value", name="value_unique", unique=True)
+            await docs.insert_many(
+                [
+                    {"_id": "exact-integer", "value": 10**23},
+                    {"_id": "rounded-double", "value": 1e23},
+                    {"_id": "boolean", "value": True},
+                    {"_id": "integer-one", "value": 1},
+                ]
+            )
+            with pytest.raises(DuplicateKeyError):
+                await docs.insert_one({"_id": "equivalent-integer", "value": int(1e23)})
+            assert await docs.count_documents({}) == 4
+        finally:
+            await docs.drop()
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_unique_numeric_constraint_wins_concurrent_duplicate_race(
+    backend, env_name
+):
+    dsn, database, prefix = _remote_target(backend, env_name)
+    collection = prefix + "_numeric_race"
+    owner = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = owner[database][collection]
+    contenders = [
+        tm.TinyMongoClient(backend=backend, dsn=dsn),
+        tm.TinyMongoClient(backend=backend, dsn=dsn),
+    ]
+    start = threading.Barrier(2)
+
+    def compete(client, row_id, value):
+        start.wait(timeout=15)
+        try:
+            client[database][collection].insert_one({"_id": row_id, "value": value})
+        except DuplicateKeyError as error:
+            assert error.code == 11000
+            return "duplicate"
+        return "inserted"
+
+    try:
+        docs.create_index("value", name="value_unique", unique=True)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(compete, contenders[0], "integer", int(1e23)),
+                executor.submit(compete, contenders[1], "double", 1e23),
+            ]
+            outcomes = [future.result(timeout=30) for future in futures]
+
+        assert sorted(outcomes) == ["duplicate", "inserted"]
+        assert docs.count_documents({}) == 1
+    finally:
+        for contender in contenders:
+            contender.close()
+        docs.drop()
+        owner.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_unique_token_migration_is_durable_and_concurrent(backend, env_name):
+    dsn, database, prefix = _remote_target(backend, env_name)
+    collection = prefix + "_numeric_migration"
+    owner = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = owner[database][collection]
+    engine = docs.parent.engine
+    readers = [
+        tm.TinyMongoClient(backend=backend, dsn=dsn),
+        tm.TinyMongoClient(backend=backend, dsn=dsn),
+    ]
+    start = threading.Barrier(2)
+
+    def migrate(client):
+        start.wait(timeout=15)
+        return client[database][collection].index_information()
+
+    try:
+        docs.create_index("value", name="value_unique", unique=True)
+        docs.insert_one({"_id": "double", "value": 1e23})
+        conn = engine._connect()
+        try:
+            cursor = engine._execute(
+                conn,
+                "UPDATE {0} SET token_version = 0 "
+                "WHERE database_name = {1} AND collection_name = {1} "
+                "AND index_name = {1}".format(
+                    engine._quote(engine.index_catalog_table), engine.placeholder
+                ),
+                (database, collection, "value_unique"),
+            )
+            engine._close_cursor(cursor)
+            engine._commit(conn)
+        finally:
+            conn.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(migrate, reader) for reader in readers]
+            catalogs = [future.result(timeout=30) for future in futures]
+        assert all("value_unique" in catalog for catalog in catalogs)
+
+        conn = engine._connect()
+        try:
+            cursor = engine._execute(
+                conn,
+                "SELECT token_version FROM {0} "
+                "WHERE database_name = {1} AND collection_name = {1} "
+                "AND index_name = {1}".format(
+                    engine._quote(engine.index_catalog_table), engine.placeholder
+                ),
+                (database, collection, "value_unique"),
+            )
+            version = cursor.fetchone()[0]
+            engine._close_cursor(cursor)
+        finally:
+            conn.close()
+        assert version == _REMOTE_UNIQUE_TOKEN_VERSION
+
+        with pytest.raises(DuplicateKeyError):
+            docs.insert_one({"_id": "integer", "value": int(1e23)})
+        docs.insert_one({"_id": "decimal", "value": 10**23})
+        assert docs.count_documents({}) == 2
+    finally:
+        for reader in readers:
+            reader.close()
+        docs.drop()
+        owner.close()
 
 
 @pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
