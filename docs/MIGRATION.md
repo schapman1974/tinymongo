@@ -9,9 +9,11 @@ release line.
 - Default storage remains TinyDB JSON storage.
 - Parquet v2, SQLite, and DuckDB are available as table-native backends.
 - A `tinymongo` CLI is available for inspecting, exporting, importing, and migrating data.
-- The common update subset now includes `$rename`, `$min`, `$max`, and `$pop`
-  in addition to `$set`, `$unset`, `$inc`, `$push`, `$pull`, and `$addToSet`.
-  The new operators use MongoDB-compatible dotted-path, BSON comparison, array,
+- The common update subset now includes `$rename`, `$min`, `$max`, `$pop`, and
+  `$pullAll` in addition to `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
+  `$addToSet`. `$pull` supports ranges, `$in`, `$nin`, `$regex` with optional
+  `$options`, and `$elemMatch`; `$pullAll` uses literal BSON equality. The
+  operators use MongoDB-compatible dotted-path, BSON comparison, array,
   immutable `_id`, and atomic error behavior across synchronous and
   asynchronous clients.
 - Aggregation now includes the application-driven `$match`, `$sort`, `$skip`,
@@ -19,9 +21,9 @@ release line.
   stages, with the documented expression and accumulator subset.
 - Query support now includes `$size`, `$elemMatch`, `$type`, and `$mod`, and all
   CRUD filters reject unknown query operators before touching storage.
-- Decimal128, UUID, and regex values join ObjectId, datetime, and Binary in the
-  BSON-aware storage and comparison layer when their optional types are
-  available.
+- Decimal128, UUID, regex, MinKey, MaxKey, Timestamp, and scoped or unscoped
+  Code values join ObjectId, datetime, and Binary in the BSON-aware storage and
+  comparison layer when their optional types are available.
 - PyMongo-shaped clients honor recursive `document_class`, `tz_aware`, and
   `tzinfo` reads. Datetimes are stored at signed UTC millisecond precision.
 - Aggregation, query, update-operator, and BSON-type capabilities are structured
@@ -73,6 +75,23 @@ pip install ".[all]"
   path traversal, or `_id` mutation now receives a PyMongo-compatible
   `WriteError` without a partial update. `$pop` accepts only `1` or `-1`, and
   `$rename` cannot address array elements.
+- `$pull` and `$pullAll` leave missing target fields absent and do not increase
+  `modified_count`. `$pull`, `$pullAll`, `$push`, and `$addToSet` raise
+  `WriteError` code `2` when an existing target is null or not an array. A
+  top-level `$not` remains invalid inside `$pull`, matching MongoDB's code `2`.
+- Install `tinymongo[bson]` to read or write `ObjectId`, non-generic `Binary`,
+  `Decimal128`, BSON `Regex`, `MinKey`, `MaxKey`, `Timestamp`, and `Code`.
+  Native datetime, UUID, compiled `re.Pattern`, and subtype-0 bytes remain
+  dependency-free. Native compiled patterns deliberately continue to read back
+  as `re.Pattern`; PyMongo normally returns `bson.Regex` for the corresponding
+  BSON value.
+- New `Code` values preserve their BSON type, source, and optional recursive
+  scope. Older TinyMongo releases stored `Code` as an ordinary string, so no
+  migration can distinguish those values from intentional strings or recover
+  them automatically. Rewrite known code fields from an authoritative source.
+- `InvalidDocument` remains catchable through BSON/PyMongo when installed, but
+  TinyMongo also reports the collection, document `_id`, and complete nested
+  path. Keep that richer context when wrapping or logging migration failures.
 - Before a bulk rewrite or migration, check legacy data for `_id` pairs that
   are BSON-equivalent, such as `1` and `1.0` or native bytes and generic
   subtype-0 `Binary`. Version 1.2.1 rejects new equivalent duplicates while

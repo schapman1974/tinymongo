@@ -16,8 +16,10 @@
   projection modes, dotted array writes and sorts, BSON ordering, pagination,
   counts, null/missing values, empty inputs, and async cursor behavior.
 - MongoDB-style array updates for `$push` with `$each`, `$position`, `$sort`,
-  and `$slice`; `$addToSet` with `$each`; and literal, query, or document
-  operands for `$pull`, with atomic validation across sync and async backends.
+  and `$slice`; `$addToSet` with `$each`; `$pull` with literal, document,
+  range, `$in`, `$nin`, `$regex`/`$options`, and `$elemMatch` operands; and
+  `$pullAll` with literal BSON equality. Validation is atomic across
+  synchronous and asynchronous backends.
 - Exact optional Decimal128 persistence plus numeric equality, range queries,
   sorting, embedded unique indexes, `$inc`, and `$group` accumulators across
   backends.
@@ -26,6 +28,9 @@
   unique-index identity across synchronous and asynchronous backends. UUIDs
   use standard subtype-4 BinData identity, and native or BSON regex values use
   their pattern plus canonical MongoDB options.
+- Optional BSON `MinKey`, `MaxKey`, `Timestamp`, and `Code` persistence,
+  querying, comparison, sorting, and capability reporting. JavaScript code
+  values preserve both source and optional nested scope.
 - MongoDB-style `$size`, `$elemMatch`, `$type`, and `$mod` query operators,
   including array-member behavior, BSON type aliases and numeric codes, and
   operand validation across synchronous and asynchronous clients.
@@ -57,13 +62,19 @@
   installed optional `pymongo` types; inspect its `pymongo` tuple when detecting
   optional BSON support.
 - Update capability reporting now exposes a structured `update_operators`
-  mapping containing the exact supported operator names plus the accepted
-  `$push` and `$addToSet` modifiers. Use `client.supports("update_operators")`
-  for a Boolean check.
+  mapping containing the exact supported operator names, including `$pullAll`,
+  plus the accepted `$push` and `$addToSet` modifiers. Use
+  `client.supports("update_operators")` for a Boolean check.
 - Update validation now reports PyMongo-compatible `WriteError` codes for
   malformed operator documents, empty or conflicting paths, non-viable
   traversal, immutable `_id` changes, and invalid update targets before a
   document is partially changed.
+- Native compiled regex values continue to read back as `re.Pattern`, a
+  TinyMongo convenience over PyMongo's `bson.Regex` return type, while their
+  BSON pattern and option identity remains compatible.
+- `InvalidDocument` messages retain TinyMongo's extra collection, `_id`, and
+  full nested-path context while remaining catchable through the standard BSON
+  and PyMongo exception hierarchies when PyMongo is installed.
 - Remote SQL unique indexes now materialize versioned canonical BSON token
   digests protected by native constraints, preserving exact int/float identity
   across concurrent PostgreSQL and MariaDB/MySQL writers. Decimal128 and arrays
@@ -120,6 +131,20 @@
 - **TM-029:** `$comment` is now accepted and ignored inside document-form
   `$elemMatch` filters, while field-operator use raises `OperationFailure` code
   `2`.
+- **TM-031 / TM-032:** `$pull` now leaves a missing field absent without
+  inflating `modified_count`, and supports the measured MongoDB condition
+  operands. A top-level `$not` remains a MongoDB-compatible `WriteError` code
+  `2` rather than being treated as a valid `$pull` operand.
+- **TM-033:** Applying `$pull` or `$push` to an existing null or non-array
+  field now raises `WriteError` code `2` and leaves the update atomic.
+- **TM-034:** `$pullAll` now removes every BSON-equal literal, leaves missing
+  fields absent, and raises `WriteError` code `2` for a non-array target.
+- **TM-035:** `Code` values no longer lose their type or scope on new writes,
+  and `MinKey`, `MaxKey`, `Timestamp`, unscoped `Code`, and scoped `Code` now
+  occupy their MongoDB-compatible positions in shared BSON ordering.
+- `Code` values written by older TinyMongo releases were stored as ordinary
+  strings. They cannot be distinguished from intentional strings or restored
+  automatically; applications must rewrite them from an authoritative source.
 - Aggregation field references no longer cross a raw array nested directly
   inside another array before reaching the requested field.
 - Aggregation projections preserve source BSON field order for retained fields

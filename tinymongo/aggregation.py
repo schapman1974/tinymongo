@@ -24,6 +24,7 @@ from .bson_types import (
     decimal128_from_decimal,
     decimal128_type,
     is_bson_number,
+    is_bson_string,
 )
 from .errors import OperationFailure, TinyMongoNotSupportedError
 from .indexes import TinyMongoUnsupportedWarning
@@ -508,14 +509,14 @@ class AggregationContext(object):
 
     @staticmethod
     def validate_field_path(expression):
-        if isinstance(expression, str) and expression.startswith("$$"):
+        if is_bson_string(expression) and expression.startswith("$$"):
             raise TinyMongoNotSupportedError(
                 "Aggregation variable {0} is not supported by TinyMongo".format(
                     expression
                 )
             )
         if (
-            not isinstance(expression, str)
+            not is_bson_string(expression)
             or not expression.startswith("$")
             or len(expression) == 1
         ):
@@ -569,7 +570,7 @@ class AggregationContext(object):
     def _is_remove_reference(self, expression):
         if expression == "$$REMOVE":
             return True
-        if not isinstance(expression, str) or not expression.startswith("$$REMOVE."):
+        if not is_bson_string(expression) or not expression.startswith("$$REMOVE."):
             return False
         suffix = expression[len("$$REMOVE.") :]
         self.validate_field_path("$placeholder." + suffix)
@@ -580,7 +581,7 @@ class AggregationContext(object):
 
         if allow_remove and self._is_remove_reference(expression):
             return
-        if isinstance(expression, str) and expression.startswith("$"):
+        if is_bson_string(expression) and expression.startswith("$"):
             self.validate_field_path(expression)
             return
         if isinstance(expression, (list, tuple)):
@@ -621,7 +622,7 @@ class AggregationContext(object):
     def evaluate(self, document, expression, allowed_operators=(), allow_remove=False):
         if allow_remove and self._is_remove_reference(expression):
             return _MISSING
-        if isinstance(expression, str) and expression.startswith("$"):
+        if is_bson_string(expression) and expression.startswith("$"):
             return self.resolve_field_path(document, expression)
         if isinstance(expression, list):
             values = [
@@ -880,7 +881,7 @@ class AggregationEngine(object):
 
     @staticmethod
     def _validate_count(field):
-        if not isinstance(field, str):
+        if not is_bson_string(field):
             raise OperationFailure(
                 "the count field must be a non-empty string", code=40156
             )
@@ -1034,12 +1035,12 @@ class AggregationEngine(object):
 
     @staticmethod
     def _validate_unset(specification):
-        if isinstance(specification, str):
+        if is_bson_string(specification):
             paths = [specification]
         elif isinstance(specification, (list, tuple)):
             if not specification:
                 raise OperationFailure("$unset requires at least one field", code=31119)
-            if any(not isinstance(path, str) for path in specification):
+            if any(not is_bson_string(path) for path in specification):
                 raise OperationFailure("$unset field names must be strings", code=31120)
             paths = list(specification)
         else:
@@ -1180,7 +1181,7 @@ class AggregationEngine(object):
 
         group_expression = specification["_id"]
         if group_expression is not None and (
-            not isinstance(group_expression, str)
+            not is_bson_string(group_expression)
             or not group_expression.startswith("$")
             or group_expression.startswith("$$")
             or len(group_expression) == 1

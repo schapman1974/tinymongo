@@ -186,6 +186,7 @@ def test_backend_capabilities_are_explicit(tmp_path, backend):
             "$min",
             "$pop",
             "$pull",
+            "$pullAll",
             "$push",
             "$rename",
             "$set",

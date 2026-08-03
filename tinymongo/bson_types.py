@@ -3,9 +3,8 @@
 The JSON codec, query comparison, and cursor sorting all consume this registry
 so type recognition and subclass precedence cannot drift between them. PyMongo
 is optional: its bundled :mod:`bson` implementation is enabled atomically only
-when ``ObjectId``, ``Binary``, ``Decimal128``, and ``Regex`` can all be
-imported. Native UUID and compiled regular-expression values remain available
-without PyMongo.
+when the supported optional BSON classes can all be imported. Native UUID and
+compiled regular-expression values remain available without PyMongo.
 """
 
 from __future__ import absolute_import
@@ -22,7 +21,11 @@ from uuid import UUID
 
 try:
     import pymongo as _pymongo  # noqa: F401 - proves this is PyMongo's bson
+    from bson import Code as _Code
+    from bson import MaxKey as _MaxKey
+    from bson import MinKey as _MinKey
     from bson import ObjectId as _ObjectId
+    from bson import Timestamp as _Timestamp
     from bson.binary import Binary as _Binary
     from bson.decimal128 import (
         Decimal128 as _Decimal128,
@@ -35,8 +38,12 @@ except ImportError:  # pragma: no cover - environment without optional bson
     # or reporting partial BSON support from a broken installation.
     _ObjectId = None  # type: ignore[misc,assignment]
     _Binary = None  # type: ignore[misc,assignment]
+    _Code = None  # type: ignore[misc,assignment]
     _Decimal128 = None  # type: ignore[misc,assignment]
+    _MaxKey = None  # type: ignore[misc,assignment]
+    _MinKey = None  # type: ignore[misc,assignment]
     _Regex = None  # type: ignore[misc,assignment]
+    _Timestamp = None  # type: ignore[misc,assignment]
     _create_decimal128_context = None  # type: ignore[misc,assignment]
 
 
@@ -281,6 +288,18 @@ def is_bson_regex(value):
     return is_native_regex(value) or (_Regex is not None and isinstance(value, _Regex))
 
 
+def is_bson_code(value):
+    """Return whether ``value`` is BSON JavaScript code rather than text."""
+
+    return _Code is not None and isinstance(value, _Code)
+
+
+def is_bson_string(value):
+    """Return whether ``value`` belongs to BSON's ordinary string family."""
+
+    return isinstance(value, str) and not is_bson_code(value)
+
+
 def _object_id_key(value):
     return value.binary
 
@@ -339,9 +358,47 @@ def _datetime_identity_key(value):
     return datetime_milliseconds(value)
 
 
+def _timestamp_key(value):
+    """Return BSON timestamp order: seconds first, then increment."""
+
+    return value.time, value.inc
+
+
+def _code_identity_key(value):
+    """Return the JavaScript source plus ordered BSON scope identity."""
+
+    scope = value.scope
+    if scope is None:
+        return str(value)
+    scope_key = bson_value_identity_key(scope)
+    if scope_key is None:  # pragma: no cover - storage validation rejects this
+        return str(value), repr(scope)
+    return str(value), scope_key
+
+
+def _code_sort_key(value):
+    """Return the JavaScript source plus MongoDB-ordered scope value."""
+
+    scope = value.scope
+    if scope is None:
+        return str(value)
+    scope_key = bson_value_sort_key(scope)
+    if scope_key is None:  # pragma: no cover - storage validation rejects this
+        return str(value), repr(scope)
+    return str(value), scope_key
+
+
 # The ranks reserve 3 and 4 for mappings and arrays, which cursors recursively
 # order themselves. The remaining order follows MongoDB's documented BSON
-# comparison order for the scalar families TinyMongo currently supports.
+# comparison order for the scalar families TinyMongo supports.
+_MIN_KEY = BSONTypeSpec(
+    "minKey",
+    -1,
+    _null_key,
+    _null_key,
+    storage_tag="minkey",
+    requires_python_comparison=True,
+)
 _NULL = BSONTypeSpec("null", 0, _null_key, _null_key)
 _NUMBER = BSONTypeSpec("number", 1, _number_sort_key, _number_identity_key)
 _DECIMAL_NUMBER = BSONTypeSpec(
@@ -378,6 +435,14 @@ _DATETIME = BSONTypeSpec(
     storage_tag="datetime",
     requires_python_comparison=True,
 )
+_TIMESTAMP = BSONTypeSpec(
+    "timestamp",
+    9,
+    _timestamp_key,
+    _timestamp_key,
+    storage_tag="timestamp",
+    requires_python_comparison=True,
+)
 _UUID = BSONTypeSpec(
     "binary",
     5,
@@ -388,10 +453,34 @@ _UUID = BSONTypeSpec(
 )
 _REGEX = BSONTypeSpec(
     "regex",
-    9,
+    10,
     _regex_key,
     _regex_key,
     storage_tag="regex",
+    requires_python_comparison=True,
+)
+_CODE_VALUE = BSONTypeSpec(
+    "javascript",
+    11,
+    _code_sort_key,
+    _code_identity_key,
+    storage_tag="code",
+    requires_python_comparison=True,
+)
+_SCOPED_CODE_VALUE = BSONTypeSpec(
+    "javascriptWithScope",
+    12,
+    _code_sort_key,
+    _code_identity_key,
+    storage_tag="code",
+    requires_python_comparison=True,
+)
+_MAX_KEY = BSONTypeSpec(
+    "maxKey",
+    13,
+    _null_key,
+    _null_key,
+    storage_tag="maxkey",
     requires_python_comparison=True,
 )
 
@@ -402,14 +491,22 @@ def bson_capabilities():
     available = (
         _ObjectId is not None
         and _Binary is not None
+        and _Code is not None
         and _Decimal128 is not None
+        and _MaxKey is not None
+        and _MinKey is not None
         and _Regex is not None
+        and _Timestamp is not None
     )
     return {
         "objectid": available,
         "binary": available,
+        "code": available,
         "decimal128": available,
+        "maxkey": available,
+        "minkey": available,
         "regex": available,
+        "timestamp": available,
     }
 
 
@@ -434,7 +531,16 @@ def supported_bson_types():
         ),
         "pymongo": tuple(
             name
-            for name in ("binary", "decimal128", "objectid", "regex")
+            for name in (
+                "binary",
+                "code",
+                "decimal128",
+                "maxkey",
+                "minkey",
+                "objectid",
+                "regex",
+                "timestamp",
+            )
             if optional[name]
         ),
     }
@@ -452,10 +558,28 @@ def binary_type():
     return _Binary
 
 
+def code_type():
+    """Return PyMongo's ``Code`` class, or ``None`` when unavailable."""
+
+    return _Code
+
+
 def decimal128_type():
     """Return PyMongo's ``Decimal128`` class, or ``None`` when unavailable."""
 
     return _Decimal128
+
+
+def max_key_type():
+    """Return PyMongo's ``MaxKey`` class, or ``None`` when unavailable."""
+
+    return _MaxKey
+
+
+def min_key_type():
+    """Return PyMongo's ``MinKey`` class, or ``None`` when unavailable."""
+
+    return _MinKey
 
 
 def regex_type():
@@ -464,13 +588,24 @@ def regex_type():
     return _Regex
 
 
+def timestamp_type():
+    """Return PyMongo's ``Timestamp`` class, or ``None`` when unavailable."""
+
+    return _Timestamp
+
+
 def bson_type_spec(value) -> Optional[BSONTypeSpec]:
     """Return sorting metadata for a supported scalar, or ``None``.
 
     Checks are deliberately ordered for subclass safety: ``Binary`` precedes
-    native byte values, and ``bool`` precedes integers.
+    native byte values, ``Code`` precedes strings, and ``bool`` precedes
+    integers.
     """
 
+    if _MinKey is not None and isinstance(value, _MinKey):
+        return _MIN_KEY
+    if _MaxKey is not None and isinstance(value, _MaxKey):
+        return _MAX_KEY
     if value is None:
         return _NULL
     if _Binary is not None and isinstance(value, _Binary):
@@ -483,15 +618,19 @@ def bson_type_spec(value) -> Optional[BSONTypeSpec]:
         return _OBJECT_ID
     if _Decimal128 is not None and isinstance(value, _Decimal128):
         return _DECIMAL_NUMBER
+    if _Timestamp is not None and isinstance(value, _Timestamp):
+        return _TIMESTAMP
     if is_bson_regex(value):
         return _REGEX
+    if is_bson_code(value):
+        return _SCOPED_CODE_VALUE if value.scope is not None else _CODE_VALUE
     if isinstance(value, datetime):
         return _DATETIME
     if isinstance(value, bool):
         return _BOOLEAN
     if is_bson_number(value):
         return _NUMBER
-    if isinstance(value, str):
+    if is_bson_string(value):
         return _STRING
     return None
 
@@ -527,9 +666,9 @@ def bson_value_sort_key(value):
 
     if isinstance(value, (list, tuple)):
         if not value:
-            # Preserve TinyMongo's established ordering where an empty array
-            # sorts before null while arrays remain in the array type family.
-            return 4, ((-1, ()),)
+            # An empty tuple is lexicographically below every non-empty array
+            # payload, including one whose first member is MinKey.
+            return 4, ()
         parsed = []
         for item in value:
             item_key = bson_value_sort_key(item)

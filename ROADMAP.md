@@ -170,6 +170,24 @@ with the follow-up audit of his
   `$elemMatch`, while preserving explicit unsupported errors for valid MongoDB
   predicates outside TinyMongo's subset.
 
+#### Mike's [TM-031 through TM-035 array and BSON follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5162156105)
+
+- [x] **TM-031:** Make `$pull` a true no-op for a missing field, preserving the
+  missing state and an accurate `modified_count`.
+- [x] **TM-032:** Support `$in`, `$nin`, `$regex` with optional `$options`, and
+  `$elemMatch` operands inside `$pull`, while matching MongoDB's code `2`
+  rejection for a top-level `$not` operand.
+- [x] **TM-033:** Raise PyMongo-compatible `WriteError` code `2` when `$pull`
+  or `$push` targets an existing null or non-array value.
+- [x] **TM-034:** Add `$pullAll` with literal BSON equality, missing-field
+  no-op behavior, non-array validation, and structured capability reporting.
+- [x] **TM-035:** Persist, query, compare, sort, and report optional BSON
+  `MinKey`, `MaxKey`, `Timestamp`, and scoped or unscoped `Code` values in
+  MongoDB's BSON order across synchronous and asynchronous clients.
+- [x] Retain native `re.Pattern` values as a documented TinyMongo convenience,
+  and preserve TinyMongo's more diagnostic `InvalidDocument` messages with
+  collection, `_id`, and full nested-path context.
+
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
   indexes. Native constraints now enforce exact cross-process equality for
@@ -472,6 +490,8 @@ Exit criteria:
    compatibility gaps.
    - [x] Complete the measured #77 update slice with `$rename`, `$min`, `$max`,
      and `$pop` across synchronous and asynchronous clients.
+   - [x] Complete Mike's TM-031 through TM-035 `$pull`, `$pullAll`, error-code,
+     and remaining measured BSON compatibility findings.
 7. [ ] Implement GridFS on stable BSON, index, and cursor foundations.
 8. [ ] Build the wire-server foundation, followed by read-only Compass browsing and
    then editing support.

@@ -29,8 +29,12 @@ from .errors import InvalidDocument
 # ``bson_types``.
 _ObjectId = bson_types.object_id_type()
 _Binary = bson_types.binary_type()
+_Code = bson_types.code_type()
 _Decimal128 = bson_types.decimal128_type()
+_MaxKey = bson_types.max_key_type()
+_MinKey = bson_types.min_key_type()
 _Regex = bson_types.regex_type()
+_Timestamp = bson_types.timestamp_type()
 
 
 _TYPE_MARKER = "__tinymongo_type_v1__"
@@ -41,6 +45,14 @@ _BINARY_DATA = "base64"
 _BINARY_SUBTYPE = "subtype"
 _NONFINITE_FLOAT = "float"
 _DECIMAL128_VALUE = "decimal128"
+_CODE_VALUE = "code"
+_CODE_SOURCE = "code"
+_CODE_SCOPE = "scope"
+_MAX_KEY_VALUE = "maxkey"
+_MIN_KEY_VALUE = "minkey"
+_TIMESTAMP_VALUE = "timestamp"
+_TIMESTAMP_TIME = "time"
+_TIMESTAMP_INCREMENT = "inc"
 _UUID_VALUE = "uuid"
 _REGEX_VALUE = "regex"
 _REGEX_PATTERN = "pattern"
@@ -59,8 +71,12 @@ def bson_available():
     return (
         object_id_available()
         and binary_available()
+        and code_available()
         and decimal128_available()
+        and max_key_available()
+        and min_key_available()
         and regex_available()
+        and timestamp_available()
     )
 
 
@@ -76,16 +92,40 @@ def binary_available():
     return _Binary is not None
 
 
+def code_available():
+    """Return whether PyMongo ``Code`` values can be restored."""
+
+    return _Code is not None
+
+
 def decimal128_available():
     """Return whether PyMongo ``Decimal128`` values can be restored."""
 
     return _Decimal128 is not None
 
 
+def max_key_available():
+    """Return whether PyMongo ``MaxKey`` values can be restored."""
+
+    return _MaxKey is not None
+
+
+def min_key_available():
+    """Return whether PyMongo ``MinKey`` values can be restored."""
+
+    return _MinKey is not None
+
+
 def regex_available():
     """Return whether PyMongo ``Regex`` values can be restored."""
 
     return _Regex is not None
+
+
+def timestamp_available():
+    """Return whether PyMongo ``Timestamp`` values can be restored."""
+
+    return _Timestamp is not None
 
 
 def _nested_path(path, key):
@@ -122,6 +162,31 @@ def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
         # Store the raw IEEE-754 BID bytes. ``str(value)`` loses the distinction
         # between quiet and signaling NaN and would not be an exact round trip.
         return {_TYPE_MARKER: _DECIMAL128_VALUE, _VALUE_MARKER: value.bid.hex()}
+    if storage_tag == _MIN_KEY_VALUE:
+        return {_TYPE_MARKER: _MIN_KEY_VALUE, _VALUE_MARKER: 1}
+    if storage_tag == _MAX_KEY_VALUE:
+        return {_TYPE_MARKER: _MAX_KEY_VALUE, _VALUE_MARKER: 1}
+    if storage_tag == _TIMESTAMP_VALUE:
+        return {
+            _TYPE_MARKER: _TIMESTAMP_VALUE,
+            _VALUE_MARKER: {
+                _TIMESTAMP_TIME: value.time,
+                _TIMESTAMP_INCREMENT: value.inc,
+            },
+        }
+    if storage_tag == _CODE_VALUE:
+        return {
+            _TYPE_MARKER: _CODE_VALUE,
+            _VALUE_MARKER: {
+                _CODE_SOURCE: str(value),
+                _CODE_SCOPE: encode_value(
+                    value.scope,
+                    _path=_nested_path(_path, _CODE_SCOPE),
+                    _root=_root,
+                    _context=_context,
+                ),
+            },
+        }
     if storage_tag == _UUID_VALUE:
         return {_TYPE_MARKER: _UUID_VALUE, _VALUE_MARKER: str(value)}
     if storage_tag == _REGEX_VALUE:
@@ -296,6 +361,53 @@ def _decode_regex(payload):
     return _Regex(decoded_pattern, flags)
 
 
+def _valid_stateless_bson_payload(payload):
+    return type(payload) is int and payload == 1
+
+
+def _decode_timestamp(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Timestamp payload must be a mapping")
+    if set(payload) != {_TIMESTAMP_TIME, _TIMESTAMP_INCREMENT}:
+        raise ValueError("Timestamp payload has an unexpected shape")
+    seconds = payload[_TIMESTAMP_TIME]
+    increment = payload[_TIMESTAMP_INCREMENT]
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, int)
+        or isinstance(increment, bool)
+        or not isinstance(increment, int)
+        or not 0 <= seconds < 2**32
+        or not 0 <= increment < 2**32
+    ):
+        raise ValueError("Timestamp components must be unsigned 32-bit integers")
+    if _Timestamp is None:
+        raise ImportError(
+            "Reading BSON Timestamp values requires the optional 'pymongo' "
+            "package. Install it with: pip install 'tinymongo[bson]'"
+        )
+    return _Timestamp(seconds, increment)
+
+
+def _decode_code(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Code payload must be a mapping")
+    if set(payload) != {_CODE_SOURCE, _CODE_SCOPE}:
+        raise ValueError("Code payload has an unexpected shape")
+    source = payload[_CODE_SOURCE]
+    if not isinstance(source, str):
+        raise ValueError("Code source must be text")
+    scope = decode_value(payload[_CODE_SCOPE])
+    if scope is not None and not isinstance(scope, Mapping):
+        raise ValueError("Code scope must be a mapping or null")
+    if _Code is None:
+        raise ImportError(
+            "Reading BSON Code values requires the optional 'pymongo' package. "
+            "Install it with: pip install 'tinymongo[bson]'"
+        )
+    return _Code(source, scope)
+
+
 def decode_value(value):
     """Recursively restore values previously produced by :func:`encode_value`."""
     if isinstance(value, dict):
@@ -337,6 +449,34 @@ def decode_value(value):
                             "pip install 'tinymongo[bson]'"
                         )
                     return _Decimal128.from_bid(raw)
+            if kind == _MIN_KEY_VALUE and _valid_stateless_bson_payload(payload):
+                if _MinKey is None:
+                    raise ImportError(
+                        "Reading BSON MinKey values requires the optional 'pymongo' "
+                        "package. Install it with: pip install 'tinymongo[bson]'"
+                    )
+                return _MinKey()
+            if kind == _MAX_KEY_VALUE and _valid_stateless_bson_payload(payload):
+                if _MaxKey is None:
+                    raise ImportError(
+                        "Reading BSON MaxKey values requires the optional 'pymongo' "
+                        "package. Install it with: pip install 'tinymongo[bson]'"
+                    )
+                return _MaxKey()
+            if kind == _TIMESTAMP_VALUE:
+                try:
+                    return _decode_timestamp(payload)
+                except ImportError:
+                    raise
+                except (TypeError, ValueError):
+                    return value
+            if kind == _CODE_VALUE:
+                try:
+                    return _decode_code(payload)
+                except ImportError:
+                    raise
+                except (TypeError, ValueError):
+                    return value
             if kind == _UUID_VALUE:
                 parsed = _uuid_payload(payload)
                 if parsed is not None:

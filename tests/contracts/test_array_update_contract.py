@@ -2,10 +2,20 @@
 
 import pytest
 
+from tinymongo.errors import WriteError as TinyMongoWriteError
+
 from .support import observe
 
 
 pytestmark = pytest.mark.contract
+
+_WRITE_ERRORS = (TinyMongoWriteError,)
+try:
+    from pymongo.errors import WriteError as PyMongoWriteError
+except ImportError:  # pragma: no cover - development dependency guard
+    PyMongoWriteError = ()  # type: ignore[assignment,misc]
+else:
+    _WRITE_ERRORS += (PyMongoWriteError,)
 
 
 def test_push_each_slice_keeps_a_bounded_array(contract_target):
@@ -236,3 +246,133 @@ def test_pull_accepts_literal_and_query_operands(contract_target):
         {"kind": "y", "meta": {"score": 10}},
         7,
     ]
+
+
+def test_pull_query_operator_family_matches_mongodb(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "in", "values": ["alpha", "beta", "gamma"]},
+            {"_id": "nin", "values": ["alpha", "beta", "gamma"]},
+            {"_id": "regex", "values": ["alpha", "ALPHA", "beta"]},
+            {"_id": "elem", "values": [[1, 3], [1, 2], ["x"], 1]},
+        ]
+    )
+
+    collection.update_one(
+        {"_id": "in"},
+        {"$pull": {"values": {"$in": ["alpha", "gamma"]}}},
+    )
+    collection.update_one(
+        {"_id": "nin"},
+        {"$pull": {"values": {"$nin": ["alpha", "gamma"]}}},
+    )
+    collection.update_one(
+        {"_id": "regex"},
+        {"$pull": {"values": {"$regex": "^alpha$", "$options": "i"}}},
+    )
+    collection.update_one(
+        {"_id": "elem"},
+        {"$pull": {"values": {"$elemMatch": {"$gt": 2}}}},
+    )
+
+    assert collection.find_one({"_id": "in"})["values"] == ["beta"]
+    assert collection.find_one({"_id": "nin"})["values"] == ["alpha", "gamma"]
+    assert collection.find_one({"_id": "regex"})["values"] == ["beta"]
+    assert collection.find_one({"_id": "elem"})["values"] == [
+        [1, 2],
+        ["x"],
+        1,
+    ]
+
+
+def test_pull_missing_fields_are_true_noops(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "present", "values": ["remove", "keep"]},
+            {"_id": "missing", "other": 1},
+            {"_id": "empty", "values": []},
+        ]
+    )
+
+    result = collection.update_many({}, {"$pull": {"values": "remove"}})
+
+    assert (result.matched_count, result.modified_count) == (3, 1)
+    assert collection.find_one({"_id": "present"})["values"] == ["keep"]
+    assert "values" not in collection.find_one({"_id": "missing"})
+    assert collection.count_documents({"values": {"$exists": False}}) == 1
+
+
+def test_pull_all_uses_literal_bson_equality(contract_target):
+    collection = contract_target.collection
+    original = {
+        "_id": "values",
+        "values": [
+            True,
+            1,
+            1.0,
+            [1, 2],
+            [2, 1],
+            {"a": 1, "b": 2},
+            {"b": 2, "a": 1},
+        ],
+    }
+    collection.insert_many([original, {"_id": "missing", "other": 1}])
+
+    changed = collection.update_one(
+        {"_id": "values"},
+        {"$pullAll": {"values": [1.0, [1, 2], {"a": 1, "b": 2}]}},
+    )
+    unchanged = collection.update_one({"_id": "values"}, {"$pullAll": {"values": []}})
+    missing = collection.update_one({"_id": "missing"}, {"$pullAll": {"values": [1]}})
+
+    assert (changed.modified_count, unchanged.modified_count) == (1, 0)
+    assert missing.modified_count == 0
+    assert collection.find_one({"_id": "values"})["values"] == [
+        True,
+        [2, 1],
+        {"b": 2, "a": 1},
+    ]
+    assert "values" not in collection.find_one({"_id": "missing"})
+
+
+@pytest.mark.parametrize(
+    ("operator", "operand"),
+    [
+        ("$pull", "remove"),
+        ("$push", "append"),
+        ("$pullAll", ["remove"]),
+    ],
+)
+def test_array_updates_reject_non_array_targets(contract_target, operator, operand):
+    collection = contract_target.collection
+    collection.insert_one({"_id": "scalar", "values": "not-an-array"})
+
+    with pytest.raises(_WRITE_ERRORS) as caught:
+        collection.update_one(
+            {"_id": "scalar"},
+            {operator: {"values": operand}},
+        )
+
+    assert caught.value.code == 2
+    assert collection.find_one({"_id": "scalar"})["values"] == "not-an-array"
+
+
+def test_pull_not_and_pull_all_operand_errors_match_mongodb(contract_target):
+    collection = contract_target.collection
+    collection.insert_one({"_id": "invalid", "values": [1, 2]})
+
+    with pytest.raises(_WRITE_ERRORS) as pull_not:
+        collection.update_one(
+            {"_id": "invalid"},
+            {"$pull": {"values": {"$not": {"$eq": 2}}}},
+        )
+    with pytest.raises(_WRITE_ERRORS) as pull_all:
+        collection.update_one(
+            {"_id": "invalid"},
+            {"$pullAll": {"values": "not-an-array-operand"}},
+        )
+
+    assert (pull_not.value.code, pull_all.value.code) == (2, 2)
+    assert collection.find_one({"_id": "invalid"})["values"] == [1, 2]

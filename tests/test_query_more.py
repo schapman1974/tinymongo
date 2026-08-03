@@ -4,6 +4,7 @@ import shutil
 import pytest
 
 import tinymongo as tm
+from tinymongo.errors import WriteError
 
 DB_DIR = os.path.abspath("./test_db_query_more")
 
@@ -255,8 +256,9 @@ def test_update_rejects_list_operator_target():
     c = client.db.collection
     c.insert_one({"_id": 1, "tags": "not-a-list"})
 
-    with pytest.raises(ValueError, match="must be a list"):
+    with pytest.raises(WriteError, match="must be an array") as caught:
         c.update_one({"_id": 1}, {"$push": {"tags": "new"}})
+    assert caught.value.code == 2
     assert c.find_one({"_id": 1})["tags"] == "not-a-list"
 
 
