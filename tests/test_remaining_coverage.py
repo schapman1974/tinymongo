@@ -16,19 +16,31 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
 
     monkeypatch.setattr(bson_types, "_ObjectId", marker)
     monkeypatch.setattr(bson_types, "_Binary", marker)
+    monkeypatch.setattr(bson_types, "_Code", marker)
     monkeypatch.setattr(bson_types, "_Decimal128", marker)
+    monkeypatch.setattr(bson_types, "_MaxKey", marker)
+    monkeypatch.setattr(bson_types, "_MinKey", marker)
     monkeypatch.setattr(bson_types, "_Regex", marker)
+    monkeypatch.setattr(bson_types, "_Timestamp", marker)
     assert bson_types.bson_capabilities() == {
         "objectid": True,
         "binary": True,
+        "code": True,
         "decimal128": True,
+        "maxkey": True,
+        "minkey": True,
         "regex": True,
+        "timestamp": True,
     }
     assert bson_types.supported_bson_types()["pymongo"] == (
         "binary",
+        "code",
         "decimal128",
+        "maxkey",
+        "minkey",
         "objectid",
         "regex",
+        "timestamp",
     )
 
     monkeypatch.setattr(bson_types, "_Regex", None)
@@ -39,8 +51,12 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
     assert bson_types.bson_capabilities() == {
         "objectid": False,
         "binary": False,
+        "code": False,
         "decimal128": False,
+        "maxkey": False,
+        "minkey": False,
         "regex": False,
+        "timestamp": False,
     }
 
     monkeypatch.setattr(bson_types, "_ObjectId", None)
@@ -48,8 +64,12 @@ def test_bson_capabilities_are_enabled_atomically(monkeypatch):
     assert bson_types.bson_capabilities() == {
         "objectid": False,
         "binary": False,
+        "code": False,
         "decimal128": False,
+        "maxkey": False,
+        "minkey": False,
         "regex": False,
+        "timestamp": False,
     }
 
 

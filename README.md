@@ -464,11 +464,19 @@ values continue to include missing fields. The same rule applies to dotted
 paths and array members across TinyMongo backends.
 
 Update support includes `$set`, `$unset`, `$inc`, `$min`, `$max`, `$rename`,
-`$push`, `$pop`, `$pull`, and `$addToSet`, including `upsert=True`. As in
-PyMongo, `update_one()` and `update_many()` require update operators; use
+`$push`, `$pop`, `$pull`, `$pullAll`, and `$addToSet`, including `upsert=True`.
+As in PyMongo, `update_one()` and `update_many()` require update operators; use
 `replace_one()` for full-document replacement. `$push` accepts `$each`,
 `$position`, `$sort`, and `$slice`; `$addToSet` accepts `$each`; and `$pull`
-accepts literal, query, and document operands.
+accepts literals, document conditions, ranges, `$in`, `$nin`, `$regex` with
+optional `$options`, and `$elemMatch`. MongoDB does not accept a top-level
+`$not` as a `$pull` condition, so TinyMongo reports `WriteError` code `2` for
+that shape as well. `$pullAll` removes every array item BSON-equal to any
+literal in its operand array.
+
+`$pull` and `$pullAll` are true no-ops when their target field is missing: they
+do not create an empty array, change an `$exists: false` result, or add to
+`modified_count`.
 
 `$min` and `$max` set a missing field or replace an existing value only when
 the candidate is lower or higher in TinyMongo's MongoDB-compatible BSON order.
@@ -482,8 +490,9 @@ Update documents are validated before any change is stored. Non-document
 operator operands, invalid or conflicting paths, traversal through a scalar,
 non-array `$pop` targets, and attempts to change `_id` raise
 PyMongo-compatible `WriteError` exceptions with the applicable MongoDB code,
-and the complete update remains atomic. Applying `$addToSet` to an existing
-null or non-array field similarly raises `WriteError` code `2`.
+and the complete update remains atomic. Applying `$push`, `$pull`, `$pullAll`,
+or `$addToSet` to an existing null or non-array field raises `WriteError` code
+`2`.
 
 `find()` and `find_one()` accept Mongo-style inclusion and exclusion
 projections. Dotted paths project nested fields, `_id` follows MongoDB's special
@@ -562,18 +571,20 @@ subtype 0), while BSON-distinct values such as `True` and `1` or identical
 binary data with different subtypes remain separate.
 
 Cursor sorting follows MongoDB's recursive comparison order for the supported
-BSON scalar, document, and array families, including BinData, `ObjectId`,
-booleans, and datetimes. The same order is used by aggregation `$min` and
-`$max` and by the `$gt`, `$gte`, `$lt`, and `$lte` query operators, including
-range predicates inside `$pull`. Range queries apply MongoDB's BSON type
-bracketing: numeric representations share one family, while values from other
-type families do not compare with one another. Array fields expose both the
-whole array and its direct members where MongoDB does, and documents and arrays
-are compared recursively. Values with equal comparison keys retain their input
-order for ascending and descending sorts. TinyMongo uses its shared Python
-matcher whenever a backend-native or indexed predicate cannot guarantee these
-rules. Extending unique-index identity to the remaining supported BSON values
-is still tracked separately in the roadmap and continues to fail closed where
+BSON scalar, document, and array families. The supported relative order is
+`MinKey`, null, numbers, strings, documents, arrays, BinData, `ObjectId`,
+booleans, datetimes, `Timestamp`, regex, unscoped `Code`, scoped `Code`, and
+`MaxKey`. The same order is used by aggregation `$min` and `$max` and by the
+`$gt`, `$gte`, `$lt`, and `$lte` query operators, including range predicates
+inside `$pull`. Range queries apply MongoDB's BSON type bracketing: numeric
+representations share one family, while values from other type families do not
+compare with one another. Array fields expose both the whole array and its
+direct members where MongoDB does, and documents and arrays are compared
+recursively. Values with equal comparison keys retain their input order for
+ascending and descending sorts. TinyMongo uses its shared Python matcher
+whenever a backend-native or indexed predicate cannot guarantee these rules.
+Extending unique-index identity to the remaining supported BSON values is
+still tracked separately in the roadmap and continues to fail closed where
 exact enforcement is unavailable. Update and aggregation `$min` and `$max`
 share this BSON comparison order, including recursive document and array
 comparisons and numeric equivalence across supported numeric representations.
@@ -649,14 +660,15 @@ any aggregation subset is available. In particular, `$replaceRoot`,
 `$replaceWith`, `$meta` sort expressions, variables other than `$$REMOVE`, and
 MongoDB's broader expression language are not part of this slice yet.
 
-## ObjectId, datetime, binary, Decimal128, UUID, and regex values
+## BSON values
 
 `datetime`, `bytes`, native `uuid.UUID`, and compiled `re.Pattern` values are
 supported by every backend. Datetimes are converted to BSON's signed UTC
 millisecond representation; naive inputs are treated as UTC and aware inputs
 are converted to UTC. `bytearray` is accepted and reads back as `bytes`. Install
 the optional BSON extra to use `bson.ObjectId`,
-`bson.Decimal128`, `bson.Regex`, or non-generic `bson.Binary` subtypes without
+`bson.Decimal128`, `bson.Regex`, `bson.MinKey`, `bson.MaxKey`,
+`bson.Timestamp`, `bson.Code`, or non-generic `bson.Binary` subtypes without
 making PyMongo a core dependency:
 
 ```bash
@@ -676,7 +688,16 @@ from datetime import datetime
 import re
 from uuid import UUID
 
-from bson import Binary, Decimal128, ObjectId, Regex
+from bson import (
+    Binary,
+    Code,
+    Decimal128,
+    MaxKey,
+    MinKey,
+    ObjectId,
+    Regex,
+    Timestamp,
+)
 
 episode_id = ObjectId()
 episodes.insert_one(
@@ -689,6 +710,10 @@ episodes.insert_one(
         "session_id": UUID("00112233-4455-6677-8899-aabbccddeeff"),
         "topic_pattern": Regex("python|mongodb", "i"),
         "local_pattern": re.compile("async", re.IGNORECASE),
+        "valid_from": MinKey(),
+        "valid_until": MaxKey(),
+        "cluster_time": Timestamp(1722535200, 1),
+        "transform": Code("return value + offset;", {"offset": 1}),
         "title": "Async Python",
     }
 )
@@ -709,6 +734,12 @@ the RFC-4122 byte order and share BSON identity with subtype-4 `Binary` values.
 TinyMongo consistently uses this standard UUID representation; unlike a
 default PyMongo client, it does not require a per-client UUID representation
 setting for native UUID values.
+`MinKey`, `MaxKey`, `Timestamp`, and `Code` require the same optional BSON
+extra. New `Code` writes retain their JavaScript source, distinct BSON type,
+and recursively encoded scope. Earlier TinyMongo releases stored `Code` as an
+ordinary string, so those legacy values cannot be distinguished from intended
+strings or recovered automatically; rewrite them from an authoritative source
+if the distinction matters.
 Native compiled patterns retain their Python representation; `bson.Regex`
 values retain their BSON representation, pattern, and flags. Regex identity is
 the pattern plus MongoDB's canonical option string. Preserving a native
@@ -736,10 +767,11 @@ Sorts normalize naive datetimes as UTC and convert aware datetimes to UTC.
 BinData—including UUID—sorts by length, subtype, and then unsigned bytes,
 matching MongoDB; legacy subtype 2 includes its four-byte inner-length prefix
 when its comparison length is calculated. Regex values sort by pattern and
-canonical options after the other supported scalar families. Numeric `NaN`
-sorts below every other numeric value, matching MongoDB. Persistence, returned
-values, equality, range comparisons, and sorting all use MongoDB's signed UTC
-millisecond precision.
+canonical options, `Timestamp` sorts after datetime, unscoped `Code` sorts
+before scoped `Code`, and `MinKey`/`MaxKey` bound every supported family.
+Numeric `NaN` sorts below every other numeric value, matching MongoDB.
+Persistence, returned values, equality, range comparisons, and sorting all use
+MongoDB's signed UTC millisecond precision.
 
 Decimal128 values retain their exact BSON representation and participate in
 numeric equality and range queries, sorting, embedded-backend unique indexes,
@@ -763,10 +795,13 @@ very large inputs, which it may split across multiple wire batches.
 
 An unsupported value raises `tinymongo.InvalidDocument` before storage is
 changed. The exception retains the rejected document in its `document`
-attribute, and its message identifies the collection and nested value path
-(plus the batch index for `insert_many()`). With PyMongo installed, it can be
-caught as either `bson.errors.InvalidDocument` or `pymongo.errors.PyMongoError`;
-dependency-free callers can catch `tinymongo.errors.TinyMongoError`.
+attribute, and its message identifies the collection and full nested value path,
+plus the document `_id` when available and the batch index for `insert_many()`.
+This extra context is more diagnostic than PyMongo's standard message while
+preserving compatible exception identity. With PyMongo installed, it can be
+caught as either `bson.errors.InvalidDocument` or
+`pymongo.errors.PyMongoError`; dependency-free callers can catch
+`tinymongo.errors.TinyMongoError`.
 
 TinyMongo includes PyMongo-shaped contract tests that run application code with
 `import pymongo` redirected to TinyMongo:
@@ -805,13 +840,14 @@ follow the
 [Talk Python acceptance run](https://github.com/schapman1974/tinymongo/blob/master/docs/TALKPYTHON_ACCEPTANCE.md).
 
 PyMongo remains optional. It is needed for these comparisons,
-`tinymongo.patch()`, `ObjectId` and `Decimal128` support, and non-generic
-`Binary` subtypes, but it is not required for normal TinyMongo clients,
-`datetime` storage, or native subtype-0 byte values. When it is installed,
-TinyMongo error classes also inherit the matching `pymongo.errors` classes, so
-existing `PyMongoError` handlers continue to work. `InvalidDocument`
-additionally preserves BSON's standard error identity while remaining inside
-TinyMongo's portable error hierarchy.
+`tinymongo.patch()`, richer BSON values (`ObjectId`, `Binary`, `Code`,
+`Decimal128`, `MaxKey`, `MinKey`, `Regex`, and `Timestamp`), and conditional
+PyMongo exception inheritance, but it is not required for normal TinyMongo
+clients, `datetime`, UUID, compiled `re.Pattern`, or native subtype-0 byte
+storage. When it is installed, TinyMongo error classes also inherit the
+matching `pymongo.errors` classes, so existing `PyMongoError` handlers continue
+to work. `InvalidDocument` additionally preserves BSON's standard error
+identity while remaining inside TinyMongo's portable error hierarchy.
 
 PyMongo's full upstream driver test suite targets a real MongoDB server and
 driver internals, so it is not expected to pass against TinyMongo. The contract
@@ -839,7 +875,10 @@ aggregation, query and update operators, BSON types, sessions, transactions,
 and change streams. `query_operators` separates top-level logical operators
 from field operators and accepted-but-ignored metadata operators such as
 `$comment`. `update_operators` lists every supported update operator and maps
-`$push` and `$addToSet` to their accepted modifiers.
+`$push` and `$addToSet` to their accepted modifiers; its operator tuple includes
+`$pullAll`. `bson_types["pymongo"]` reports the installed optional `Binary`,
+`Code`, `Decimal128`, `MaxKey`, `MinKey`, `ObjectId`, `Regex`, and `Timestamp`
+families.
 `bson_types` separates dependency-free `native` families from the richer
 `pymongo` types available when the optional BSON extra is installed. These
 values are structured mappings; use `client.supports()` for a Boolean feature

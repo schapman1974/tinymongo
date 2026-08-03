@@ -6,8 +6,14 @@ from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from typing import Mapping, Optional
 
+from .bson_codec import dumps as bson_json_dumps
 from .errors import DuplicateKeyError, TinyMongoNotSupportedError
-from .bson_types import bson_identity_key, bson_number_decimal, decimal128_type
+from .bson_types import (
+    bson_identity_key,
+    bson_number_decimal,
+    decimal128_type,
+    is_bson_string,
+)
 from .warning_context import emit_warning
 
 
@@ -36,7 +42,7 @@ def _unsupported(message):
 
 
 def _validate_field(field):
-    if not isinstance(field, str) or not field:
+    if not is_bson_string(field) or not field:
         _unsupported("Index fields must be non-empty strings")
     if "\x00" in field or any(not part for part in field.split(".")):
         _unsupported("Index fields must use valid non-empty dotted paths")
@@ -45,11 +51,11 @@ def _validate_field(field):
 
 
 def _parse_key(key):
-    if isinstance(key, str):
+    if is_bson_string(key):
         return key, 1
 
     pair = None
-    if isinstance(key, (list, tuple)) and len(key) == 2 and isinstance(key[0], str):
+    if isinstance(key, (list, tuple)) and len(key) == 2 and is_bson_string(key[0]):
         pair = key
     elif isinstance(key, (list, tuple)):
         if len(key) != 1:
@@ -62,13 +68,13 @@ def _parse_key(key):
         _unsupported("Index keys must be a field string or one (field, direction) pair")
 
     field, direction = pair
-    if not isinstance(field, str):
+    if not is_bson_string(field):
         _unsupported("Index fields must be non-empty strings")
     return field, direction
 
 
 def _validate_index_name(name, field=None):
-    if not isinstance(name, str) or not name or "\x00" in name:
+    if not is_bson_string(name) or not name or "\x00" in name:
         _unsupported("Index names must be non-empty strings")
     if field != "_id" and name in ("_id", "_id_"):
         _unsupported("The built-in _id index names are reserved")
@@ -467,11 +473,23 @@ def _scalar_token(value):
         if decimal_value == 0:
             return "number:0"
         return "number:{0}".format(_exact_decimal_text(decimal_value))
+    identity = bson_identity_key(value)
+    if identity is not None and identity[0] in (
+        "minKey",
+        "timestamp",
+        "javascript",
+        "javascriptWithScope",
+        "maxKey",
+    ):
+        family, key = identity
+        return "{0}:{1}".format(
+            family,
+            bson_json_dumps(key, ensure_ascii=False, separators=(",", ":")),
+        )
     if isinstance(value, str):
         return "string:{0}".format(
             json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         )
-    identity = bson_identity_key(value)
     if identity is not None and identity[0] == "binary":
         subtype, raw = identity[1]
         return "binary:{0}:{1}".format(subtype, raw.hex())

@@ -365,14 +365,22 @@ def test_fresh_process_without_pymongo_keeps_core_codec_available():
         assert bson_types.bson_capabilities() == {
             "objectid": False,
             "binary": False,
+            "code": False,
             "decimal128": False,
+            "maxkey": False,
+            "minkey": False,
             "regex": False,
+            "timestamp": False,
         }
         assert bson_codec.bson_available() is False
         assert bson_codec.object_id_available() is False
         assert bson_codec.binary_available() is False
+        assert bson_codec.code_available() is False
         assert bson_codec.decimal128_available() is False
+        assert bson_codec.max_key_available() is False
+        assert bson_codec.min_key_available() is False
         assert bson_codec.regex_available() is False
+        assert bson_codec.timestamp_available() is False
         assert bson_codec.loads(bson_codec.dumps(b"core")) == b"core"
         assert issubclass(InvalidDocument, TinyMongoError)
 

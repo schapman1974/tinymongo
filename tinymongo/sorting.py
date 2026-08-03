@@ -14,7 +14,10 @@ from .errors import OperationFailure
 
 
 _MISSING_SORT_KEY = (0, None)
-_EMPTY_ARRAY_SORT_KEY = (-1, ())
+# MongoDB gives an empty array a special field-sort position below null but
+# above MinKey. A fractional internal rank keeps it distinct from both BSON
+# families while remaining comparable with the integer registry ranks.
+_EMPTY_ARRAY_SORT_KEY = (-0.5, ())
 _MISSING = object()
 
 

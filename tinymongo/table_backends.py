@@ -26,7 +26,9 @@ from .bson_types import (
     bson_query_range_matches,
     bson_values_equal,
     decimal128_type,
+    is_bson_code,
     is_bson_regex,
+    is_bson_string,
     is_bson_number,
     is_native_regex,
     regex_compile_components,
@@ -622,6 +624,7 @@ def _simple_scalar_equality(filter_doc):
         or expected is None
         or isinstance(expected, (Mapping, list, tuple))
         or not isinstance(expected, (bool, int, float, str))
+        or is_bson_code(expected)
     ):
         return None
     return field, expected
@@ -684,7 +687,7 @@ def _comparison_matches(actual, operand, comparison, exact=False):
 
 
 def _validate_regex_options(options):
-    if not isinstance(options, str):
+    if not is_bson_string(options):
         raise OperationFailure(
             "$options supports only i, m, s, u, and x",
             code=2,
@@ -727,7 +730,7 @@ def _regex_matches(actual, pattern, options="", exact=False):
     except (TypeError, ValueError, re.error):
         return False
     return any(
-        isinstance(value, str) and expression.search(value) is not None
+        is_bson_string(value) and expression.search(value) is not None
         for value in values
     )
 
@@ -824,7 +827,7 @@ def _normalize_type_operand(operand):
 
     aliases = []
     for value in values:
-        if isinstance(value, str):
+        if is_bson_string(value):
             if value not in _BSON_QUERY_TYPE_ALIASES:
                 raise OperationFailure(
                     "Unknown BSON type alias: {0}".format(value), code=2
@@ -1211,7 +1214,7 @@ def _validate_regex_query_operand(operand, options=""):
                 code=51075,
             )
         return
-    if not isinstance(operand, str):
+    if not is_bson_string(operand):
         raise OperationFailure(
             "$regex requires a string or compiled regex value",
             code=2,

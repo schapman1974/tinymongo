@@ -624,15 +624,15 @@ def test_direct_helper_and_lock_edges(tmp_path, monkeypatch):
     doc = {"a": {"b": 1}, "items": []}
     core._unset_nested(doc, "a.missing.value")
     assert doc == {"a": {"b": 1}, "items": []}
-    assert (
-        core._apply_update_document({"_id": 1}, {"$pull": {"items": "x"}})["items"]
-        == []
-    )
+    assert core._apply_update_document({"_id": 1}, {"$pull": {"items": "x"}}) == {
+        "_id": 1
+    }
     assert core._apply_update_document({"_id": 1}, {"$addToSet": {"items": "x"}})[
         "items"
     ] == ["x"]
-    with pytest.raises(ValueError):
+    with pytest.raises(WriteError) as pull_error:
         core._apply_update_document({"_id": 1, "items": "x"}, {"$pull": {"items": "x"}})
+    assert pull_error.value.code == 2
     with pytest.raises(WriteError) as caught:
         core._apply_update_document(
             {"_id": 1, "items": "x"}, {"$addToSet": {"items": "x"}}

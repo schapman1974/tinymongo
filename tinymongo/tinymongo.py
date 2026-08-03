@@ -11,7 +11,6 @@ import datetime as datetime_module
 from functools import reduce, wraps
 import importlib
 import logging
-import operator as comparison_operator
 import os
 import shutil
 import threading
@@ -28,9 +27,11 @@ from .bson_types import (
     bson_value_sort_key,
     bson_values_equal,
     canonicalize_datetime,
+    code_type,
     decimal128_type,
     is_bson_regex,
     is_bson_number,
+    is_bson_string,
     object_id_type,
     supported_bson_types,
 )
@@ -106,6 +107,7 @@ def Q(query, key):
 
 
 _MISSING = object()
+_CODE = code_type()
 _DECIMAL128 = decimal128_type()
 
 
@@ -300,6 +302,7 @@ _UPDATE_OPERATOR_NAMES = (
     "$min",
     "$pop",
     "$pull",
+    "$pullAll",
     "$push",
     "$rename",
     "$set",
@@ -308,13 +311,18 @@ _UPDATE_OPERATOR_NAMES = (
 _UPDATE_OPERATORS = frozenset(_UPDATE_OPERATOR_NAMES)
 _PUSH_MODIFIERS = frozenset(("$each", "$position", "$sort", "$slice"))
 _ADD_TO_SET_MODIFIERS = frozenset(("$each",))
-_PULL_COMPARISON_OPERATORS = {
-    "$gt": comparison_operator.gt,
-    "$gte": comparison_operator.ge,
-    "$lt": comparison_operator.lt,
-    "$lte": comparison_operator.le,
-}
-_PULL_FIELD_OPERATORS = frozenset(("$eq",) + tuple(_PULL_COMPARISON_OPERATORS))
+_PULL_COMPARISON_OPERATORS = frozenset(("$gt", "$gte", "$lt", "$lte"))
+_PULL_FIELD_OPERATORS = frozenset(
+    (
+        "$elemMatch",
+        "$eq",
+        "$in",
+        "$nin",
+        "$options",
+        "$regex",
+    )
+    + tuple(_PULL_COMPARISON_OPERATORS)
+)
 _PULL_LOGICAL_OPERATORS = frozenset(("$and", "$or", "$nor"))
 
 
@@ -531,7 +539,7 @@ def _validate_pop_operand(value):
 
 def _validate_rename_operand(source, target):
     _update_path_parts(source)
-    if not isinstance(target, str):
+    if not is_bson_string(target):
         _raise_write_error("The destination field for $rename must be a string")
     _update_path_parts(target)
     if any(part.startswith("$") for part in source.split(".") + target.split(".")):
@@ -584,6 +592,14 @@ def _validate_pull_field_condition(condition):
             _raise_write_error("Can't have RegEx as arg to non-equality predicate")
         if key in _PULL_COMPARISON_OPERATORS and bson_value_sort_key(operand) is None:
             _raise_write_error("$pull {0} requires a supported BSON value".format(key))
+
+    # Reuse the query engine's operand validation for the field operators that
+    # $pull shares with find().  Server-side update parsing exposes malformed
+    # predicates as WriteError, not the OperationFailure used by reads.
+    try:
+        validate_filter_operators({"value": condition})
+    except OperationFailure as error:
+        _raise_write_error(str(error), code=error.code or 2)
 
 
 def _validate_pull_document_condition(condition):
@@ -647,6 +663,10 @@ def _validate_update_operators(update_doc):
         elif operator == "$pull":
             for value in changes.values():
                 _validate_pull_condition(value)
+        elif operator == "$pullAll":
+            for value in changes.values():
+                if not isinstance(value, (list, tuple)):
+                    _raise_write_error("$pullAll requires an array argument")
         elif operator == "$inc":
             for value in changes.values():
                 if not is_bson_number(value):
@@ -750,19 +770,20 @@ def _raise_immutable_id_update(path):
 
 
 def _pull_comparison_matches(actual, operand, comparison):
+    """Retain the focused BSON range helper used by compatibility tests."""
+
     return bson_query_range_matches(actual, operand, comparison)
 
 
 def _pull_field_matches(actual, condition):
-    for query_operator, operand in condition.items():
-        if query_operator == "$eq":
-            if not _value_matches(actual, operand):
-                return False
-        elif not _pull_comparison_matches(
-            actual, operand, _PULL_COMPARISON_OPERATORS[query_operator]
-        ):
-            return False
-    return True
+    # A $pull predicate treats each array member as the value of a query field.
+    # Routing it through the shared matcher keeps $in/$nin, regex, $elemMatch,
+    # scalar-to-array equality, and BSON range behavior aligned with find().
+    return matches_filter(
+        {"value": actual},
+        {"value": condition},
+        _exact_id=False,
+    )
 
 
 def _pull_document_matches(document, condition):
@@ -843,22 +864,46 @@ def _apply_update_document(item, update_doc):
                 _write_update_path(updated, path, popped)
         elif operator == "$push":
             for path, value in changes.items():
-                current = _get_nested(updated, path, [])
+                current = _read_update_path(updated, path)
+                if current is _MISSING:
+                    current = []
                 if not isinstance(current, list):
-                    raise ValueError("$push target must be a list")
+                    _raise_write_error(
+                        "The field {0} must be an array".format(repr(path)), code=2
+                    )
                 current = list(current)
                 current = _apply_push(current, value)
-                _set_nested(updated, path, current)
+                _write_update_path(updated, path, current)
         elif operator == "$pull":
             for path, value in changes.items():
-                current = _get_nested(updated, path, [])
+                current = _read_update_path(updated, path)
+                if current is _MISSING:
+                    continue
                 if not isinstance(current, list):
-                    raise ValueError("$pull target must be a list")
-                _set_nested(
-                    updated,
-                    path,
-                    [item for item in current if not _pull_matches(item, value)],
-                )
+                    _raise_write_error(
+                        "Cannot apply $pull to a non-array value", code=2
+                    )
+                pulled = [item for item in current if not _pull_matches(item, value)]
+                if len(pulled) != len(current):
+                    _write_update_path(updated, path, pulled)
+        elif operator == "$pullAll":
+            for path, values in changes.items():
+                current = _read_update_path(updated, path)
+                if current is _MISSING:
+                    continue
+                if not isinstance(current, list):
+                    _raise_write_error(
+                        "Cannot apply $pullAll to a non-array value", code=2
+                    )
+                pulled = [
+                    item
+                    for item in current
+                    if not any(
+                        bson_values_equal(item, candidate) for candidate in values
+                    )
+                ]
+                if len(pulled) != len(current):
+                    _write_update_path(updated, path, pulled)
         elif operator == "$addToSet":  # pragma: no branch - operators prevalidated
             for path, value in changes.items():
                 current = _get_nested(updated, path, [])
@@ -1168,6 +1213,17 @@ def _pop_case_insensitive_option(options, name, default=None):
 def _materialize_result_value(value, document_class, tz_aware, tzinfo):
     """Recursively build one public result using client codec options."""
 
+    if _CODE is not None and isinstance(value, _CODE):
+        scope = value.scope
+        if scope is None:
+            return copy.deepcopy(value)
+        materialized_scope = _materialize_result_value(
+            scope,
+            document_class,
+            tz_aware,
+            tzinfo,
+        )
+        return _CODE(str(value), materialized_scope)
     if isinstance(value, datetime_module.datetime):
         return canonicalize_datetime(
             value,
@@ -2070,6 +2126,10 @@ class TinyMongoCollection(object):
     @_engine_write_locked
     def drop_index(self, key):
         """Drop a durable index by its name or legacy field name."""
+        if not is_bson_string(key):
+            raise OperationFailure(
+                "BSON field 'dropIndexes.index' must be a string", code=14
+            )
         if key in ("_id", "_id_"):
             raise OperationFailure("The _id index cannot be dropped", code=72)
         if self.parent.engine is not None:
@@ -3343,6 +3403,10 @@ class TinyMongoCollection(object):
     def distinct(self, key, filter=None, *args, **kwargs):
         """Return unique values for a field among matching documents."""
         _reject_session(kwargs)
+        if not is_bson_string(key):
+            raise OperationFailure(
+                "BSON field 'distinctCommandRequest.key' must be a string", code=14
+            )
         values = []
         identities = set()
         unsupported_values = []
@@ -3641,7 +3705,7 @@ class TinyMongoCursor(object):
                 if not len(pair) == 2:
                     raise ValueError("Need to be (key, direction) pair")
                 # if not isinstance(pair[0], basestring):
-                if not isinstance(pair[0], str):
+                if not is_bson_string(pair[0]):
                     raise TypeError("first item in each key pair must " "be a string")
                 if not isinstance(pair[1], int) or not abs(pair[1]) == 1:
                     raise TypeError("bad sort specification.")
@@ -3649,7 +3713,7 @@ class TinyMongoCursor(object):
             sort_specifier = key_or_list
 
         # elif isinstance(key_or_list, basestring):
-        elif isinstance(key_or_list, str):
+        elif is_bson_string(key_or_list):
             if direction is not None:
                 if not isinstance(direction, int) or not abs(direction) == 1:
                     raise TypeError("bad sort specification.")
@@ -3658,6 +3722,9 @@ class TinyMongoCursor(object):
                 direction = 1
 
             sort_specifier = [(key_or_list, direction)]
+
+        elif isinstance(key_or_list, str):
+            raise TypeError("sort field must be an ordinary BSON string")
 
         else:
             raise ValueError(

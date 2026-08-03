@@ -207,6 +207,105 @@ def test_pull_supports_query_operators_documents_logical_queries_and_exact_array
     assert nested_literal["values"] == [{"meta": {"score": 2}}]
 
 
+def test_pull_supports_in_nin_regex_options_and_elem_match():
+    values = ["alpha", "ALPHA", "beta", "other", [1, 3], [1, 2]]
+
+    included = core._apply_update_document(
+        {"_id": 1, "values": values},
+        {"$pull": {"values": {"$in": ["alpha", "beta"]}}},
+    )
+    excluded = core._apply_update_document(
+        {"_id": 2, "values": values},
+        {"$pull": {"values": {"$nin": ["alpha", "beta"]}}},
+    )
+    regex = core._apply_update_document(
+        {"_id": 3, "values": values},
+        {"$pull": {"values": {"$regex": "^alpha$", "$options": "i"}}},
+    )
+    element_match = core._apply_update_document(
+        {"_id": 4, "values": values},
+        {"$pull": {"values": {"$elemMatch": {"$gt": 2}}}},
+    )
+
+    assert included["values"] == ["ALPHA", "other", [1, 3], [1, 2]]
+    assert excluded["values"] == ["alpha", "beta"]
+    assert regex["values"] == ["beta", "other", [1, 3], [1, 2]]
+    assert element_match["values"] == ["alpha", "ALPHA", "beta", "other", [1, 2]]
+
+
+def test_pull_and_push_use_mongodb_path_and_non_array_errors():
+    missing = core._apply_update_document(
+        {"_id": 1, "nested": {}},
+        {"$pull": {"absent": "x", "nested.absent": "x"}},
+    )
+    numeric = core._apply_update_document(
+        {"_id": 2, "nested": [{"values": ["x", "y"]}]},
+        {"$pull": {"nested.0.values": "x"}},
+    )
+    pushed = core._apply_update_document(
+        {"_id": 3, "nested": []},
+        {"$push": {"nested.2.values": "x"}},
+    )
+
+    assert missing == {"_id": 1, "nested": {}}
+    assert numeric["nested"] == [{"values": ["y"]}]
+    assert pushed["nested"] == [None, None, {"values": ["x"]}]
+
+    for operator, operand in (("$pull", "x"), ("$push", "x")):
+        with pytest.raises(WriteError) as non_array:
+            core._apply_update_document(
+                {"_id": 4, "values": "not-an-array"},
+                {operator: {"values": operand}},
+            )
+        assert non_array.value.code == 2
+
+    with pytest.raises(WriteError) as blocked:
+        core._apply_update_document(
+            {"_id": 5, "nested": None},
+            {"$pull": {"nested.values": "x"}},
+        )
+    assert blocked.value.code == 28
+
+
+def test_pull_all_uses_literal_bson_equality_and_validates_operands():
+    original = {
+        "_id": 1,
+        "values": [
+            True,
+            1,
+            1.0,
+            [1, 2],
+            [2, 1],
+            {"a": 1, "b": 2},
+            {"b": 2, "a": 1},
+        ],
+    }
+    updated = core._apply_update_document(
+        original,
+        {"$pullAll": {"values": [1.0, [1, 2], {"a": 1, "b": 2}]}},
+    )
+    missing = core._apply_update_document({"_id": 2}, {"$pullAll": {"values": [1]}})
+
+    assert updated["values"] == [True, [2, 1], {"b": 2, "a": 1}]
+    assert missing == {"_id": 2}
+    assert original["values"][1:3] == [1, 1.0]
+
+    with pytest.raises(WriteError) as non_array:
+        core._apply_update_document(
+            {"_id": 3, "values": "not-an-array"},
+            {"$pullAll": {"values": ["x"]}},
+        )
+    assert non_array.value.code == 2
+
+    for operand in ("x", None, {"x": 1}):
+        with pytest.raises(WriteError) as malformed:
+            core._apply_update_document(
+                {"_id": 4, "values": []},
+                {"$pullAll": {"values": operand}},
+            )
+        assert malformed.value.code == 2
+
+
 @pytest.mark.parametrize(
     "condition, message",
     [
@@ -218,8 +317,11 @@ def test_pull_supports_query_operators_documents_logical_queries_and_exact_array
         ({"$not": {"$unknown": 1}}, "does not support query operator"),
         ({"$all": [2]}, "does not support query operator"),
         ({"$not": {"$eq": 2}}, "does not support query operator"),
-        ({"$options": "i"}, "does not support query operator"),
-        ({"$regex": "["}, "does not support query operator"),
+        ({"$options": "i"}, r"\$options requires \$regex"),
+        ({"$regex": "["}, "regex pattern is not valid"),
+        ({"$in": "value"}, r"\$in requires an array"),
+        ({"$nin": "value"}, r"\$nin requires an array"),
+        ({"$elemMatch": "value"}, r"\$elemMatch requires a query document"),
         ({"$gte": {1}}, "requires a supported BSON value"),
         (
             {"$gte": 1, "$or": [{"score": 1}]},
@@ -248,6 +350,16 @@ def test_pull_rejects_unsupported_or_malformed_queries(condition, message):
         core._apply_update_document(
             {"_id": 1, "values": [1]}, {"$pull": {"values": condition}}
         )
+
+
+def test_pull_rejects_top_level_not_like_mongodb():
+    with pytest.raises(WriteError, match="does not support query operator") as caught:
+        core._apply_update_document(
+            {"_id": 1, "values": [1, 2]},
+            {"$pull": {"values": {"$not": {"$eq": 2}}}},
+        )
+
+    assert caught.value.code == 2
 
 
 def test_invalid_updates_are_preflighted_and_atomic_even_without_a_match(tmp_path):
