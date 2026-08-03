@@ -12,6 +12,8 @@ from tinymongo.errors import WriteError as TinyMongoWriteError
 pytestmark = pytest.mark.contract
 bson = pytest.importorskip("bson")
 Binary = bson.Binary
+MaxKey = bson.MaxKey
+MinKey = bson.MinKey
 ObjectId = bson.ObjectId
 Regex = bson.Regex
 
@@ -115,6 +117,107 @@ def test_generated_scalar_range_matrix(
         operator: _ids(collection.find({"value": {operator: operand}}))
         for operator in ("$gt", "$gte", "$lt", "$lte")
     } == expected
+
+
+def test_tm036_min_max_key_range_operands_cross_type_brackets(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "minimum", "value": MinKey()},
+            {"_id": "null", "value": None},
+            {"_id": "nan", "value": float("nan")},
+            {"_id": "decimal-nan", "value": bson.Decimal128("NaN")},
+            {"_id": "number", "value": 1},
+            {"_id": "string", "value": "value"},
+            {"_id": "object", "value": {"answer": 42}},
+            {"_id": "empty-array", "value": []},
+            {"_id": "array", "value": [1, 2]},
+            {"_id": "maximum", "value": MaxKey()},
+            {"_id": "missing"},
+        ]
+    )
+
+    all_ids = {
+        "minimum",
+        "null",
+        "nan",
+        "decimal-nan",
+        "number",
+        "string",
+        "object",
+        "empty-array",
+        "array",
+        "maximum",
+        "missing",
+    }
+    assert _ids(collection.find({"value": {"$gt": MinKey()}})) == all_ids - {"minimum"}
+    assert _ids(collection.find({"value": {"$gte": MinKey()}})) == all_ids
+    assert _ids(collection.find({"value": {"$lt": MinKey()}})) == set()
+    assert _ids(collection.find({"value": {"$lte": MinKey()}})) == {"minimum"}
+
+    assert _ids(collection.find({"value": {"$lt": MaxKey()}})) == all_ids - {"maximum"}
+    assert _ids(collection.find({"value": {"$lte": MaxKey()}})) == all_ids
+    assert _ids(collection.find({"value": {"$gt": MaxKey()}})) == set()
+    assert _ids(collection.find({"value": {"$gte": MaxKey()}})) == {"maximum"}
+
+    whole_range = {"value": {"$gte": MinKey(), "$lte": MaxKey()}}
+    assert _ids(collection.find(whole_range)) == all_ids
+    assert _ids(collection.aggregate([{"$match": whole_range}])) == all_ids
+
+    # Only MinKey and MaxKey operands span BSON type brackets. Ordinary
+    # numeric predicates still exclude stored values from every other family.
+    assert _ids(collection.find({"value": {"$gt": 0}})) == {"number", "array"}
+    assert _ids(collection.find({"value": {"$in": [MinKey()]}})) == {"minimum"}
+
+
+def test_tm036_extreme_array_members_preserve_exact_semantics(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "minimum-array", "value": [MinKey()]},
+            {"_id": "maximum-array", "value": [MaxKey()]},
+        ]
+    )
+
+    array_ids = {"minimum-array", "maximum-array"}
+    assert _ids(collection.find({"value": {"$gt": MinKey()}})) == array_ids
+    assert _ids(collection.find({"value": {"$lte": MinKey()}})) == {"minimum-array"}
+    assert _ids(collection.find({"value": {"$lt": MaxKey()}})) == array_ids
+    assert _ids(collection.find({"value": {"$gte": MaxKey()}})) == {"maximum-array"}
+
+    assert _ids(collection.find({"value": {"$elemMatch": {"$gt": MinKey()}}})) == {
+        "maximum-array"
+    }
+    assert _ids(collection.find({"value": {"$elemMatch": {"$lte": MinKey()}}})) == {
+        "minimum-array"
+    }
+
+
+def test_tm036_pull_reuses_unbounded_min_max_key_ranges(contract_target):
+    collection = contract_target.collection
+    collection.insert_one(
+        {
+            "_id": "values",
+            "items": [
+                MinKey(),
+                None,
+                1,
+                "value",
+                {"answer": 42},
+                [1, 2],
+                MaxKey(),
+            ],
+        }
+    )
+
+    result = collection.update_one(
+        {"_id": "values"},
+        {"$pull": {"items": {"$gte": MinKey(), "$lte": MaxKey()}}},
+    )
+
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    assert collection.find_one({"_id": "values"})["items"] == []
 
 
 def test_null_range_queries_include_missing_and_array_members(contract_target):

@@ -578,11 +578,13 @@ booleans, datetimes, `Timestamp`, regex, unscoped `Code`, scoped `Code`, and
 `$gt`, `$gte`, `$lt`, and `$lte` query operators, including range predicates
 inside `$pull`. Range queries apply MongoDB's BSON type bracketing: numeric
 representations share one family, while values from other type families do not
-compare with one another. Array fields expose both the whole array and its
-direct members where MongoDB does, and documents and arrays are compared
-recursively. Values with equal comparison keys retain their input order for
-ascending and descending sorts. TinyMongo uses its shared Python matcher
-whenever a backend-native or indexed predicate cannot guarantee these rules.
+compare with one another. `MinKey` and `MaxKey` operands are the two exceptions:
+they compare across every supported BSON type and can express an inclusive
+whole-value range. Array fields expose both the whole array and its direct
+members where MongoDB does, and documents and arrays are compared recursively.
+Values with equal comparison keys retain their input order for ascending and
+descending sorts. TinyMongo uses its shared Python matcher whenever a
+backend-native or indexed predicate cannot guarantee these rules.
 Extending unique-index identity to the remaining supported BSON values is
 still tracked separately in the roadmap and continues to fail closed where
 exact enforcement is unavailable. Update and aggregation `$min` and `$max`

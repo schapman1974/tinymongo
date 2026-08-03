@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- **TM-036:** `MinKey` and `MaxKey` range operands now cross BSON type
+  brackets, so whole-range queries return every supported value through
+  `find()`, aggregation `$match`, and `$pull` instead of silently returning an
+  empty result.
+
 ## [1.3.0] - 2026-08-02
 
 ### Added
