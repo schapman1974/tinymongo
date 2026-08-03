@@ -188,6 +188,18 @@ with the follow-up audit of his
   and preserve TinyMongo's more diagnostic `InvalidDocument` messages with
   collection, `_id`, and full nested-path context.
 
+#### Mike's [TM-036 through TM-038 BSON follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5169028297)
+
+- [x] **TM-036:** Exempt `MinKey` and `MaxKey` range operands from BSON type
+  bracketing so inclusive whole-range scans work through `find()`, aggregation
+  `$match`, and `$pull`, including missing fields and stored boundary values.
+- [ ] **TM-037:** Decide whether top-level `Timestamp(0, 0)` inserts should
+  receive MongoDB's server timestamp or remain a documented embedded-database
+  difference.
+- [ ] **TM-038:** Extend `$pull` through the shared matcher for the remaining
+  measured predicate set: `$exists`, `$type`, `$ne`, `$mod`, `$all`, `$size`,
+  and document-field `$not`.
+
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
   indexes. Native constraints now enforce exact cross-process equality for

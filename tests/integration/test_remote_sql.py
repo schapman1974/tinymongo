@@ -181,6 +181,98 @@ def test_remote_sql_async_query_operators(backend, env_name):
 
 
 @pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_tm036_min_max_key_ranges(backend, env_name):
+    bson = pytest.importorskip("bson")
+    dsn, database, prefix = _remote_target(backend, env_name)
+    client = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = client[database][prefix + "_tm036_ranges"]
+    whole_range = {"value": {"$gte": bson.MinKey(), "$lte": bson.MaxKey()}}
+    expected = {"minimum", "number", "string", "maximum", "missing", "holder"}
+    try:
+        docs.insert_many(
+            [
+                {"_id": "minimum", "value": bson.MinKey()},
+                {"_id": "number", "value": 1},
+                {"_id": "string", "value": "value"},
+                {"_id": "maximum", "value": bson.MaxKey()},
+                {"_id": "missing"},
+                {
+                    "_id": "holder",
+                    "value": 0,
+                    "items": [bson.MinKey(), 1, "value", bson.MaxKey()],
+                },
+            ]
+        )
+
+        assert {row["_id"] for row in docs.find(whole_range)} == expected
+        assert {
+            row["_id"] for row in docs.aggregate([{"$match": whole_range}])
+        } == expected
+
+        result = docs.update_one(
+            {"_id": "holder"},
+            {"$pull": {"items": {"$gte": bson.MinKey(), "$lte": bson.MaxKey()}}},
+        )
+        assert result.modified_count == 1
+        assert docs.find_one({"_id": "holder"})["items"] == []
+    finally:
+        docs.drop()
+        client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_sql_async_tm036_min_max_key_ranges(backend, env_name):
+    bson = pytest.importorskip("bson")
+    dsn, database, prefix = _remote_target(backend, env_name)
+    whole_range = {"value": {"$gte": bson.MinKey(), "$lte": bson.MaxKey()}}
+    expected = {"minimum", "number", "string", "maximum", "missing", "holder"}
+
+    async def scenario():
+        client = AsyncTinyMongoClient(backend=backend, dsn=dsn)
+        docs = client[database][prefix + "_async_tm036_ranges"]
+        try:
+            await docs.insert_many(
+                [
+                    {"_id": "minimum", "value": bson.MinKey()},
+                    {"_id": "number", "value": 1},
+                    {"_id": "string", "value": "value"},
+                    {"_id": "maximum", "value": bson.MaxKey()},
+                    {"_id": "missing"},
+                    {
+                        "_id": "holder",
+                        "value": 0,
+                        "items": [bson.MinKey(), 1, "value", bson.MaxKey()],
+                    },
+                ]
+            )
+
+            assert {
+                row["_id"] for row in await docs.find(whole_range).to_list()
+            } == expected
+            aggregate = await docs.aggregate([{"$match": whole_range}])
+            assert {row["_id"] for row in await aggregate.to_list()} == expected
+
+            result = await docs.update_one(
+                {"_id": "holder"},
+                {
+                    "$pull": {
+                        "items": {
+                            "$gte": bson.MinKey(),
+                            "$lte": bson.MaxKey(),
+                        }
+                    }
+                },
+            )
+            assert result.modified_count == 1
+            assert (await docs.find_one({"_id": "holder"}))["items"] == []
+        finally:
+            await docs.drop()
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
 def test_remote_sql_uuid_regex_roundtrip_query_and_unique_fail_closed(
     backend, env_name
 ):

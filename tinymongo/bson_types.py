@@ -684,16 +684,18 @@ def bson_query_range_matches(actual, operand, comparison, exact=False):
     """Return whether one query range comparison follows BSON semantics.
 
     MongoDB brackets range predicates by the outer BSON type, with all numeric
-    representations sharing one family. A non-positional array field exposes
-    both its complete array value and each direct member to the predicate;
-    ``exact`` endpoints such as ``$elemMatch`` or a numeric path component do
-    not fan out again.
+    representations sharing one family. MinKey and MaxKey operands are the two
+    exceptions: their comparisons span every supported BSON type. A
+    non-positional array field exposes both its complete array value and each
+    direct member to the predicate; ``exact`` endpoints such as ``$elemMatch``
+    or a numeric path component do not fan out again.
     """
 
     operand_identity = bson_value_identity_key(operand)
     operand_order = bson_value_sort_key(operand)
     if operand_identity is None or operand_order is None:
         return False
+    crosses_type_brackets = operand_identity[0] in ("minKey", "maxKey")
 
     values = [actual]
     if isinstance(actual, (list, tuple)) and not exact:
@@ -705,11 +707,11 @@ def bson_query_range_matches(actual, operand, comparison, exact=False):
         if (
             value_identity is None
             or value_order is None
-            or value_identity[0] != operand_identity[0]
+            or (not crosses_type_brackets and value_identity[0] != operand_identity[0])
         ):
             continue
         try:
-            if value_identity[0] == "number" and (
+            if value_identity[0] == operand_identity[0] == "number" and (
                 bson_number_decimal(value).is_nan()
                 != bson_number_decimal(operand).is_nan()
             ):
