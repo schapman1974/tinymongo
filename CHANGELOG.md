@@ -7,6 +7,19 @@
   shims. TinyMongo now answers the discovery-safe `ping` and `buildInfo`
   database commands, accepts Beanie's `authorizedCollections` and `nameOnly`
   collection-listing hints, and runs a pinned real-Beanie CRUD smoke contract.
+- A reproducible comparison benchmark now runs the same JSON-document workload
+  against TinyMongo SQLite, raw `sqlite3`, and an optional real MongoDB server.
+
+### Changed
+- SQLite bulk inserts now use BSON-aware identity sets and one-pass unique-index
+  token maps instead of quadratic duplicate planning and repeated backend
+  preflights.
+- SQLite multi-document updates now select, validate, and write their complete
+  batch in one transaction with one `executemany()` call and commit.
+- Exact SQLite `_id` queries now use the primary-key path directly, while
+  declared scalar indexes use bounded reads plus a companion candidate index
+  for array and object values. One-time migration, WAL, and collection setup is
+  cached without losing recovery from external collection drops.
 
 ### Fixed
 - Update and delete operations now expose PyMongo-shaped reply mappings through
