@@ -41,8 +41,13 @@ def test_beanie_write_result_contract(contract_target):
     changed = collection.update_one({"_id": 1}, {"$set": {"value": 1}})
     _assert_update_reply(changed, matched=1, modified=1, existing=True)
 
-    unchanged = collection.replace_one({"_id": 1}, {"value": 1})
+    unchanged = collection.update_one({"_id": 1}, {"$set": {"value": 1}})
     _assert_update_reply(unchanged, matched=1, modified=0, existing=True)
+
+    # An omitted _id can make an otherwise equal replacement count as modified
+    # on MongoDB, so exercise replacement with an intentional value change.
+    replaced = collection.replace_one({"_id": 1}, {"value": 2})
+    _assert_update_reply(replaced, matched=1, modified=1, existing=True)
 
     missing = collection.update_one({"_id": 99}, {"$set": {"value": 1}})
     _assert_update_reply(missing, matched=0, modified=0, existing=False)
