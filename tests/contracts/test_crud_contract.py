@@ -2,10 +2,20 @@
 
 import pytest
 
+from tinymongo.errors import WriteError as TinyMongoWriteError
+
 from .support import observe
 
 
 pytestmark = pytest.mark.contract
+
+_WRITE_ERRORS = (TinyMongoWriteError,)
+try:
+    from pymongo.errors import WriteError as PyMongoWriteError
+except ImportError:  # pragma: no cover - optional dependency guard
+    pass
+else:
+    _WRITE_ERRORS += (PyMongoWriteError,)
 
 
 def test_insert_query_sort_and_count(contract_target):
@@ -106,6 +116,86 @@ def test_replace_upsert_and_delete_metadata(contract_target):
         "name": "Grace",
         "active": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("query", "pinned_id"),
+    [
+        ({"_id": 77}, 77),
+        ({"_id": {"$eq": "pinned-key"}}, "pinned-key"),
+        ({"_id": 88, "state": "missing"}, 88),
+        ({"_id": None}, None),
+    ],
+)
+def test_replace_upsert_preserves_equality_bound_id(contract_target, query, pinned_id):
+    collection = contract_target.collection
+    replacement = {"value": 7}
+
+    result = collection.replace_one(query, replacement, upsert=True)
+
+    assert replacement == {"value": 7}
+    assert result.raw_result == {
+        "n": 1,
+        "nModified": 0,
+        "ok": 1.0,
+        "updatedExisting": False,
+        "upserted": pinned_id,
+    }
+    expected_matched = 1 if pinned_id is None else 0
+    assert (result.matched_count, result.modified_count) == (expected_matched, 0)
+    assert result.did_upsert is True
+    assert result.upserted_id == pinned_id
+    assert collection.find_one({"_id": pinned_id}) == {
+        "_id": pinned_id,
+        "value": 7,
+    }
+
+
+def test_replace_upsert_stores_id_first(contract_target):
+    collection = contract_target.collection
+    replacement = {"value": 7}
+
+    result = collection.replace_one({"_id": 77}, replacement, upsert=True)
+    stored = collection.find_one({"_id": 77})
+
+    assert result.upserted_id == 77
+    assert list(stored) == ["_id", "value"]
+
+
+def test_replace_upsert_accepts_bson_equal_filter_and_replacement_ids(
+    contract_target,
+):
+    collection = contract_target.collection
+    replacement = {"value": 7, "_id": 1.0}
+
+    result = collection.replace_one(
+        {"_id": 1},
+        replacement,
+        upsert=True,
+    )
+    stored = collection.find_one({"_id": 1})
+
+    assert list(replacement) == ["value", "_id"]
+    assert type(result.upserted_id) is float
+    assert type(stored["_id"]) is float
+    assert list(stored) == ["_id", "value"]
+    assert stored["value"] == 7
+
+
+def test_replace_upsert_rejects_conflicting_filter_and_replacement_ids(
+    contract_target,
+):
+    collection = contract_target.collection
+
+    with pytest.raises(_WRITE_ERRORS) as caught:
+        collection.replace_one(
+            {"_id": "filter-id"},
+            {"_id": "replacement-id", "value": 7},
+            upsert=True,
+        )
+
+    assert caught.value.code == 66
+    assert collection.count_documents({}) == 0
 
 
 def test_duplicate_id_has_a_shared_error_category(contract_target):

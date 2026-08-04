@@ -22,6 +22,12 @@
   cached without losing recovery from external collection drops.
 
 ### Fixed
+- **TM-039:** Replacement upserts now retain an `_id` pinned by a top-level
+  direct value or sole `$eq` predicate, return that exact value through
+  `upserted_id`, and leave the inserted document findable through the caller's
+  chosen key. Conflicting replacement IDs fail with MongoDB's immutable-field
+  code instead of silently inserting under the wrong key, and stored
+  replacements keep `_id` first.
 - Update and delete operations now expose PyMongo-shaped reply mappings through
   `raw_result`, including `n`, `nModified`, `updatedExisting`, `upserted`, and
   `ok` where applicable. Counts and upsert IDs are derived from that shared

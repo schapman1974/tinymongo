@@ -1118,6 +1118,37 @@ def _document_for_upsert(query, update_doc):
     return _apply_update_document(document, update_doc)
 
 
+def _replacement_document_for_upsert(query, replacement):
+    """Preserve a top-level direct or sole-``$eq`` ``_id`` during upsert."""
+
+    query_id = _MISSING
+    if isinstance(query, Mapping) and "_id" in query:
+        query_id = _direct_id_equality({"_id": query["_id"]})
+
+    replacement_id = replacement.get("_id", _MISSING)
+    if (
+        query_id is not _MISSING
+        and replacement_id is not _MISSING
+        and not bson_values_equal(query_id, replacement_id)
+    ):
+        _raise_write_error(
+            "After applying the update, the (immutable) field '_id' was found "
+            "to have been altered",
+            code=66,
+        )
+
+    inserted_id = replacement_id
+    if inserted_id is _MISSING:
+        inserted_id = query_id
+    if inserted_id is _MISSING:
+        inserted_id = _generate_document_id()
+
+    # MongoDB stores ``_id`` first even when it was inferred from the filter.
+    inserted = {"_id": copy.deepcopy(inserted_id)}
+    inserted.update(copy.deepcopy(replacement))
+    return inserted
+
+
 def _simple_equality_filter(_filter):
     if not isinstance(_filter, Mapping) or len(_filter) != 1:
         return None
@@ -3122,9 +3153,7 @@ class TinyMongoCollection(object):
             item = self.parent.engine.find_one(self.tablename, query)
             if item is None:
                 if kwargs.get("upsert") is True:
-                    inserted = copy.deepcopy(replacement)
-                    if "_id" not in inserted:
-                        inserted["_id"] = _generate_document_id()
+                    inserted = _replacement_document_for_upsert(query, replacement)
                     self._validate_storage_document(inserted)
                     self.parent.engine.validate_unique_post_image(
                         self.tablename,
@@ -3185,9 +3214,7 @@ class TinyMongoCollection(object):
                 item = self.table.get(allcond)
             if item is None:
                 if kwargs.get("upsert") is True:
-                    inserted = copy.deepcopy(replacement)
-                    if "_id" not in inserted:
-                        inserted["_id"] = _generate_document_id()
+                    inserted = _replacement_document_for_upsert(query, replacement)
                     self._validate_storage_document(inserted)
                     self._validate_unique_post_image(self.table.all() + [inserted])
                     self.table.insert(inserted)
