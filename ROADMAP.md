@@ -200,6 +200,13 @@ with the follow-up audit of his
   measured predicate set: `$exists`, `$type`, `$ne`, `$mod`, `$all`, `$size`,
   and document-field `$not`.
 
+#### Mike's [TM-039 replacement-upsert follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5174549635)
+
+- [x] **TM-039:** Preserve an `_id` pinned by a replacement-upsert top-level
+  direct value or sole `$eq` predicate across every backend and synchronous or
+  asynchronous client, including the returned `upserted_id` and immediate
+  lookup by the same key.
+
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
   indexes. Native constraints now enforce exact cross-process equality for
