@@ -617,6 +617,8 @@ def _simple_scalar_equality(filter_doc):
     if not isinstance(filter_doc, Mapping) or len(filter_doc) != 1:
         return None
     field, expected = next(iter(filter_doc.items()))
+    if isinstance(expected, dict) and set(expected) == {"$eq"}:
+        expected = expected["$eq"]
     if (
         not isinstance(field, str)
         or field.startswith("$")
@@ -628,6 +630,25 @@ def _simple_scalar_equality(filter_doc):
     ):
         return None
     return field, expected
+
+
+def _direct_id_equality(filter_doc):
+    """Return the operand for an exact single-field ``_id`` query."""
+
+    if not isinstance(filter_doc, Mapping) or set(filter_doc) != {"_id"}:
+        return _MISSING
+    expected = filter_doc["_id"]
+    if is_bson_regex(expected):
+        return _MISSING
+    if isinstance(expected, Mapping) and any(
+        str(key).startswith("$") for key in expected
+    ):
+        if set(expected) != {"$eq"}:
+            return _MISSING
+        expected = expected["$eq"]
+        if is_bson_regex(expected):
+            return _MISSING
+    return expected
 
 
 def _reject_remote_unique_values(documents, specs):
@@ -1981,6 +2002,14 @@ class SQLiteTableBackend(TableBackend):
     extension = ".sqlite"
     index_catalog_table = "__tinymongo_indexes"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._sqlite_state_lock = threading.RLock()
+        self._sqlite_initialized = False
+        self._ready_collections = set()
+        self._ready_type_indexes = set()
+        self._query_index_cache = {}
+
     def _physical_index_name(self, collection, spec):
         identity = "{0}\x00{1}\x00{2}".format(
             self.database or "default", collection, spec.name
@@ -2000,9 +2029,62 @@ class SQLiteTableBackend(TableBackend):
         return conn
 
     def _connect(self):
-        conn = self._read_connect()
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        self._ensure_sqlite_initialized()
+        return self._read_connect()
+
+    def _ensure_sqlite_initialized(self):
+        """Run persistent SQLite setup and legacy migration once per engine."""
+
+        with self._sqlite_state_lock:
+            if self._sqlite_initialized:
+                return
+
+        # Legacy migration writes collection tables, and WAL changes persistent
+        # database state.  Use the same process/file lock as ordinary writes so
+        # two clients opening an older file cannot race the one-time upgrade.
+        with self._write_lock():
+            with self._sqlite_state_lock:
+                if self._sqlite_initialized:
+                    return
+                conn = self._read_connect()
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    self._migrate_legacy_blob_on_connection(conn)
+                finally:
+                    conn.close()
+                self._sqlite_initialized = True
+
+    @staticmethod
+    def _is_missing_collection_error(exc):
+        return (
+            isinstance(exc, sqlite3.OperationalError)
+            and "no such table" in str(exc).lower()
+        )
+
+    def _forget_collection(self, collection):
+        with self._sqlite_state_lock:
+            self._ready_collections.discard(collection)
+            self._ready_type_indexes = {
+                key for key in self._ready_type_indexes if key[0] != collection
+            }
+            self._query_index_cache.pop(collection, None)
+
+    def _run_collection_read(self, collection, operation):
+        """Run one connection-scoped read, recovering once from an external drop."""
+
+        for attempt in range(2):
+            self.create_collection(collection)
+            conn = self._connect()
+            try:
+                return operation(conn)
+            except Exception as exc:
+                if attempt or not self._is_missing_collection_error(exc):
+                    raise
+                self._forget_collection(collection)
+            finally:
+                conn.close()
+
+        raise AssertionError("unreachable SQLite collection retry")  # pragma: no cover
 
     def _ensure_index_catalog(self, conn):
         conn.execute(
@@ -2115,77 +2197,105 @@ class SQLiteTableBackend(TableBackend):
         ).fetchone()
         return "stale" if stale is not None else "ready"
 
-    def get_index_specs(self, collection):
-        conn = self._read_connect()
-        try:
-            state = self._index_catalog_state(conn)
-            if state == "absent":
-                return []
-            if state == "stale":
-                # Index-token migrations change persisted expression-index
-                # keys. Serialize only this one-time upgrade, then leave normal
-                # catalog reads lock-free so SQLite WAL readers stay concurrent.
-                conn.close()
-                with self._write_lock():
-                    migration_conn = self._connect()
-                    try:
-                        self._ensure_index_catalog(migration_conn)
-                    finally:
-                        migration_conn.close()
-                conn = self._read_connect()
-            rows = conn.execute(
-                "SELECT index_name, field_name, unique_flag FROM {0} "
-                "WHERE collection_name = ? ORDER BY index_name".format(
-                    _quote_identifier(self.index_catalog_table)
-                ),
-                (collection,),
-            ).fetchall()
-            return [
-                IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
-                for row in rows
-            ]
-        finally:
-            conn.close()
+    def _get_index_specs_on_connection(self, conn, collection):
+        """Read current index metadata without opening a second connection."""
 
-    def _migrate_legacy_blob(self):
+        state = self._index_catalog_state(conn)
+        if state == "absent":
+            return []
+        if state == "stale":
+            # Index-token migrations change persisted expression-index keys.
+            # Serialize only this one-time upgrade; ordinary catalog reads stay
+            # lock-free and always consult durable metadata for cross-process
+            # create/drop visibility.
+            with self._write_lock():
+                self._ensure_index_catalog(conn)
+        rows = conn.execute(
+            "SELECT index_name, field_name, unique_flag FROM {0} "
+            "WHERE collection_name = ? ORDER BY index_name".format(
+                _quote_identifier(self.index_catalog_table)
+            ),
+            (collection,),
+        ).fetchall()
+        return [
+            IndexSpec(field=row[1], name=row[0], unique=bool(row[2])) for row in rows
+        ]
+
+    def _get_query_index_specs_on_connection(self, conn, collection):
+        """Return fresh-enough query metadata with one cheap schema check.
+
+        Query planning may safely cache index specifications because a stale
+        entry only changes whether SQLite attempts an equivalent candidate
+        query; it never governs uniqueness validation. ``schema_version``
+        still makes index creation or removal by another process visible on
+        the next read without reopening and migrating the catalog every time.
+        """
+
+        schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+        with self._sqlite_state_lock:
+            cached = self._query_index_cache.get(collection)
+            if cached is not None and cached[0] == schema_version:
+                return cached[1]
+            # A peer may have dropped either the table or one physical
+            # expression index. Reconcile this collection's persisted index
+            # storage before trusting a new or changed catalog snapshot.
+            self._ready_type_indexes = {
+                key for key in self._ready_type_indexes if key[0] != collection
+            }
+
+        specs = self._get_index_specs_on_connection(conn, collection)
+        with self._sqlite_state_lock:
+            self._query_index_cache[collection] = (schema_version, specs)
+        return specs
+
+    def get_index_specs(self, collection):
         conn = self._connect()
         try:
-            has_legacy = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='tinydb'"
-            ).fetchone()
-            if not has_legacy:
-                return
-            row = conn.execute("SELECT data FROM tinydb WHERE id = 1").fetchone()
-            if not row or not row[0]:  # pragma: no cover - corrupt legacy fallback
-                conn.execute("DROP TABLE tinydb")
-                conn.commit()
-                return
-            data = _json_loads(row[0])
-            for collection, docs in data.items():
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS {0} (_id TEXT PRIMARY KEY, data TEXT NOT NULL)".format(
-                        _quote_identifier(collection)
-                    )
-                )
-                rows = [
-                    (_physical_id_key(doc.get("_id", eid)), _json_dumps(doc))
-                    for eid, doc in (docs or {}).items()
-                    if isinstance(doc, dict)
-                ]
-                if rows:
-                    conn.executemany(
-                        "INSERT OR REPLACE INTO {0} (_id, data) VALUES (?, ?)".format(
-                            _quote_identifier(collection)
-                        ),
-                        rows,
-                    )
-            conn.execute("DROP TABLE tinydb")
-            conn.commit()
+            return self._get_index_specs_on_connection(conn, collection)
         finally:
             conn.close()
 
+    def _migrate_legacy_blob_on_connection(self, conn):
+        has_legacy = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tinydb'"
+        ).fetchone()
+        if not has_legacy:
+            return
+        row = conn.execute("SELECT data FROM tinydb WHERE id = 1").fetchone()
+        if not row or not row[0]:  # pragma: no cover - corrupt legacy fallback
+            conn.execute("DROP TABLE tinydb")
+            conn.commit()
+            return
+        data = _json_loads(row[0])
+        migrated_collections = []
+        for collection, docs in data.items():
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS {0} (_id TEXT PRIMARY KEY, data TEXT NOT NULL)".format(
+                    _quote_identifier(collection)
+                )
+            )
+            rows = [
+                (_physical_id_key(doc.get("_id", eid)), _json_dumps(doc))
+                for eid, doc in (docs or {}).items()
+                if isinstance(doc, dict)
+            ]
+            if rows:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO {0} (_id, data) VALUES (?, ?)".format(
+                        _quote_identifier(collection)
+                    ),
+                    rows,
+                )
+            migrated_collections.append(collection)
+        conn.execute("DROP TABLE tinydb")
+        conn.commit()
+        self._ready_collections.update(migrated_collections)
+
+    def _migrate_legacy_blob(self):
+        self._ensure_sqlite_initialized()
+
     def list_collections(self):
-        self._migrate_legacy_blob()
+        self._ensure_sqlite_initialized()
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -2196,17 +2306,27 @@ class SQLiteTableBackend(TableBackend):
             conn.close()
 
     def create_collection(self, collection):
-        self._migrate_legacy_blob()
-        conn = self._connect()
-        try:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS {0} (_id TEXT PRIMARY KEY, data TEXT NOT NULL)".format(
-                    _quote_identifier(collection)
-                )
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        self._ensure_sqlite_initialized()
+        with self._sqlite_state_lock:
+            if collection in self._ready_collections:
+                return
+
+        with self._write_lock():
+            with self._sqlite_state_lock:
+                if collection in self._ready_collections:
+                    return
+                conn = self._connect()
+                try:
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS {0} "
+                        "(_id TEXT PRIMARY KEY, data TEXT NOT NULL)".format(
+                            _quote_identifier(collection)
+                        )
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                self._ready_collections.add(collection)
 
     @_write_locked
     def drop_collection(self, collection):
@@ -2224,6 +2344,7 @@ class SQLiteTableBackend(TableBackend):
                 (collection,),
             )
             conn.commit()
+            self._forget_collection(collection)
             return existed
         finally:
             conn.close()
@@ -2234,6 +2355,29 @@ class SQLiteTableBackend(TableBackend):
         existing_docs = self.find(collection, {})
         self.validate_unique_post_image(collection, existing_docs + docs)
         _validate_physical_ids(existing_docs, docs)
+        return self._insert_rows(collection, docs)
+
+    @_write_locked
+    def insert_many_prevalidated(
+        self,
+        collection,
+        docs,
+        bypass_document_validation=False,
+    ):
+        """Insert a collection-planned batch without repeating its full scan.
+
+        The public collection planner has already checked BSON-aware ``_id``
+        identity and every durable unique-index token while holding this
+        backend's cross-process write lock. Native SQLite constraints remain
+        the final authority if a non-TinyMongo writer races that preflight.
+        """
+
+        self.create_collection(collection)
+        return self._insert_rows(collection, docs)
+
+    def _insert_rows(self, collection, docs):
+        """Serialize and commit one already validated SQLite insert batch."""
+
         rows = [(_physical_id_key(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
@@ -2248,8 +2392,64 @@ class SQLiteTableBackend(TableBackend):
         finally:
             conn.close()
 
+    def _find_direct_id(self, collection, filter_doc, projection=None):
+        """Resolve one exact ``_id`` predicate through SQLite's primary key."""
+
+        expected = _direct_id_equality(filter_doc)
+        if expected is _MISSING:
+            return _MISSING
+
+        table = _quote_identifier(collection)
+        candidates = _physical_id_candidates(expected)
+
+        def load_rows(conn):
+            rows = conn.execute(
+                "SELECT _id, data FROM {0} WHERE _id IN ({1})".format(
+                    table,
+                    ", ".join("?" for _ in candidates),
+                ),
+                candidates,
+            ).fetchall()
+            documents = []
+            for row_id, data in rows:
+                document = _restore_legacy_document_id(
+                    row_id,
+                    _json_loads(data),
+                    requested_id=expected,
+                )
+                if matches_filter(document, filter_doc):
+                    documents.append(document)
+
+            if not documents and _requires_legacy_id_scan(expected):
+                # Container IDs and older datetime strings cannot always be
+                # enumerated.  Preserve the compatibility scan only for these
+                # uncommon misses; ordinary missing IDs remain primary-key
+                # lookups.
+                documents = []
+                for row_id, data in conn.execute(
+                    "SELECT _id, data FROM {0}".format(table)
+                ):
+                    document = _restore_legacy_document_id(
+                        row_id,
+                        _json_loads(data),
+                        requested_id=expected,
+                    )
+                    if matches_filter(document, filter_doc):
+                        documents.append(document)
+
+            if projection is not None:
+                documents = [
+                    project_document(document, projection) for document in documents
+                ]
+            return documents
+
+        return self._run_collection_read(collection, load_rows)
+
     def find(self, collection, filter_doc=None, sort=None, skip=None, limit=None):
         self.create_collection(collection)
+        direct = self._find_direct_id(collection, filter_doc)
+        if direct is not _MISSING:
+            return direct
         indexed = self._find_indexed_scalar_with_array_union(collection, filter_doc)
         if indexed is not None:
             return indexed
@@ -2262,11 +2462,10 @@ class SQLiteTableBackend(TableBackend):
         try:
             where, params = self.compiler.compile(filter_doc)
             sql = "SELECT data FROM {0}{1}".format(_quote_identifier(collection), where)
-            conn = self._connect()
-            try:
-                rows = conn.execute(sql, params).fetchall()
-            finally:
-                conn.close()
+            rows = self._run_collection_read(
+                collection,
+                lambda conn: conn.execute(sql, params).fetchall(),
+            )
             documents = [_json_loads(row[0]) for row in rows]
             return _postfilter_id_candidates(
                 documents,
@@ -2301,8 +2500,8 @@ class SQLiteTableBackend(TableBackend):
         """Decode rows until the requested number of Python matches is found."""
 
         sql = "SELECT data FROM {0}".format(_quote_identifier(collection))
-        conn = self._connect()
-        try:
+
+        def scan(conn):
             documents = []
             matched = 0
             for row in conn.execute(sql):
@@ -2316,8 +2515,8 @@ class SQLiteTableBackend(TableBackend):
                 if limit and len(documents) >= limit:
                     break
             return documents
-        finally:
-            conn.close()
+
+        return self._run_collection_read(collection, scan)
 
     def find_bounded(self, collection, filter_doc=None, skip=0, limit=0):
         """Return an unsorted cursor window without decoding later rows.
@@ -2329,9 +2528,17 @@ class SQLiteTableBackend(TableBackend):
         """
 
         self.create_collection(collection)
-        indexed = self._find_indexed_scalar_with_array_union(collection, filter_doc)
+        direct = self._find_direct_id(collection, filter_doc)
+        if direct is not _MISSING:
+            return self._bounded_slice(direct, skip, limit)
+        indexed = self._find_indexed_scalar_with_array_union(
+            collection,
+            filter_doc,
+            skip=skip,
+            limit=limit,
+        )
         if indexed is not None:
-            return self._bounded_slice(indexed, skip, limit)
+            return indexed
         if requires_python_filter(filter_doc):
             return self._scan_bounded(collection, filter_doc, skip, limit)
         try:
@@ -2348,11 +2555,10 @@ class SQLiteTableBackend(TableBackend):
                 where,
                 bounds,
             )
-            conn = self._connect()
-            try:
-                rows = conn.execute(sql, params + bound_params).fetchall()
-            finally:
-                conn.close()
+            rows = self._run_collection_read(
+                collection,
+                lambda conn: conn.execute(sql, params + bound_params).fetchall(),
+            )
             return [_json_loads(row[0]) for row in rows]
         except Exception:
             return self._scan_bounded(collection, filter_doc, skip, limit)
@@ -2361,6 +2567,12 @@ class SQLiteTableBackend(TableBackend):
         """Count matching SQLite rows without retaining document payloads."""
 
         self.create_collection(collection)
+        direct = self._find_direct_id(collection, filter_doc)
+        if direct is not _MISSING:
+            return len(direct)
+        indexed = self._find_indexed_scalar_with_array_union(collection, filter_doc)
+        if indexed is not None:
+            return len(indexed)
         if requires_python_filter(filter_doc):
             return self._count_filtered_scan(collection, filter_doc)
         try:
@@ -2371,11 +2583,10 @@ class SQLiteTableBackend(TableBackend):
                 _quote_identifier(collection),
                 where,
             )
-            conn = self._connect()
-            try:
-                row = conn.execute(sql, params).fetchone()
-            finally:
-                conn.close()
+            row = self._run_collection_read(
+                collection,
+                lambda conn: conn.execute(sql, params).fetchone(),
+            )
             # SQLite always returns one row for ``COUNT(*)``.
             return int(row[0])
         except Exception:
@@ -2385,15 +2596,15 @@ class SQLiteTableBackend(TableBackend):
         """Count exact Python-filter matches while releasing each row promptly."""
 
         sql = "SELECT data FROM {0}".format(_quote_identifier(collection))
-        conn = self._connect()
-        try:
+
+        def count(conn):
             return sum(
                 1
                 for row in conn.execute(sql)
                 if matches_filter(_json_loads(row[0]), filter_doc)
             )
-        finally:
-            conn.close()
+
+        return self._run_collection_read(collection, count)
 
     def find_projected(self, collection, filter_doc, projection):
         """Return projected rows through the established backend hook."""
@@ -2445,13 +2656,22 @@ class SQLiteTableBackend(TableBackend):
         """
 
         self.create_collection(collection)
-        indexed = self._find_indexed_scalar_with_array_union(
+        direct = self._find_direct_id(
             collection,
             filter_doc,
             projection=projection,
         )
+        if direct is not _MISSING:
+            return self._bounded_slice(direct, skip, limit)
+        indexed = self._find_indexed_scalar_with_array_union(
+            collection,
+            filter_doc,
+            projection=projection,
+            skip=skip,
+            limit=limit,
+        )
         if indexed is not None:
-            return self._bounded_slice(indexed, skip, limit)
+            return indexed
 
         if requires_python_filter(filter_doc):
             return self._scan_projected(
@@ -2488,21 +2708,6 @@ class SQLiteTableBackend(TableBackend):
                 skip=skip,
                 limit=limit,
             )
-            direct_id_equality = (
-                isinstance(filter_doc, Mapping)
-                and set(filter_doc) == {"_id"}
-                and not isinstance(filter_doc["_id"], Mapping)
-            )
-            if direct_id_equality and documents:
-                return documents
-            if _filter_requires_legacy_id_scan(filter_doc):
-                return self._scan_projected(
-                    collection,
-                    projection,
-                    predicate=lambda document: matches_filter(document, filter_doc),
-                    skip=skip,
-                    limit=limit,
-                )
             return documents
         except Exception:
             return self._scan_projected(
@@ -2565,8 +2770,8 @@ class SQLiteTableBackend(TableBackend):
             "SELECT _id, json_type(data, {path}), "
             "json_extract(data, {path}) FROM {table}{where}{bounds}"
         ).format(path=path, table=table, where=where, bounds=bounds)
-        conn = self._connect()
-        try:
+
+        def scan(conn):
             documents = []
             cursor = conn.execute(sql, params + bound_params)
             for physical_id, kind, value in cursor:
@@ -2584,8 +2789,8 @@ class SQLiteTableBackend(TableBackend):
                     )
                 documents.append(document)
             return documents
-        finally:
-            conn.close()
+
+        return self._run_collection_read(collection, scan)
 
     def _scan_projected(
         self,
@@ -2608,8 +2813,8 @@ class SQLiteTableBackend(TableBackend):
             where,
             bounds,
         )
-        conn = self._connect()
-        try:
+
+        def scan(conn):
             documents = []
             matched = 0
             cursor = conn.execute(sql, (params or []) + bound_params)
@@ -2624,63 +2829,338 @@ class SQLiteTableBackend(TableBackend):
                 if predicate is not None and limit and len(documents) >= limit:
                     break
             return documents
-        finally:
-            conn.close()
+
+        return self._run_collection_read(collection, scan)
+
+    def _type_index_name(self, collection, spec):
+        return self._physical_index_name(collection, spec) + "_types"
+
+    def _ensure_type_index_on_connection(self, conn, collection, spec):
+        """Reconcile native scalar and array-candidate indexes for one spec."""
+
+        key = (collection, spec.name)
+        with self._sqlite_state_lock:
+            if key in self._ready_type_indexes:
+                return
+
+        with self._write_lock():
+            with self._sqlite_state_lock:
+                if key in self._ready_type_indexes:
+                    return
+                path = _sql_literal(_json_path(spec.field))
+                table = _quote_identifier(collection)
+                physical_name = self._physical_index_name(collection, spec)
+                physical_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (physical_name,),
+                ).fetchone()
+                if physical_exists is None and spec.unique:
+                    documents = [
+                        _json_loads(row[0])
+                        for row in conn.execute(
+                            "SELECT data FROM {0}".format(table)
+                        ).fetchall()
+                    ]
+                    validate_unique_documents(documents, [spec])
+
+                scalar_expression = "json_extract(data, {0})".format(path)
+                constraint_expression = scalar_expression
+                if spec.unique:
+                    constraint_expression = "tinymongo_unique_token(data, {0})".format(
+                        _sql_literal(spec.field)
+                    )
+                conn.execute(
+                    "CREATE {unique}INDEX IF NOT EXISTS {name} ON {table} "
+                    "({expression})".format(
+                        unique="UNIQUE " if spec.unique else "",
+                        name=_quote_identifier(physical_name),
+                        table=table,
+                        expression=constraint_expression,
+                    )
+                )
+                if spec.unique:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS {name} ON {table} "
+                        "({expression})".format(
+                            name=_quote_identifier(physical_name + "_lookup"),
+                            table=table,
+                            expression=scalar_expression,
+                        )
+                    )
+                if "." not in spec.field:
+                    type_expression = "json_type(data, {0})".format(path)
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS {name} ON {table} ({expression}) "
+                        "WHERE {expression} IN ('array', 'object')".format(
+                            name=_quote_identifier(
+                                self._type_index_name(collection, spec)
+                            ),
+                            table=table,
+                            expression=type_expression,
+                        )
+                    )
+                conn.commit()
+                self._ready_type_indexes.add(key)
 
     def _find_indexed_scalar_with_array_union(
         self,
         collection,
         filter_doc,
         projection=None,
+        skip=0,
+        limit=0,
     ):
         equality = _simple_scalar_equality(filter_doc)
         if equality is None:
             return None
-        field, _ = equality
+        field, expected = equality
         if "." in field:
             return None
-        if not any(spec.field == field for spec in self.get_index_specs(collection)):
-            return None
 
-        where, params = self.compiler.compile(filter_doc)
-        path = _sql_literal(_json_path(field))
-        scalar_sql = (
-            "SELECT data FROM {table}{where} "
-            "AND json_type(data, {path}) IN "
-            "('text', 'integer', 'real', 'true', 'false')"
-        ).format(
-            table=_quote_identifier(collection),
-            where=where,
-            path=path,
-        )
-        array_sql = (
-            "SELECT data FROM {table} WHERE json_type(data, {path}) "
-            "IN ('array', 'object')"
-        ).format(table=_quote_identifier(collection), path=path)
-        conn = self._connect()
-        try:
+        def indexed_read(conn):
+            spec = next(
+                (
+                    candidate
+                    for candidate in self._get_query_index_specs_on_connection(
+                        conn, collection
+                    )
+                    if candidate.field == field
+                ),
+                None,
+            )
+            if spec is None:
+                return _MISSING
+
+            self._ensure_type_index_on_connection(conn, collection, spec)
+            where, params = self.compiler.compile(filter_doc)
+            path = _sql_literal(_json_path(field))
+            if isinstance(expected, bool):
+                scalar_types = ("true" if expected else "false",)
+            elif isinstance(expected, str):
+                scalar_types = ("text",)
+            else:
+                scalar_types = ("integer", "real")
+            scalar_sql = (
+                "SELECT data FROM {table}{where} "
+                "AND json_type(data, {path}) IN ({types})"
+            ).format(
+                table=_quote_identifier(collection),
+                where=where,
+                path=path,
+                types=", ".join(_sql_literal(kind) for kind in scalar_types),
+            )
+            type_expression = "json_type(data, {0})".format(path)
+            if isinstance(expected, bool):
+                member_predicate = "item.type = {0} AND item.value = ?".format(
+                    _sql_literal("true" if expected else "false")
+                )
+                member_params = [int(expected)]
+                candidate_predicate = (
+                    "{type_expression} = 'array' AND EXISTS ("
+                    "SELECT 1 FROM json_each(data, {path}) AS item "
+                    "WHERE {member_predicate})"
+                ).format(
+                    type_expression=type_expression,
+                    path=path,
+                    member_predicate=member_predicate,
+                )
+            elif isinstance(expected, str):
+                member_params = [expected]
+                candidate_predicate = (
+                    "{type_expression} = 'array' AND EXISTS ("
+                    "SELECT 1 FROM json_each(data, {path}) AS item "
+                    "WHERE item.type = 'text' AND item.value = ?)"
+                ).format(type_expression=type_expression, path=path)
+            else:
+                member_params = [expected]
+                candidate_predicate = (
+                    "({type_expression} = 'object' OR "
+                    "({type_expression} = 'array' AND EXISTS ("
+                    "SELECT 1 FROM json_each(data, {path}) AS item WHERE "
+                    "(item.type IN ('integer', 'real') AND item.value = ?) "
+                    "OR item.type = 'object')))"
+                ).format(type_expression=type_expression, path=path)
+            array_sql = (
+                "SELECT data FROM {table} WHERE {type_expression} "
+                "IN ('array', 'object') AND ({candidate_predicate})"
+            ).format(
+                table=_quote_identifier(collection),
+                type_expression=type_expression,
+                candidate_predicate=candidate_predicate,
+            )
             documents = []
-            for sql, sql_params in ((scalar_sql, params), (array_sql, [])):
+            matched = 0
+            branches = (
+                (scalar_sql, params, False),
+                (array_sql, member_params, True),
+            )
+            for sql, sql_params, needs_postfilter in branches:
                 for row in conn.execute(sql, sql_params):
                     document = _json_loads(row[0])
-                    if matches_filter(document, filter_doc):
-                        documents.append(
-                            project_document(document, projection)
-                            if projection is not None
-                            else document
-                        )
+                    if needs_postfilter and not matches_filter(document, filter_doc):
+                        continue
+                    if matched < skip:
+                        matched += 1
+                        continue
+                    documents.append(
+                        project_document(document, projection)
+                        if projection is not None
+                        else document
+                    )
+                    matched += 1
+                    if limit and len(documents) >= limit:
+                        return documents
             return documents
-        finally:
-            conn.close()
+
+        try:
+            result = self._run_collection_read(collection, indexed_read)
+        except OverflowError:
+            # Python's sqlite3 adapter cannot bind integers outside signed
+            # 64-bit range. The exact Python matcher remains the safe path for
+            # those otherwise valid BSON numeric values.
+            return None
+        return None if result is _MISSING else result
 
     def _all_docs_unfiltered(self, collection):
+        rows = self._run_collection_read(
+            collection,
+            lambda conn: conn.execute(
+                "SELECT data FROM {0}".format(_quote_identifier(collection))
+            ).fetchall(),
+        )
+        return [_json_loads(row[0]) for row in rows]
+
+    @_write_locked
+    def update_many(self, collection, filter_doc, update_doc, multi=True):
+        """Apply a SQLite update batch in one read-check-write transaction."""
+
+        updated_ids, _matched_count, _modified_count = self._update_many_transaction(
+            collection,
+            filter_doc,
+            update_doc,
+            multi=multi,
+        )
+        return updated_ids
+
+    @_write_locked
+    def update_many_with_result(
+        self,
+        collection,
+        filter_doc,
+        update_doc,
+        multi=True,
+        validate_document=None,
+    ):
+        """Update a batch and return public ``matched``/``modified`` counts.
+
+        ``TinyMongoCollection`` discovers this optional hook at runtime.  It
+        lets SQLite own the candidate read, validation, and write transaction
+        instead of repeating those preflights in both the collection and the
+        backend.  The callback preserves collection-level document validation
+        without coupling the storage engine to a particular client class.
+        """
+
+        _updated_ids, matched_count, modified_count = self._update_many_transaction(
+            collection,
+            filter_doc,
+            update_doc,
+            multi=multi,
+            validate_document=validate_document,
+        )
+        return matched_count, modified_count
+
+    def _update_many_transaction(
+        self,
+        collection,
+        filter_doc,
+        update_doc,
+        multi=True,
+        validate_document=None,
+    ):
+        """Return changed IDs and result counts from one SQLite transaction.
+
+        The generic table-backend implementation delegates every changed
+        document to :meth:`replace_one`.  For SQLite that turns an update of
+        ``m`` rows into ``m`` complete collection scans and ``m`` commits,
+        because each replacement must revalidate the durable unique indexes.
+        Read the collection once instead, build and validate its complete
+        post-image once, then write all changed rows as a single transaction.
+
+        The physical row key is retained from SQLite rather than recomputed
+        from the logical ``_id``.  That keeps updates compatible with legacy
+        databases whose row keys predate typed physical IDs.
+        """
+
         self.create_collection(collection)
+        specs = self.get_index_specs(collection)
+        table = _quote_identifier(collection)
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT data FROM {0}".format(_quote_identifier(collection))
-            ).fetchall()
-            return [_json_loads(row[0]) for row in rows]
+            # Acquire SQLite's writer reservation before selecting candidates.
+            # Together with TinyMongo's cross-process write lock this keeps the
+            # validated post-image and the committed rows in the same atomic
+            # read-check-write unit.
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute("SELECT _id, data FROM {0}".format(table)).fetchall()
+            originals = [(row_id, _json_loads(data)) for row_id, data in rows]
+
+            matches = [
+                (row_id, document)
+                for row_id, document in originals
+                if matches_filter(document, filter_doc)
+            ]
+            if not multi:
+                matches = matches[:1]
+
+            replacements = []
+            replacement_by_row_id = {}
+            modified_count = 0
+            from .tinymongo import _update_document_modified
+
+            for row_id, document in matches:
+                updated = self.apply_update(document, update_doc)
+                if validate_document is not None:
+                    validate_document(updated)
+                modified_count += int(
+                    _update_document_modified(document, updated, update_doc)
+                )
+                if storage_values_equal(updated, document):
+                    continue
+                replacements.append((row_id, document, updated))
+                replacement_by_row_id[row_id] = updated
+
+            if not matches:
+                conn.rollback()
+                return [], 0, 0
+
+            post_image = [
+                replacement_by_row_id.get(row_id, document)
+                for row_id, document in originals
+            ]
+            validate_unique_documents(post_image, specs)
+
+            if replacements:
+                conn.executemany(
+                    "UPDATE {0} SET data = ? WHERE _id = ?".format(table),
+                    [
+                        (_json_dumps(updated), row_id)
+                        for row_id, _old, updated in replacements
+                    ],
+                )
+                conn.commit()
+            else:
+                conn.rollback()
+            return (
+                [original["_id"] for _row_id, original, _updated in replacements],
+                len(matches),
+                modified_count,
+            )
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            raise DuplicateKeyError(str(exc))
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -2746,6 +3226,11 @@ class SQLiteTableBackend(TableBackend):
         self.create_collection(collection)
         existing = self._check_index_compatibility(collection, spec)
         if existing is not None:
+            conn = self._connect()
+            try:
+                self._ensure_type_index_on_connection(conn, collection, existing)
+            finally:
+                conn.close()
             return existing.name
         if spec.unique:
             validate_unique_documents(self.find(collection, {}), [spec])
@@ -2761,8 +3246,7 @@ class SQLiteTableBackend(TableBackend):
             try:
                 self._ensure_index_catalog(conn)
                 conn.execute(
-                    "CREATE {0}INDEX IF NOT EXISTS {1} ON {2} "
-                    "({3})".format(
+                    "CREATE {0}INDEX IF NOT EXISTS {1} ON {2} ({3})".format(
                         "UNIQUE " if spec.unique else "",
                         _quote_identifier(name),
                         _quote_identifier(collection),
@@ -2776,6 +3260,18 @@ class SQLiteTableBackend(TableBackend):
                             _quote_identifier(name + "_lookup"),
                             _quote_identifier(collection),
                             path,
+                        )
+                    )
+                if "." not in spec.field:
+                    type_expression = "json_type(data, {0})".format(path)
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS {name} ON {table} ({expression}) "
+                        "WHERE {expression} IN ('array', 'object')".format(
+                            name=_quote_identifier(
+                                self._type_index_name(collection, spec)
+                            ),
+                            table=_quote_identifier(collection),
+                            expression=type_expression,
                         )
                     )
                 conn.execute(
@@ -2792,6 +3288,9 @@ class SQLiteTableBackend(TableBackend):
                     ),
                 )
                 conn.commit()
+                with self._sqlite_state_lock:
+                    self._ready_type_indexes.add((collection, spec.name))
+                    self._query_index_cache.pop(collection, None)
             except sqlite3.IntegrityError as exc:
                 raise DuplicateKeyError(str(exc))
         finally:
@@ -2826,12 +3325,20 @@ class SQLiteTableBackend(TableBackend):
                 )
             )
             conn.execute(
+                "DROP INDEX IF EXISTS {0}".format(
+                    _quote_identifier(self._type_index_name(collection, spec))
+                )
+            )
+            conn.execute(
                 "DELETE FROM {0} WHERE collection_name = ? AND index_name = ?".format(
                     _quote_identifier(self.index_catalog_table)
                 ),
                 (collection, spec.name),
             )
             conn.commit()
+            with self._sqlite_state_lock:
+                self._ready_type_indexes.discard((collection, spec.name))
+                self._query_index_cache.pop(collection, None)
         finally:
             conn.close()
 
@@ -3856,8 +4363,9 @@ class RemoteSQLTableBackend(TableBackend):
 
         self._execute(
             conn,
-            "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS "
-            "data_ordered {1} NULL".format(table, self.ordered_data_type),
+            "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS data_ordered {1} NULL".format(
+                table, self.ordered_data_type
+            ),
         )
 
     def drop_collection(self, collection):
@@ -4351,8 +4859,7 @@ class PostgresTableBackend(RemoteSQLTableBackend):
         else:
             path = ", ".join(_sql_literal(part) for part in spec.field.split("."))
             expression = (
-                "(COALESCE(jsonb_extract_path(data, {0}), "
-                "'null'::jsonb))".format(path)
+                "(COALESCE(jsonb_extract_path(data, {0}), 'null'::jsonb))".format(path)
             )
         self._execute(
             conn,
@@ -4400,7 +4907,7 @@ class PostgresTableBackend(RemoteSQLTableBackend):
             ", {0}".format(self.placeholder) for _ in unique_specs
         )
         sql = (
-            "INSERT INTO {0} (_id, data, data_ordered{1}) " "VALUES ({2}, {3}, {2}{4})"
+            "INSERT INTO {0} (_id, data, data_ordered{1}) VALUES ({2}, {3}, {2}{4})"
         ).format(
             self._quote(self._table_name(collection)),
             token_columns,
@@ -4724,7 +5231,7 @@ class MySQLTableBackend(RemoteSQLTableBackend):
             ", {0}".format(self.placeholder) for _ in unique_specs
         )
         sql = (
-            "INSERT INTO {0} (_id, data, data_ordered{1}) " "VALUES ({2}, {2}, {2}{3})"
+            "INSERT INTO {0} (_id, data, data_ordered{1}) VALUES ({2}, {2}, {2}{3})"
         ).format(
             self._quote(self._table_name(collection)),
             token_columns,

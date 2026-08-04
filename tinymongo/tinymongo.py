@@ -72,6 +72,7 @@ from .indexes import (
     emit_index_plan_warnings,
     index_catalog_id,
     index_spec_signature,
+    index_tokens,
     parse_index_spec,
     plan_index_models,
     validate_unique_documents,
@@ -187,38 +188,101 @@ def _duplicate_write_error(collection, index, document, spec=None, error=None):
     }
 
 
-def _first_unique_conflict(existing_documents, document, specs):
-    """Return the first unique index violated by ``document``, if any."""
+def _insert_id_state(existing_documents):
+    """Build the typed identity lookup used by bulk-insert planning.
+
+    Valid storage documents always have a recursive BSON identity key.  The
+    fallback list keeps this internal helper correct for unsupported values as
+    well, without making ordinary batches pay for pairwise comparisons.
+    """
+
+    identities = set()
+    fallback_ids = []
+    all_ids = []
+    for document in existing_documents:
+        value = document["_id"]
+        identity = bson_value_identity_key(value)
+        if identity is None:
+            fallback_ids.append(value)
+        else:
+            identities.add(identity)
+        all_ids.append(value)
+    return identities, fallback_ids, all_ids
+
+
+def _unique_insert_state(existing_documents, specs):
+    """Build one token-to-owner map for each unique index in ``specs``."""
+
+    states = []
     for spec in specs:
         if not spec.unique:
             continue
-        try:
-            validate_unique_documents(existing_documents + [document], [spec])
-        except DuplicateKeyError as error:
-            return spec, error
-    return None, None
+        owners = {}
+        existing_error = None
+        for document in existing_documents:
+            for token in index_tokens(document, spec.field):
+                if token in owners and existing_error is None:
+                    # A valid index cannot normally begin in this state.  If a
+                    # legacy or custom backend does, preserve the exact error
+                    # text and first-conflict ordering of the prior validator.
+                    try:
+                        validate_unique_documents(existing_documents, [spec])
+                    except DuplicateKeyError as error:
+                        existing_error = error
+                owners.setdefault(token, document)
+        states.append((spec, owners, existing_error))
+    return states
 
 
 def _plan_insert_many(collection, documents, existing_documents, specs, ordered):
     """Split a batch into inserts and duplicate-key write errors."""
-    existing_ids = [document["_id"] for document in existing_documents]
+    id_identities, fallback_ids, all_ids = _insert_id_state(existing_documents)
+    unique_states = _unique_insert_state(existing_documents, specs)
     accepted = []
     write_errors = []
 
     for index, document in enumerate(documents):
         duplicate_error = None
-        if any(bson_values_equal(document["_id"], value) for value in existing_ids):
+        value = document["_id"]
+        identity = bson_value_identity_key(value)
+        if identity is None:
+            duplicate_id = any(
+                bson_values_equal(value, existing) for existing in all_ids
+            )
+        elif identity in id_identities:
+            duplicate_id = True
+        else:
+            # Storage validation normally makes this list empty.  Retain the
+            # exact comparison fallback for direct callers of the planner.
+            duplicate_id = any(
+                bson_values_equal(value, existing) for existing in fallback_ids
+            )
+
+        if duplicate_id:
             duplicate_error = _duplicate_write_error(collection, index, document)
         else:
-            spec, error = _first_unique_conflict(existing_documents, document, specs)
-            if spec is not None:
-                duplicate_error = _duplicate_write_error(
-                    collection,
-                    index,
-                    document,
-                    spec=spec,
-                    error=error,
+            candidate_tokens = []
+            for spec, owners, existing_error in unique_states:
+                tokens = index_tokens(document, spec.field)
+                candidate_tokens.append((owners, tokens))
+                owner = next(
+                    (owners[token] for token in tokens if token in owners), None
                 )
+                error = existing_error
+                if owner is not None and error is None:
+                    try:
+                        validate_unique_documents([owner, document], [spec])
+                    except DuplicateKeyError as conflict:
+                        error = conflict
+                if error is not None:
+                    duplicate_error = _duplicate_write_error(
+                        collection,
+                        index,
+                        document,
+                        spec=spec,
+                        error=error,
+                    )
+                    break
 
         if duplicate_error is not None:
             write_errors.append(duplicate_error)
@@ -226,8 +290,14 @@ def _plan_insert_many(collection, documents, existing_documents, specs, ordered)
                 break
         else:
             accepted.append(document)
-            existing_documents.append(document)
-            existing_ids.append(document["_id"])
+            if identity is None:
+                fallback_ids.append(value)
+            else:
+                id_identities.add(identity)
+            all_ids.append(value)
+            for owners, tokens in candidate_tokens:
+                for token in tokens:
+                    owners[token] = document
 
     return accepted, write_errors
 
@@ -261,7 +331,12 @@ def _execute_engine_insert_many(
         if not accepted:
             return [], accepted, write_errors
         try:
-            results = engine.insert_many(
+            insert_prevalidated = getattr(
+                engine,
+                "insert_many_prevalidated",
+                engine.insert_many,
+            )
+            results = insert_prevalidated(
                 collection.tablename,
                 accepted,
                 bypass_document_validation=bypass_document_validation is True,
@@ -2792,7 +2867,24 @@ class TinyMongoCollection(object):
         upsert = kwargs.get("upsert") is True
 
         if self.parent.engine is not None:
-            matches = self.parent.engine.find(self.tablename, query, limit=1)
+            update_with_result = getattr(
+                self.parent.engine,
+                "update_many_with_result",
+                None,
+            )
+            if callable(update_with_result):
+                matched_count, modified_count = update_with_result(
+                    self.tablename,
+                    query,
+                    doc,
+                    multi=False,
+                    validate_document=self._validate_storage_document,
+                )
+                if matched_count or not upsert:
+                    return _update_result(matched_count, modified_count)
+                matches = []
+            else:
+                matches = self.parent.engine.find(self.tablename, query, limit=1)
             if not matches:
                 if upsert:
                     inserted = _document_for_upsert(query, doc)
@@ -2898,7 +2990,24 @@ class TinyMongoCollection(object):
         upsert = kwargs.get("upsert") is True
 
         if self.parent.engine is not None:
-            matches = self.parent.engine.find(self.tablename, query)
+            update_with_result = getattr(
+                self.parent.engine,
+                "update_many_with_result",
+                None,
+            )
+            if callable(update_with_result):
+                matched_count, modified_count = update_with_result(
+                    self.tablename,
+                    query,
+                    doc,
+                    multi=True,
+                    validate_document=self._validate_storage_document,
+                )
+                if matched_count or not upsert:
+                    return _update_result(matched_count, modified_count)
+                matches = []
+            else:
+                matches = self.parent.engine.find(self.tablename, query)
             if not matches and upsert:
                 inserted = _document_for_upsert(query, doc)
                 self._validate_storage_document(inserted)
