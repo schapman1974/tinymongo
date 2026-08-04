@@ -1,4 +1,5 @@
 import mongoengine as me
+from bson import ObjectId
 
 import tinymongo
 
@@ -21,6 +22,11 @@ def test_mongoengine_crud_contract(tmp_path):
 
         meta = {"db_alias": alias}
 
+    class NativePerson(me.Document):
+        name = me.StringField(required=True)
+
+        meta = {"db_alias": alias, "collection": "native_people"}
+
     try:
         Person.drop_collection()
         person = Person(name="Ada").save()
@@ -32,5 +38,9 @@ def test_mongoengine_crud_contract(tmp_path):
         assert Person.objects.get(name="Ada").score == 5
         assert Person.objects(name="Ada").delete() == 1
         assert Person.objects.count() == 0
+
+        native = NativePerson(name="Grace").save()
+        assert isinstance(native.id, ObjectId)
+        assert NativePerson.objects.get(id=native.id).name == "Grace"
     finally:
         me.disconnect(alias=alias)

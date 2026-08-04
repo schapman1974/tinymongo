@@ -4,6 +4,7 @@ pyarrow
 portalocker
 pymongo>=4.9
 mongoengine>=0.29,<1
+beanie==2.1.0; python_version >= "3.10" and python_version < "3.14"
 duckdb
 black>=25,<26
 ruff>=0.15,<0.16

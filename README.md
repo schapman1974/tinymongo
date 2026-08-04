@@ -899,19 +899,21 @@ writes remain serialized.
 Operations whose semantics TinyMongo cannot honor raise
 `TinyMongoNotSupportedError`. This includes sessions, transactions, change
 streams, aggregation features outside the documented core subset, bulk writes,
-database commands, non-default read/write concerns, and unsupported index
-specifications. Connection options that only describe an ignored network target
-remain harmless for drop-in use.
+database commands other than the discovery-safe `ping` and `buildInfo` subset,
+non-default read/write concerns, and unsupported index specifications.
+`list_collection_names()` accepts PyMongo's `authorizedCollections` and
+`nameOnly` server hints for ODM startup. Connection options that only describe
+an ignored network target remain harmless for drop-in use.
 `bypass_document_validation` is accepted as a compatibility no-op and never
 disables `_id` or unique-index enforcement. Where a compatibility method
 accepts a `session` keyword, `session=None` is allowed; non-`None` sessions and
 `start_session()` remain unsupported.
 
-## MongoEngine
+## MongoEngine and Beanie
 
 Basic MongoEngine CRUD is supported by passing TinyMongo as the client class.
-The example keeps a string primary key for maximum portability. Native
-`ObjectId` values also round-trip when `tinymongo[bson]` is installed:
+MongoEngine's native `ObjectId` primary key is supported when `tinymongo[bson]`
+is installed, so most models do not need a custom ID field:
 
 ```python
 import mongoengine as me
@@ -926,9 +928,37 @@ me.connect(
 )
 
 class Person(me.Document):
-    id = me.StringField(primary_key=True, default=tinymongo.generate_id)
     name = me.StringField(required=True)
 ```
+
+Use `id = me.StringField(primary_key=True, default=tinymongo.generate_id)` only
+when the application deliberately wants string IDs.
+
+Beanie 2.1 can initialize against TinyMongo's async client and use its ordinary
+CRUD surface without application-side shims:
+
+```python
+import beanie
+import tinymongo
+
+class PersonDocument(beanie.Document):
+    name: str
+
+client = tinymongo.AsyncMongoClient(
+    tinymongo_folder="./tinydb",
+    backend="sqlite",
+)
+await beanie.init_beanie(
+    database=client.app,
+    document_models=[PersonDocument],
+)
+```
+
+The compatibility layer supplies Beanie's `buildInfo` discovery command,
+collection-listing hints, and PyMongo-shaped update and delete reply documents.
+Single-field indexes continue to work. Compound, sparse, and partial unique
+indexes remain a tracked integrity feature and fail loudly instead of being
+silently weakened.
 
 The tested subset covers document creation, repeated saves, queries, updates,
 deletes, counts, and collection drops. Aggregation beyond the documented core

@@ -240,7 +240,6 @@ def test_unsupported_features_fail_loudly(tmp_path):
     unsupported_calls = [
         client.start_session,
         client.watch,
-        database.command,
         database.watch,
         collection.bulk_write,
         collection.watch,
@@ -248,6 +247,9 @@ def test_unsupported_features_fail_loudly(tmp_path):
     for call in unsupported_calls:
         with pytest.raises(TinyMongoNotSupportedError):
             call([])
+
+    with pytest.raises(TinyMongoNotSupportedError, match="serverStatus"):
+        database.command("serverStatus")
 
     with pytest.raises(TinyMongoNotSupportedError, match=r"\$lookup"):
         collection.aggregate([{"$lookup": {}}])

@@ -2,7 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- Beanie 2.1 can initialize through the async client without application
+  shims. TinyMongo now answers the discovery-safe `ping` and `buildInfo`
+  database commands, accepts Beanie's `authorizedCollections` and `nameOnly`
+  collection-listing hints, and runs a pinned real-Beanie CRUD smoke contract.
+
 ### Fixed
+- Update and delete operations now expose PyMongo-shaped reply mappings through
+  `raw_result`, including `n`, `nModified`, `updatedExisting`, `upserted`, and
+  `ok` where applicable. Counts and upsert IDs are derived from that shared
+  reply, allowing Beanie `replace()` calls to complete normally.
 - **TM-036:** `MinKey` and `MaxKey` range operands now cross BSON type
   brackets, so whole-range queries return every supported value through
   `find()`, aggregation `$match`, and `$pull` instead of silently returning an
