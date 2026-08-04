@@ -63,6 +63,18 @@ def test_result_properties_and_error_classes():
     assert list_result.matched_count == 1
     assert list_result.modified_count == 1
 
+    mapped_result = UpdateResult(
+        raw_result={"n": 9, "nModified": 8},
+        matched_count=2,
+        modified_count=1,
+        upserted_id="explicit",
+    )
+    assert mapped_result.matched_count == 2
+    assert mapped_result.modified_count == 1
+    assert mapped_result.upserted_id == "explicit"
+    assert mapped_result.did_upsert is False
+    assert DeleteResult(raw_result=[]).deleted_count == 0
+
 
 def test_cli_json_helpers_and_errors(tmp_path, capsys):
     payload_file = tmp_path / "payload.json"

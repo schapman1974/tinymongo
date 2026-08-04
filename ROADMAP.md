@@ -366,6 +366,16 @@ Exit criteria:
 
 - [ ] [#79: Backend benchmarks and compatibility reports](https://github.com/schapman1974/tinymongo/issues/79)
 - [ ] [#55: ODM integration](https://github.com/schapman1974/tinymongo/issues/55)
+  - [x] Run the [#162 Beanie 2.1 compatibility
+    spike](https://github.com/schapman1974/tinymongo/issues/162) through the real
+    async ODM and close its three driver-contract blockers: `buildInfo`,
+    collection-listing hints, and reply-document-shaped `raw_result` values.
+  - [x] Retain MongoEngine's and Beanie's native ObjectId primary-key behavior;
+    document `generate_id()` as an explicit string-ID choice rather than a
+    required workaround.
+  - [ ] Implement integrity-preserving compound, sparse, and partial unique
+    indexes across durable catalogs and supported backends. Keep unsupported
+    combinations fail-closed until their full semantics can be enforced.
 - [ ] [#81: MongoDB document and key validation](https://github.com/schapman1974/tinymongo/issues/81)
 - [ ] [#83: Remaining common BSON types](https://github.com/schapman1974/tinymongo/issues/83)
 - [ ] [#93: Backend concurrency and compatibility stress tests](https://github.com/schapman1974/tinymongo/issues/93)

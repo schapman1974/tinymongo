@@ -143,6 +143,27 @@ def _bulk_write_details(n_inserted, write_errors):
     }
 
 
+def _update_result(matched_count=0, modified_count=0, upserted_id=_MISSING):
+    """Build the normalized reply document exposed by PyMongo UpdateResult."""
+
+    upserted = upserted_id is not _MISSING
+    raw_result = {
+        "n": 1 if upserted else matched_count,
+        "nModified": modified_count,
+        "ok": 1.0,
+        "updatedExisting": bool(matched_count) and not upserted,
+    }
+    if upserted:
+        raw_result["upserted"] = upserted_id
+    return UpdateResult(raw_result=raw_result)
+
+
+def _delete_result(deleted_count):
+    """Build the normalized reply document exposed by PyMongo DeleteResult."""
+
+    return DeleteResult(raw_result={"n": deleted_count, "ok": 1.0})
+
+
 def _duplicate_write_error(collection, index, document, spec=None, error=None):
     """Describe one duplicate insert using PyMongo's bulk error shape."""
     field = "_id" if spec is None else spec.field
@@ -1734,9 +1755,35 @@ class TinyMongoDatabase(object):
             name = name.tablename
         return self[name].drop()
 
-    def command(self, *args, **kwargs):
+    def command(self, command, value=1, *args, **kwargs):
+        """Handle the discovery commands used by PyMongo-compatible tooling."""
+
+        if self._client is not None:
+            self._client._ensure_open()
+        _reject_session(kwargs)
+        if isinstance(command, Mapping):
+            if not command:
+                raise TypeError("command document must not be empty")
+            command_name = next(iter(command))
+        elif isinstance(command, str):
+            command_name = command
+        else:
+            raise TypeError("command must be a string or mapping")
+        if not isinstance(command_name, str):
+            raise TypeError("command name must be a string")
+
+        normalized = command_name.lower()
+        if normalized == "ping":
+            return {"ok": 1.0}
+        if normalized == "buildinfo":
+            return {
+                "version": "8.0.0",
+                "versionArray": [8, 0, 0, 0],
+                "ok": 1.0,
+                "tinymongo": True,
+            }
         raise TinyMongoNotSupportedError(
-            "Database commands are not supported by TinyMongo"
+            "Database command '{0}' is not supported by TinyMongo".format(command_name)
         )
 
     def watch(self, *args, **kwargs):
@@ -1756,8 +1803,24 @@ class TinyMongoDatabase(object):
             if name != "_default" and not name.startswith("__tinymongo_")
         ]
 
-    def list_collection_names(self):
-        """Compatibility alias for modern PyMongo."""
+    def list_collection_names(self, session=None, filter=None, comment=None, **kwargs):
+        """Return names while accepting PyMongo's server-side listing hints."""
+
+        _reject_session({"session": session})
+        supported = {
+            "authorizedCollections",
+            "nameOnly",
+        }
+        unknown = sorted(set(kwargs) - supported)
+        if unknown:
+            raise TypeError(
+                "list_collection_names() got an unexpected keyword argument "
+                "'{0}'".format(unknown[0])
+            )
+        if filter not in (None, {}):
+            raise TinyMongoNotSupportedError(
+                "Filtered collection listing is not supported by TinyMongo"
+            )
         return self.collection_names()
 
     def close(self):
@@ -2739,13 +2802,8 @@ class TinyMongoCollection(object):
                         self.parent.engine.find(self.tablename, {}) + [inserted],
                     )
                     self.parent.engine.insert_many(self.tablename, [inserted])
-                    return UpdateResult(
-                        raw_result=[],
-                        matched_count=0,
-                        modified_count=0,
-                        upserted_id=inserted["_id"],
-                    )
-                return UpdateResult(raw_result=[], matched_count=0, modified_count=0)
+                    return _update_result(upserted_id=inserted["_id"])
+                return _update_result()
             updated = self.parent.engine.apply_update(matches[0], doc)
             self._validate_storage_document(updated)
             modified = _update_document_modified(matches[0], updated, doc)
@@ -2761,15 +2819,7 @@ class TinyMongoCollection(object):
                 ],
             )
             self.parent.engine.update_many(self.tablename, query, doc, multi=False)
-            return UpdateResult(
-                raw_result={
-                    "n": 1,
-                    "nModified": int(modified),
-                    "updatedExisting": True,
-                },
-                matched_count=1,
-                modified_count=int(modified),
-            )
+            return _update_result(1, int(modified))
 
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
@@ -2806,13 +2856,8 @@ class TinyMongoCollection(object):
                     self._validate_unique_post_image(self.table.all() + [inserted])
                     self.table.insert(inserted)
                     self._invalidate_indexes()
-                    return UpdateResult(
-                        raw_result=[],
-                        matched_count=0,
-                        modified_count=0,
-                        upserted_id=inserted["_id"],
-                    )
-                return UpdateResult(raw_result=[])
+                    return _update_result(upserted_id=inserted["_id"])
+                return _update_result()
 
             updated = _apply_update_document(item, doc)
             self._validate_storage_document(updated)
@@ -2833,15 +2878,7 @@ class TinyMongoCollection(object):
                 )
                 self._invalidate_indexes()
 
-            return UpdateResult(
-                raw_result={
-                    "n": 1,
-                    "nModified": int(modified),
-                    "updatedExisting": True,
-                },
-                matched_count=1,
-                modified_count=int(modified),
-            )
+            return _update_result(1, int(modified))
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -2870,12 +2907,7 @@ class TinyMongoCollection(object):
                     self.parent.engine.find(self.tablename, {}) + [inserted],
                 )
                 self.parent.engine.insert_many(self.tablename, [inserted])
-                return UpdateResult(
-                    raw_result=[],
-                    matched_count=0,
-                    modified_count=0,
-                    upserted_id=inserted["_id"],
-                )
+                return _update_result(upserted_id=inserted["_id"])
             updates = [
                 (item, self.parent.engine.apply_update(item, doc)) for item in matches
             ]
@@ -2902,14 +2934,8 @@ class TinyMongoCollection(object):
                     for item in self.parent.engine.find(self.tablename, {})
                 ],
             )
-            result = self.parent.engine.update_many(
-                self.tablename, query, doc, multi=True
-            )
-            return UpdateResult(
-                raw_result=result,
-                matched_count=len(matches),
-                modified_count=modified_count,
-            )
+            self.parent.engine.update_many(self.tablename, query, doc, multi=True)
+            return _update_result(len(matches), modified_count)
 
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
@@ -2938,12 +2964,7 @@ class TinyMongoCollection(object):
                 self._validate_unique_post_image(self.table.all() + [inserted])
                 self.table.insert(inserted)
                 self._invalidate_indexes()
-                return UpdateResult(
-                    raw_result=[],
-                    matched_count=0,
-                    modified_count=0,
-                    upserted_id=inserted["_id"],
-                )
+                return _update_result(upserted_id=inserted["_id"])
             updates = [(item, _apply_update_document(item, doc)) for item in items]
             for _original, updated in updates:
                 self._validate_storage_document(updated)
@@ -2963,25 +2984,18 @@ class TinyMongoCollection(object):
                     for item in self.table.all()
                 ]
             )
-            result = []
             modified_count = 0
             for item, updated in updates:
                 if _update_document_modified(item, updated, doc):
                     modified_count += 1
-                    result.extend(
-                        self.table.update(
-                            _tinydb_replace_document(updated),
-                            _tinydb_id_condition(item["_id"]),
-                        )
+                    self.table.update(
+                        _tinydb_replace_document(updated),
+                        _tinydb_id_condition(item["_id"]),
                     )
             if modified_count:
                 self._invalidate_indexes()
 
-            return UpdateResult(
-                raw_result=result,
-                matched_count=len(items),
-                modified_count=modified_count,
-            )
+            return _update_result(len(items), modified_count)
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -3008,13 +3022,8 @@ class TinyMongoCollection(object):
                         self.parent.engine.find(self.tablename, {}) + [inserted],
                     )
                     self.parent.engine.insert_many(self.tablename, [inserted])
-                    return UpdateResult(
-                        raw_result=[],
-                        matched_count=0,
-                        modified_count=0,
-                        upserted_id=inserted["_id"],
-                    )
-                return UpdateResult(raw_result=[])
+                    return _update_result(upserted_id=inserted["_id"])
+                return _update_result()
             # MongoDB stores ``_id`` first even when the replacement omitted it.
             # Keep that canonical order so a later equivalent replacement is
             # not misreported as a field-order-only modification.
@@ -3036,11 +3045,7 @@ class TinyMongoCollection(object):
                     ],
                 )
                 self.parent.engine.replace_one(self.tablename, item["_id"], updated)
-            return UpdateResult(
-                raw_result=[item["_id"]] if modified else [],
-                matched_count=1,
-                modified_count=int(modified),
-            )
+            return _update_result(1, int(modified))
 
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
@@ -3078,13 +3083,8 @@ class TinyMongoCollection(object):
                     self._validate_unique_post_image(self.table.all() + [inserted])
                     self.table.insert(inserted)
                     self._invalidate_indexes()
-                    return UpdateResult(
-                        raw_result=[],
-                        matched_count=0,
-                        modified_count=0,
-                        upserted_id=inserted["_id"],
-                    )
-                return UpdateResult(raw_result=[])
+                    return _update_result(upserted_id=inserted["_id"])
+                return _update_result()
 
             updated = {"_id": item["_id"]}
             updated.update(copy.deepcopy(replacement))
@@ -3104,13 +3104,7 @@ class TinyMongoCollection(object):
                 self.table.remove(_tinydb_id_condition(item["_id"]))
                 self.table.insert(updated)
                 self._invalidate_indexes()
-                result = [item["_id"]]
-            else:
-                result = []
-
-            return UpdateResult(
-                raw_result=result, matched_count=1, modified_count=int(modified)
-            )
+            return _update_result(1, int(modified))
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -3449,13 +3443,13 @@ class TinyMongoCollection(object):
         validate_filter_operators(query)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=False)
-            return DeleteResult(raw_result=result)
+            return _delete_result(len(result))
 
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
             item = self.find_one(query)
             if item is None:
-                return DeleteResult(raw_result=[])
+                return _delete_result(0)
             self._set_storage_merge_writes(False)
             try:
                 result = self.table.remove(_tinydb_id_condition(item["_id"]))
@@ -3463,7 +3457,7 @@ class TinyMongoCollection(object):
             finally:
                 self._set_storage_merge_writes(True)
 
-            return DeleteResult(raw_result=result)
+            return _delete_result(len(result))
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
@@ -3479,17 +3473,15 @@ class TinyMongoCollection(object):
         validate_filter_operators(query)
         if self.parent.engine is not None:
             result = self.parent.engine.delete_many(self.tablename, query, multi=True)
-            return DeleteResult(raw_result=result)
+            return _delete_result(len(result))
 
         rlock, portalocker_lock = self._acquire_collection_lock()
         try:
-            items = self.find(query)
+            items = list(self.find(query))
             self._set_storage_merge_writes(False)
             try:
-                result = [
+                for item in items:
                     self.table.remove(_tinydb_id_condition(item["_id"]))
-                    for item in items
-                ]
                 self._invalidate_indexes()
 
                 if query == {}:
@@ -3498,7 +3490,7 @@ class TinyMongoCollection(object):
             finally:
                 self._set_storage_merge_writes(True)
 
-            return DeleteResult(raw_result=result)
+            return _delete_result(len(items))
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 

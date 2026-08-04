@@ -218,8 +218,9 @@ def test_database_helpers_and_unsupported_calls():
             assert await database.list_collection_names() == ["events"]
             assert await database.drop_collection(collection) is True
 
+            assert await database.command("ping") == {"ok": 1.0}
             with pytest.raises(TinyMongoNotSupportedError):
-                await database.command("ping")
+                await database.command("serverStatus")
             cursor = await collection.aggregate([])
             assert isinstance(cursor, AsyncTinyMongoCursor)
             assert await cursor.to_list() == []

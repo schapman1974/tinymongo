@@ -1,5 +1,7 @@
 """Result class definitions."""
 
+from collections.abc import Mapping
+
 
 class _WriteResult(object):
     """Base class for write result classes."""
@@ -88,6 +90,10 @@ class UpdateResult(_WriteResult):
         """The number of documents matched for this update."""
         if self.__matched_count is not None:
             return self.__matched_count
+        if isinstance(self.raw_result, Mapping):
+            if self.upserted_id is not None:
+                return 0
+            return self.raw_result.get("n", 0)
         if isinstance(self.raw_result, list):
             return len(self.raw_result)
         return 0
@@ -97,6 +103,8 @@ class UpdateResult(_WriteResult):
         """The number of documents modified."""
         if self.__modified_count is not None:
             return self.__modified_count
+        if isinstance(self.raw_result, Mapping):
+            return self.raw_result.get("nModified", 0)
         if isinstance(self.raw_result, list):
             return len(self.raw_result)
         return 0
@@ -106,7 +114,14 @@ class UpdateResult(_WriteResult):
         """The _id of the inserted document if an upsert took place. Otherwise
         ``None``.
         """
+        if self.__upserted_id is None and isinstance(self.raw_result, Mapping):
+            return self.raw_result.get("upserted")
         return self.__upserted_id
+
+    @property
+    def did_upsert(self):
+        """Whether this update inserted a document through ``upsert=True``."""
+        return isinstance(self.raw_result, Mapping) and "upserted" in self.raw_result
 
 
 class DeleteResult(_WriteResult):
@@ -127,6 +142,8 @@ class DeleteResult(_WriteResult):
     @property
     def deleted_count(self):
         """The number of documents deleted."""
+        if isinstance(self.raw_result, Mapping):
+            return self.raw_result.get("n", 0)
         if isinstance(self.raw_result, list):
             return len(self.raw_result)
         else:
