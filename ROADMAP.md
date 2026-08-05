@@ -226,7 +226,17 @@ The normalized unique-token ledger remains a possible later optimization for
 bulk inserts into collections with user-created unique indexes. TM-040's
 measured no-index application path no longer needs that larger migration.
 
-#### SQLite candidate-selective updates
+#### SQLite candidate-selective reads and updates
+
+- [x] Reuse declared top-level SQLite expression indexes as conservative
+  candidate sources for complex positive `$and` reads with scalar equality or
+  `$in` anchors. Push safe numeric ranges and `$mod` into SQLite, then retain
+  the shared BSON matcher as final authority for arrays, extended BSON values,
+  large numbers, projections, counts, and cursor bounds.
+- [x] Add a reproducible 10,000-document complex-read comparison. The local
+  warmed run improved TinyMongo SQLite from about 6.4 to 73.9 queries/second
+  while returning the same 215 decoded rows as raw SQLite and MongoDB; raw
+  SQLite reached 361.2 and MongoDB reached 136.0 queries/second.
 
 - [x] Route exact `_id` updates through SQLite's primary key inside the existing
   `BEGIN IMMEDIATE` transaction instead of BSON-decoding the complete
