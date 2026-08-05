@@ -225,3 +225,104 @@ def test_tm035_scoped_code_honors_recursive_client_read_options(contract_target)
     assert type(script.scope) is OrderedDict
     assert type(script.scope["nested"]) is OrderedDict
     assert script.scope["at"].utcoffset() == timezone.utc.utcoffset(None)
+
+
+def test_tm037_zero_timestamp_write_boundaries_match_mongodb(contract_target):
+    collection = contract_target.collection
+    zero = Timestamp(0, 0)
+
+    inserted = {
+        "_id": "insert-one",
+        "first": zero,
+        "second": zero,
+        "zero-seconds-only": Timestamp(0, 1),
+        "zero-increment-only": Timestamp(1, 0),
+        "nested": {"value": zero},
+        "values": [zero],
+    }
+    collection.insert_one(inserted)
+
+    stored = collection.find_one({"_id": "insert-one"})
+    assert inserted["first"] == zero
+    assert inserted["second"] == zero
+    assert stored["first"] != zero
+    assert stored["second"] != zero
+    assert stored["first"] != stored["second"]
+    assert stored["zero-seconds-only"] == Timestamp(0, 1)
+    assert stored["zero-increment-only"] == Timestamp(1, 0)
+    assert stored["nested"]["value"] == zero
+    assert stored["values"] == [zero]
+
+    batch = [
+        {"_id": "insert-many-a", "stamp": zero},
+        {"_id": "insert-many-b", "stamp": zero},
+    ]
+    collection.insert_many(batch)
+
+    batch_stamps = [
+        collection.find_one({"_id": document["_id"]})["stamp"] for document in batch
+    ]
+    assert [document["stamp"] for document in batch] == [zero, zero]
+    assert all(stamp != zero for stamp in batch_stamps)
+    assert batch_stamps[0] != batch_stamps[1]
+
+    collection.insert_one({"_id": zero, "stamp": zero})
+    timestamp_id = collection.find_one({"_id": zero})
+    assert timestamp_id["_id"] == zero
+    assert timestamp_id["stamp"] != zero
+
+    replacement = {"stamp": zero, "nested": {"value": zero}}
+    collection.replace_one({"_id": "insert-one"}, replacement)
+    replaced = collection.find_one({"_id": "insert-one"})
+    assert replacement["stamp"] == zero
+    assert replaced["stamp"] != zero
+    assert replaced["nested"]["value"] == zero
+
+    collection.update_one(
+        {"_id": "insert-one"},
+        {"$set": {"stamp": zero, "nested.value": zero}},
+    )
+    updated = collection.find_one({"_id": "insert-one"})
+    assert updated["stamp"] == zero
+    assert updated["nested"]["value"] == zero
+
+    collection.update_one(
+        {"_id": "modifier-upsert"},
+        {"$set": {"stamp": zero}},
+        upsert=True,
+    )
+    assert collection.find_one({"_id": "modifier-upsert"})["stamp"] == zero
+
+    collection.update_one(
+        {"_id": "filter-upsert", "stamp": zero},
+        {"$set": {"value": 1}},
+        upsert=True,
+    )
+    assert collection.find_one({"_id": "filter-upsert"})["stamp"] == zero
+
+    upsert_replacement = {"stamp": zero, "nested": {"value": zero}}
+    result = collection.replace_one(
+        {"_id": "replacement-upsert"},
+        upsert_replacement,
+        upsert=True,
+    )
+    upserted = collection.find_one({"_id": result.upserted_id})
+    assert upsert_replacement["stamp"] == zero
+    assert upserted["stamp"] != zero
+    assert upserted["nested"]["value"] == zero
+
+
+def test_tm037_zero_timestamp_insert_many_honors_unique_indexes(contract_target):
+    collection = contract_target.collection
+    zero = Timestamp(0, 0)
+    collection.create_index("stamp", unique=True)
+    documents = [
+        {"_id": "unique-{0}".format(index), "stamp": zero} for index in range(3)
+    ]
+
+    collection.insert_many(documents)
+
+    stored = list(collection.find({}))
+    assert [document["stamp"] for document in documents] == [zero, zero, zero]
+    assert all(document["stamp"] != zero for document in stored)
+    assert len({document["stamp"] for document in stored}) == 3

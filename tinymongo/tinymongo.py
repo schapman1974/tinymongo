@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import threading
+import time as time_module
 from uuid import uuid4
 
 from tinydb import Query, TinyDB, where  # type: ignore[attr-defined]
@@ -34,6 +35,7 @@ from .bson_types import (
     is_bson_string,
     object_id_type,
     supported_bson_types,
+    timestamp_type,
 )
 from .aggregation import AggregationEngine, aggregation_capabilities
 from .sorting import bson_document_sort_value_key, sort_documents
@@ -110,6 +112,11 @@ def Q(query, key):
 _MISSING = object()
 _CODE = code_type()
 _DECIMAL128 = decimal128_type()
+_TIMESTAMP = timestamp_type()
+_SERVER_TIMESTAMP_LOCK = threading.Lock()
+_SERVER_TIMESTAMP_SECONDS = 0
+_SERVER_TIMESTAMP_INCREMENT = 0
+_MAX_TIMESTAMP_COMPONENT = 2**32 - 1
 
 
 def _generate_document_id():
@@ -119,6 +126,46 @@ def _generate_document_id():
     if object_id_class is not None:
         return object_id_class()
     return generate_id()
+
+
+def _next_server_timestamp():
+    """Return a process-local logical timestamp shaped like MongoDB's server time."""
+
+    global _SERVER_TIMESTAMP_SECONDS, _SERVER_TIMESTAMP_INCREMENT
+
+    with _SERVER_TIMESTAMP_LOCK:
+        seconds = max(int(time_module.time()), _SERVER_TIMESTAMP_SECONDS)
+        increment = (
+            _SERVER_TIMESTAMP_INCREMENT + 1
+            if seconds == _SERVER_TIMESTAMP_SECONDS
+            else 1
+        )
+        if increment > _MAX_TIMESTAMP_COMPONENT:
+            seconds += 1
+            increment = 1
+        _SERVER_TIMESTAMP_SECONDS = seconds
+        _SERVER_TIMESTAMP_INCREMENT = increment
+        return _TIMESTAMP(seconds, increment)
+
+
+def _stamp_top_level_server_timestamps(document):
+    """Stamp direct non-``_id`` ``Timestamp(0, 0)`` values without mutation."""
+
+    if _TIMESTAMP is None:
+        return document
+
+    stamped = None
+    for key, value in document.items():
+        if (
+            key != "_id"
+            and isinstance(value, _TIMESTAMP)
+            and value.time == 0
+            and value.inc == 0
+        ):
+            if stamped is None:
+                stamped = copy.deepcopy(document)
+            stamped[key] = _next_server_timestamp()
+    return document if stamped is None else stamped
 
 
 def _get_nested(doc, path, default=_MISSING):
@@ -165,7 +212,14 @@ def _delete_result(deleted_count):
     return DeleteResult(raw_result={"n": deleted_count, "ok": 1.0})
 
 
-def _duplicate_write_error(collection, index, document, spec=None, error=None):
+def _duplicate_write_error(
+    collection,
+    index,
+    document,
+    spec=None,
+    error=None,
+    operation=_MISSING,
+):
     """Describe one duplicate insert using PyMongo's bulk error shape."""
     field = "_id" if spec is None else spec.field
     index_name = "_id_" if spec is None else spec.name
@@ -184,7 +238,7 @@ def _duplicate_write_error(collection, index, document, spec=None, error=None):
         "errmsg": message,
         "keyPattern": {field: 1 if spec is None else spec.direction},
         "keyValue": {field: value},
-        "op": document,
+        "op": document if operation is _MISSING else operation,
     }
 
 
@@ -234,14 +288,29 @@ def _unique_insert_state(existing_documents, specs):
     return states
 
 
-def _plan_insert_many(collection, documents, existing_documents, specs, ordered):
+def _plan_insert_many(
+    collection,
+    documents,
+    existing_documents,
+    specs,
+    ordered,
+    original_documents=None,
+):
     """Split a batch into inserts and duplicate-key write errors."""
+    if original_documents is None:
+        original_documents = list(documents)
     id_identities, fallback_ids, all_ids = _insert_id_state(existing_documents)
     unique_states = _unique_insert_state(existing_documents, specs)
     accepted = []
     write_errors = []
 
     for index, document in enumerate(documents):
+        # MongoDB resolves direct all-zero timestamps as each insert reaches
+        # duplicate and unique-index validation. Replacing the local list item
+        # preserves caller mappings, stops after an ordered failure, and lets a
+        # native-race retry reuse the same generated value.
+        document = _stamp_top_level_server_timestamps(document)
+        documents[index] = document
         duplicate_error = None
         value = document["_id"]
         identity = bson_value_identity_key(value)
@@ -259,7 +328,12 @@ def _plan_insert_many(collection, documents, existing_documents, specs, ordered)
             )
 
         if duplicate_id:
-            duplicate_error = _duplicate_write_error(collection, index, document)
+            duplicate_error = _duplicate_write_error(
+                collection,
+                index,
+                document,
+                operation=original_documents[index],
+            )
         else:
             candidate_tokens = []
             for spec, owners, existing_error in unique_states:
@@ -281,6 +355,7 @@ def _plan_insert_many(collection, documents, existing_documents, specs, ordered)
                         document,
                         spec=spec,
                         error=error,
+                        operation=original_documents[index],
                     )
                     break
 
@@ -307,10 +382,13 @@ def _execute_engine_insert_many(
     documents,
     ordered,
     bypass_document_validation,
+    original_documents=None,
 ):
     """Plan and execute a table-backend batch, retrying native races."""
 
     engine = collection.parent.engine
+    if original_documents is None:
+        original_documents = list(documents)
     last_error = None
     accepted = []
     write_errors = []
@@ -343,6 +421,7 @@ def _execute_engine_insert_many(
             existing_documents,
             specs,
             ordered,
+            original_documents=original_documents,
         )
         if not accepted:
             return [], accepted, write_errors
@@ -377,6 +456,7 @@ def _execute_engine_insert_many(
             conflict_index,
             conflict_document,
             error=last_error,
+            operation=original_documents[conflict_index],
         )
     )
     write_errors.sort(key=lambda item: item["index"])
@@ -426,15 +506,22 @@ _ADD_TO_SET_MODIFIERS = frozenset(("$each",))
 _PULL_COMPARISON_OPERATORS = frozenset(("$gt", "$gte", "$lt", "$lte"))
 _PULL_FIELD_OPERATORS = frozenset(
     (
+        "$all",
         "$elemMatch",
         "$eq",
+        "$exists",
         "$in",
+        "$mod",
+        "$ne",
         "$nin",
         "$options",
         "$regex",
+        "$size",
+        "$type",
     )
     + tuple(_PULL_COMPARISON_OPERATORS)
 )
+_PULL_DOCUMENT_FIELD_OPERATORS = _PULL_FIELD_OPERATORS | frozenset(("$not",))
 _PULL_LOGICAL_OPERATORS = frozenset(("$and", "$or", "$nor"))
 
 
@@ -683,7 +770,7 @@ def _validate_update_path_conflicts(update_doc):
                 )
 
 
-def _validate_pull_field_condition(condition):
+def _validate_pull_field_condition(condition, *, document_field=False):
     """Validate the operators applied to one array element or document field."""
 
     if not isinstance(condition, Mapping):
@@ -697,8 +784,11 @@ def _validate_pull_field_condition(condition):
     if len(operator_keys) != len(condition):
         _raise_write_error("$pull cannot mix field and document query operators")
 
+    allowed_operators = (
+        _PULL_DOCUMENT_FIELD_OPERATORS if document_field else _PULL_FIELD_OPERATORS
+    )
     for key, operand in condition.items():
-        if key not in _PULL_FIELD_OPERATORS:
+        if key not in allowed_operators:
             _raise_write_error("$pull does not support query operator {0}".format(key))
         if key in _PULL_COMPARISON_OPERATORS and is_bson_regex(operand):
             _raise_write_error("Can't have RegEx as arg to non-equality predicate")
@@ -712,6 +802,8 @@ def _validate_pull_field_condition(condition):
         validate_filter_operators({"value": condition})
     except OperationFailure as error:
         _raise_write_error(str(error), code=error.code or 2)
+    except TinyMongoNotSupportedError as error:
+        _raise_write_error(str(error), code=2)
 
 
 def _validate_pull_document_condition(condition):
@@ -729,12 +821,14 @@ def _validate_pull_document_condition(condition):
                 )
             for clause in operand:
                 _validate_pull_document_condition(clause)
+        elif key == "$expr":
+            _raise_write_error("$expr is not allowed in this context", code=224)
         elif isinstance(key, str) and key.startswith("$"):
             _raise_write_error(
                 "$pull does not support document query operator {0}".format(key)
             )
         else:
-            _validate_pull_field_condition(operand)
+            _validate_pull_field_condition(operand, document_field=True)
 
 
 def _validate_pull_condition(condition):
@@ -746,6 +840,8 @@ def _validate_pull_condition(condition):
     operator_keys = [
         key for key in condition if isinstance(key, str) and key.startswith("$")
     ]
+    if "$expr" in operator_keys:
+        _raise_write_error("$expr is not allowed in this context", code=224)
     if any(key in _PULL_LOGICAL_OPERATORS for key in operator_keys):
         _validate_pull_document_condition(condition)
     elif operator_keys:
@@ -1162,7 +1258,7 @@ def _replacement_document_for_upsert(query, replacement):
     # MongoDB stores ``_id`` first even when it was inferred from the filter.
     inserted = {"_id": copy.deepcopy(inserted_id)}
     inserted.update(copy.deepcopy(replacement))
-    return inserted
+    return _stamp_top_level_server_timestamps(inserted)
 
 
 def _simple_equality_filter(_filter):
@@ -2544,15 +2640,16 @@ class TinyMongoCollection(object):
         else:
             _id = doc["_id"] = _generate_document_id()
         self._validate_storage_document(doc)
+        stored_doc = _stamp_top_level_server_timestamps(doc)
 
         if self.parent.engine is not None:
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
-                self.parent.engine.find(self.tablename, {}) + [doc],
+                self.parent.engine.find(self.tablename, {}) + [stored_doc],
             )
             result = self.parent.engine.insert_many(
                 self.tablename,
-                [doc],
+                [stored_doc],
                 bypass_document_validation=kwargs.get("bypass_document_validation")
                 is True,
             )
@@ -2573,8 +2670,8 @@ class TinyMongoCollection(object):
                 None,
             )
             if existing is None:
-                self._validate_unique_post_image(documents + [doc])
-                eid = self.table.insert(doc)
+                self._validate_unique_post_image(documents + [stored_doc])
+                eid = self.table.insert(stored_doc)
             else:
                 raise DuplicateKeyError(
                     "_id:{0} already exists in collection:{1}".format(
@@ -2629,20 +2726,23 @@ class TinyMongoCollection(object):
                 _id = doc["_id"] = _generate_document_id()
             _ids.append(_id)
 
+        stored_docs = list(docs)
+
         # Validate TinyMongo's one storage batch at the JSON boundary before
         # changing storage. PyMongo can split very large inputs across multiple
         # wire batches, so TinyMongo intentionally provides a stronger
         # whole-list guarantee here.
-        for index, doc in enumerate(docs):
+        for index, doc in enumerate(stored_docs):
             self._validate_storage_document(doc, index=index)
 
         engine = self.parent.engine
         if engine is not None:
             results, accepted, write_errors = _execute_engine_insert_many(
                 self,
-                docs,
+                stored_docs,
                 ordered,
                 bypass_document_validation,
+                original_documents=docs,
             )
             if write_errors:
                 raise BulkWriteError(_bulk_write_details(len(accepted), write_errors))
@@ -2655,10 +2755,11 @@ class TinyMongoCollection(object):
             self._refresh_table()
             accepted, write_errors = _plan_insert_many(
                 self,
-                docs,
+                stored_docs,
                 self.table.all(),
                 list(self._index_specs.values()),
                 ordered,
+                original_documents=docs,
             )
 
             if accepted:
@@ -3184,6 +3285,7 @@ class TinyMongoCollection(object):
             updated = {"_id": item["_id"]}
             updated.update(copy.deepcopy(replacement))
             updated["_id"] = item["_id"]
+            updated = _stamp_top_level_server_timestamps(updated)
             self._validate_storage_document(updated)
             modified = not storage_values_equal(updated, item)
             if modified:
@@ -3241,6 +3343,7 @@ class TinyMongoCollection(object):
             updated = {"_id": item["_id"]}
             updated.update(copy.deepcopy(replacement))
             updated["_id"] = item["_id"]
+            updated = _stamp_top_level_server_timestamps(updated)
             self._validate_storage_document(updated)
             modified = not storage_values_equal(updated, item)
             if modified:

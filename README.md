@@ -469,10 +469,12 @@ As in PyMongo, `update_one()` and `update_many()` require update operators; use
 `replace_one()` for full-document replacement. `$push` accepts `$each`,
 `$position`, `$sort`, and `$slice`; `$addToSet` accepts `$each`; and `$pull`
 accepts literals, document conditions, ranges, `$in`, `$nin`, `$regex` with
-optional `$options`, and `$elemMatch`. MongoDB does not accept a top-level
-`$not` as a `$pull` condition, so TinyMongo reports `WriteError` code `2` for
-that shape as well. `$pullAll` removes every array item BSON-equal to any
-literal in its operand array.
+optional `$options`, `$elemMatch`, `$exists`, `$type`, `$ne`, `$mod`, `$all`,
+`$size`, and document-field `$not`. MongoDB does not accept a top-level `$not`
+as a `$pull` condition, so TinyMongo reports `WriteError` code `2` for that
+shape as well; document-level `$expr` is likewise refused with MongoDB's code
+`224`. `$pullAll` removes every array item BSON-equal to any literal in its
+operand array.
 
 `$pull` and `$pullAll` are true no-ops when their target field is missing: they
 do not create an empty array, change an `$exists: false` result, or add to
@@ -742,6 +744,14 @@ and recursively encoded scope. Earlier TinyMongo releases stored `Code` as an
 ordinary string, so those legacy values cannot be distinguished from intended
 strings or recovered automatically; rewrite them from an authoritative source
 if the distinction matters.
+
+Following MongoDB's write boundary, a direct, non-`_id` `Timestamp(0, 0)`
+receives a process-local logical timestamp when inserted or used in a
+replacement write. The same value remains literal inside nested documents or
+arrays, as an `_id`, or when written by an update modifier such as `$set`.
+Separate TinyMongo processes do not share this clock, so generated timestamps
+are not a cross-process uniqueness mechanism.
+
 Native compiled patterns retain their Python representation; `bson.Regex`
 values retain their BSON representation, pattern, and flags. Regex identity is
 the pattern plus MongoDB's canonical option string. Preserving a native

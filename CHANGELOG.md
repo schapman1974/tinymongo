@@ -31,6 +31,14 @@
   full-scan fallback for released legacy-store formats.
 
 ### Fixed
+- **TM-037:** Direct, non-`_id` `Timestamp(0, 0)` values now receive a
+  process-local logical timestamp during inserts and replacement writes.
+  Nested, array, `_id`, and modifier-update values remain literal, and
+  caller-owned documents are not rewritten.
+- **TM-038:** `$pull` now accepts `$exists`, `$type`, `$ne`, `$mod`, `$all`,
+  `$size`, and document-field `$not` through the shared query matcher.
+  Top-level `$not` remains a code-`2` write error, while document-level
+  `$expr` now matches MongoDB's refusal code `224`.
 - **TM-039:** Replacement upserts now retain an `_id` pinned by a top-level
   direct value or sole `$eq` predicate, return that exact value through
   `upserted_id`, and leave the inserted document findable through the caller's

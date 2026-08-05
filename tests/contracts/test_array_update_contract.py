@@ -286,6 +286,89 @@ def test_pull_query_operator_family_matches_mongodb(contract_target):
     ]
 
 
+def test_tm038_pull_remaining_field_predicates_match_mongodb(contract_target):
+    collection = contract_target.collection
+    collection.insert_many(
+        [
+            {"_id": "exists", "values": [{"a": 1}, {"b": 2}, {}]},
+            {"_id": "type", "values": [1, "x", [1, 2], {"a": 1}]},
+            {"_id": "ne", "values": [1, 2, 3]},
+            {"_id": "mod", "values": [1, 2, 3, 4]},
+            {"_id": "all", "values": [[1, 2], [1], [2, 1, 3], 1]},
+            {"_id": "size", "values": [[1, 2], [1], [], 1]},
+            {
+                "_id": "not",
+                "values": [{"score": 1}, {"score": 8}, {"other": 2}],
+            },
+        ]
+    )
+
+    predicates = {
+        "exists": {"a": {"$exists": False}},
+        "type": {"$type": "array"},
+        "ne": {"$ne": 2},
+        "mod": {"$mod": [2, 0]},
+        "all": {"$all": [1, 2]},
+        "size": {"$size": 2},
+        "not": {"score": {"$not": {"$gte": 5}}},
+    }
+    for document_id, predicate in predicates.items():
+        collection.update_one(
+            {"_id": document_id},
+            {"$pull": {"values": predicate}},
+        )
+
+    assert collection.find_one({"_id": "exists"})["values"] == [{"a": 1}]
+    assert collection.find_one({"_id": "type"})["values"] == [
+        1,
+        "x",
+        {"a": 1},
+    ]
+    assert collection.find_one({"_id": "ne"})["values"] == [2]
+    assert collection.find_one({"_id": "mod"})["values"] == [1, 3]
+    assert collection.find_one({"_id": "all"})["values"] == [[1], 1]
+    assert collection.find_one({"_id": "size"})["values"] == [[1], [], 1]
+    assert collection.find_one({"_id": "not"})["values"] == [{"score": 8}]
+
+
+def test_tm038_pull_expr_errors_are_preflighted_like_mongodb(contract_target):
+    collection = contract_target.collection
+    original = {
+        "_id": "expr",
+        "values": [{"score": 1}, {"score": 2}],
+    }
+    collection.insert_one(original)
+
+    expressions = [
+        {"$expr": {"$eq": [1, 1]}},
+        {"$or": [{"$expr": {"$eq": [1, 1]}}, {"score": 2}]},
+        {"$and": [{"score": {"$gte": 1}}, {"$expr": {"$eq": [1, 1]}}]},
+        {"$nor": [{"$expr": {"$eq": [1, 1]}}, {"score": 3}]},
+    ]
+    for expression in expressions:
+        with pytest.raises(_WRITE_ERRORS) as caught:
+            collection.update_one(
+                {"_id": "expr"},
+                {"$pull": {"values": expression}},
+            )
+        assert caught.value.code == 224
+        assert collection.find_one({"_id": "expr"}) == original
+
+    nested_code_two = [
+        {"score": {"$expr": {"$eq": [1, 1]}}},
+        {"score": {"$not": {"$unknown": 1}}},
+        {"$elemMatch": {"$expr": {"$eq": [1, 1]}}},
+    ]
+    for expression in nested_code_two:
+        with pytest.raises(_WRITE_ERRORS) as caught:
+            collection.update_one(
+                {"_id": "expr"},
+                {"$pull": {"values": expression}},
+            )
+        assert caught.value.code == 2
+        assert collection.find_one({"_id": "expr"}) == original
+
+
 def test_pull_missing_fields_are_true_noops(contract_target):
     collection = contract_target.collection
     collection.insert_many(
