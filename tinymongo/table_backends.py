@@ -140,6 +140,49 @@ _SIGNED_INT64_MAX = 2**63 - 1
 _SIGNED_INT32_MAX = 2**31 - 1
 
 
+class _PreparedSQLiteInsert(object):
+    """One validated SQLite row shared by preflight and final insertion."""
+
+    __slots__ = (
+        "document",
+        "payload",
+        "physical_id",
+        "_physical_id_candidates",
+        "_requires_legacy_scan",
+    )
+
+    def __init__(
+        self,
+        document,
+        payload,
+        physical_id,
+        physical_id_candidates=None,
+        requires_legacy_scan=None,
+    ):
+        self.document = document
+        self.payload = payload
+        self.physical_id = physical_id
+        self._physical_id_candidates = physical_id_candidates
+        self._requires_legacy_scan = requires_legacy_scan
+
+    @property
+    def physical_id_candidates(self):
+        if self._physical_id_candidates is None:
+            self._physical_id_candidates = _physical_id_candidates(
+                self.document["_id"],
+                current=self.physical_id,
+            )
+        return self._physical_id_candidates
+
+    @property
+    def requires_legacy_scan(self):
+        if self._requires_legacy_scan is None:
+            self._requires_legacy_scan = _requires_legacy_insert_scan(
+                self.document["_id"]
+            )
+        return self._requires_legacy_scan
+
+
 def _large_numeric_ratio(key):
     """Return an exact ratio that is unsafe for bounded int-to-text runtimes."""
 
@@ -235,18 +278,34 @@ def _canonical_id_value(value):
 
 def _physical_id_key(value):
     """Return the compact typed key stored in SQL and Parquet `_id` columns."""
-    canonical = json.dumps(
-        _canonical_id_value(value),
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("ascii")
+
+    if type(value) is str:
+        # ``Code`` subclasses ``str`` and must retain its BSON identity, hence
+        # the deliberate exact-type check. This is byte-for-byte equivalent to
+        # the general registry/canonicalization path without its repeated JSON
+        # encode/decode cycle.
+        canonical = (
+            b'["registered-scalar",["string",'
+            + json.dumps(value, ensure_ascii=True).encode("ascii")
+            + b"]]"
+        )
+    else:
+        canonical = json.dumps(
+            _canonical_id_value(value),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
     return _PHYSICAL_ID_PREFIX + hashlib.sha256(canonical).hexdigest()
 
 
-def _physical_id_candidates(value):
+def _physical_id_candidates(value, current=None):
     """Return the v2 key followed by compatible legacy stringified keys."""
 
-    current = _physical_id_key(value)
+    if current is None:
+        current = _physical_id_key(value)
+    if type(value) is str:
+        return tuple(dict.fromkeys((current, value)))
+
     legacy = [_legacy_stringified_id(value)]
     old_typed = _legacy_large_ratio_physical_id_key(value)
     if old_typed is not None:
@@ -272,6 +331,8 @@ def _physical_id_candidates(value):
 def _requires_legacy_id_scan(value):
     """Return whether equivalent legacy IDs can have unpredictable strings."""
 
+    if type(value) in (str, bool, int, float, bytes, bytearray) or value is None:
+        return False
     if isinstance(value, (Mapping, list, tuple)):
         return True
     identity = bson_identity_key(value)
@@ -281,6 +342,8 @@ def _requires_legacy_id_scan(value):
 def _requires_legacy_insert_scan(value):
     """Return whether an insert preflight cannot enumerate every legacy key."""
 
+    if type(value) in (str, bool, int, float, bytes, bytearray) or value is None:
+        return False
     # Decimal128 support arrived after typed physical IDs. An incoming decimal
     # can still equal an int/float row written by a released pre-typed codec,
     # whose string key may not preserve the decimal's scale.
@@ -2023,6 +2086,7 @@ class SQLiteTableBackend(TableBackend):
         self._ready_collections = set()
         self._ready_type_indexes = set()
         self._query_index_cache = {}
+        self._known_nonempty_collections = set()
 
     def _physical_index_name(self, collection, spec):
         identity = "{0}\x00{1}\x00{2}".format(
@@ -2082,6 +2146,7 @@ class SQLiteTableBackend(TableBackend):
                 key for key in self._ready_type_indexes if key[0] != collection
             }
             self._query_index_cache.pop(collection, None)
+            self._known_nonempty_collections.discard(collection)
 
     def _run_collection_read(self, collection, operation):
         """Run one connection-scoped read, recovering once from an external drop."""
@@ -2371,6 +2436,60 @@ class SQLiteTableBackend(TableBackend):
         _validate_physical_ids(existing_docs, docs)
         return self._insert_rows(collection, docs)
 
+    def _prepare_insert_many(
+        self,
+        documents,
+        encoded_documents=None,
+        previous=None,
+    ):
+        """Prepare SQLite payloads and typed IDs once for an insert batch.
+
+        ``previous`` is positionally aligned with ``documents`` and is only
+        used after the shared planner has replaced a document with a
+        top-level server-timestamp copy. The planner never changes ``_id``, so
+        those rows need a new payload but can retain their physical key and
+        legacy candidate set.
+        """
+
+        if encoded_documents is not None and len(encoded_documents) != len(documents):
+            raise ValueError("encoded documents must align with documents")
+        if previous is not None and len(previous) != len(documents):
+            previous = None
+
+        prepared = []
+        for index, document in enumerate(documents):
+            prior = previous[index] if previous is not None else None
+            if prior is not None and prior.document is document:
+                prepared.append(prior)
+                continue
+
+            payload = (
+                encoded_documents[index]
+                if encoded_documents is not None
+                else _json_dumps(document)
+            )
+            if prior is not None:
+                prepared.append(
+                    _PreparedSQLiteInsert(
+                        document,
+                        payload,
+                        prior.physical_id,
+                        prior._physical_id_candidates,
+                        prior._requires_legacy_scan,
+                    )
+                )
+                continue
+
+            physical_id = _physical_id_key(document["_id"])
+            prepared.append(
+                _PreparedSQLiteInsert(
+                    document,
+                    payload,
+                    physical_id,
+                )
+            )
+        return prepared
+
     def find_insert_conflict_candidates(self, collection, documents, specs):
         """Load SQLite rows whose primary keys can conflict with a batch.
 
@@ -2391,6 +2510,134 @@ class SQLiteTableBackend(TableBackend):
                 for candidate in _physical_id_candidates(document["_id"])
             )
         )
+        return self._load_insert_conflict_candidates(collection, candidates)
+
+    def _find_prepared_insert_conflict_candidates(
+        self,
+        collection,
+        prepared_documents,
+        specs,
+    ):
+        """Load conflicts using physical IDs already prepared for insertion."""
+
+        if any(spec.unique for spec in specs) or any(
+            prepared.requires_legacy_scan for prepared in prepared_documents
+        ):
+            return None
+        candidates = tuple(
+            dict.fromkeys(
+                candidate
+                for prepared in prepared_documents
+                for candidate in prepared.physical_id_candidates
+            )
+        )
+        return self._load_insert_conflict_candidates(collection, candidates)
+
+    @_write_locked
+    def _try_empty_collection_insert_many(
+        self,
+        collection,
+        prepared_documents,
+        bypass_document_validation=False,
+    ):
+        """Insert a simple batch atomically when its collection is empty.
+
+        Empty storage proves that no current or legacy physical ID can already
+        conflict. Batches with durable unique indexes retain the shared planner
+        because a legacy catalog may intentionally lack its native constraint.
+        Any within-batch native conflict rolls the entire attempt back before
+        collection-level planning produces MongoDB-compatible partial results.
+        """
+
+        with self._sqlite_state_lock:
+            if collection in self._known_nonempty_collections:
+                return None
+
+        self.create_collection(collection)
+        conn = self._connect()
+        try:
+            # Bring any stale index catalog forward before beginning the
+            # optimistic transaction because that one-time migration commits.
+            specs = self._get_index_specs_on_connection(conn, collection)
+            if any(spec.unique for spec in specs):
+                return None
+
+            conn.execute("BEGIN IMMEDIATE")
+            # Re-read under SQLite's write reservation so an external schema
+            # writer cannot add a unique constraint between the safety check
+            # and the batch insert.
+            specs = self._get_index_specs_on_connection(conn, collection)
+            if not conn.in_transaction:
+                return None
+            if any(spec.unique for spec in specs):
+                conn.rollback()
+                return None
+            table = _quote_identifier(collection)
+
+            # TinyMongo does not create triggers, and its only unique SQLite
+            # index outside the primary key is represented in ``specs`` above.
+            # Fail closed around externally customized schemas. In particular,
+            # a missing PK or ``ON CONFLICT IGNORE/REPLACE`` could make a batch
+            # with duplicate IDs appear to succeed, while a trigger could skip
+            # a row or perform an irreversible speculative side effect.
+            expected_table_sql = (
+                "CREATE TABLE {0} "
+                "(_id TEXT PRIMARY KEY, data TEXT NOT NULL)".format(table)
+            )
+            table_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (collection,),
+            ).fetchone()
+            has_trigger = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = ? LIMIT 1",
+                (collection,),
+            ).fetchone()
+            has_external_unique_index = any(
+                row[2] and row[3] != "pk"
+                for row in conn.execute(
+                    "PRAGMA index_list({0})".format(table)
+                ).fetchall()
+            )
+            if (
+                table_sql is None
+                or table_sql[0] != expected_table_sql
+                or has_trigger is not None
+                or has_external_unique_index
+            ):
+                conn.rollback()
+                return None
+
+            if (
+                conn.execute("SELECT 1 FROM {0} LIMIT 1".format(table)).fetchone()
+                is not None
+            ):
+                conn.rollback()
+                with self._sqlite_state_lock:
+                    self._known_nonempty_collections.add(collection)
+                return None
+
+            rows = [
+                (prepared.physical_id, prepared.payload)
+                for prepared in prepared_documents
+            ]
+            try:
+                results = self._insert_rows_on_connection(conn, collection, rows)
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return None
+            with self._sqlite_state_lock:
+                self._known_nonempty_collections.add(collection)
+            return results
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.close()
+
+    def _load_insert_conflict_candidates(self, collection, candidates):
+        """Decode rows matching one already canonicalized candidate set."""
+
         if not candidates:  # pragma: no cover - public batches are non-empty
             return []
 
@@ -2431,22 +2678,51 @@ class SQLiteTableBackend(TableBackend):
         self.create_collection(collection)
         return self._insert_rows(collection, docs)
 
+    @_write_locked
+    def _insert_many_prepared(
+        self,
+        collection,
+        prepared_documents,
+        bypass_document_validation=False,
+    ):
+        """Commit rows whose validation, encoding, and IDs are complete."""
+
+        self.create_collection(collection)
+        rows = [
+            (prepared.physical_id, prepared.payload) for prepared in prepared_documents
+        ]
+        return self._commit_insert_rows(collection, rows)
+
     def _insert_rows(self, collection, docs):
         """Serialize and commit one already validated SQLite insert batch."""
 
         rows = [(_physical_id_key(doc["_id"]), _json_dumps(doc)) for doc in docs]
+        return self._commit_insert_rows(collection, rows)
+
+    def _commit_insert_rows(self, collection, rows):
+        """Commit one sequence of physical SQLite rows."""
+
         conn = self._connect()
         try:
-            sql = "INSERT INTO {0} (_id, data) VALUES (?, ?)".format(
-                _quote_identifier(collection)
-            )
-            conn.executemany(sql, rows)
+            results = self._insert_rows_on_connection(conn, collection, rows)
             conn.commit()
-            return list(range(len(rows)))
+            if rows:
+                with self._sqlite_state_lock:
+                    self._known_nonempty_collections.add(collection)
+            return results
         except sqlite3.IntegrityError as exc:
             raise DuplicateKeyError(str(exc))
         finally:
             conn.close()
+
+    def _insert_rows_on_connection(self, conn, collection, rows):
+        """Execute physical rows without choosing transaction boundaries."""
+
+        sql = "INSERT INTO {0} (_id, data) VALUES (?, ?)".format(
+            _quote_identifier(collection)
+        )
+        conn.executemany(sql, rows)
+        return list(range(len(rows)))
 
     def _find_direct_id(self, collection, filter_doc, projection=None):
         """Resolve one exact ``_id`` predicate through SQLite's primary key."""

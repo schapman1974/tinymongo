@@ -732,6 +732,18 @@ def bson_identity_key(value):
     MongoDB-style numeric equality while booleans remain a separate family.
     """
 
+    value_type = type(value)
+    if value is None:
+        return "null", None
+    if value_type is str:
+        return "string", value
+    if value_type is bool:
+        return "boolean", value
+    if value_type is int or value_type is float:
+        return "number", _number_identity_key(value)
+    if value_type is bytes or value_type is bytearray:
+        return "binary", _binary_identity_key(value)
+
     spec = bson_type_spec(value)
     if spec is None:
         return None
