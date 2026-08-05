@@ -29,6 +29,11 @@
   BSON-aware ordered and unordered planning remains shared, while unique
   indexes, Decimal128 IDs, and non-enumerable legacy IDs retain the conservative
   full-scan fallback for released legacy-store formats.
+- SQLite `update_one()` and `update_many()` now select exact `_id` rows through
+  the primary key and declared non-unique index candidates for top-level
+  bool/int/float/string equality inside the existing atomic transaction. Exact
+  BSON post-filtering and natural first-match order are preserved, while
+  unique-index and uncertain legacy cases retain the complete validation scan.
 
 ### Fixed
 - **TM-037:** Direct, non-`_id` `Timestamp(0, 0)` values now receive a

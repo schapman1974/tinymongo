@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import tinymongo as tm
+import tinymongo.table_backends as table_backends
 
 from tinymongo.errors import DuplicateKeyError, WriteError
 from tinymongo.indexes import parse_index_spec
@@ -65,7 +66,7 @@ def test_sqlite_bulk_update_uses_one_transaction_and_executemany(tmp_path, monke
 
     assert [sql for sql, _params in tracked.execute_calls] == [
         "BEGIN IMMEDIATE",
-        'SELECT _id, data FROM "items"',
+        'SELECT rowid, _id, data FROM "items" ORDER BY rowid',
     ]
     assert len(tracked.executemany_calls) == 1
     assert tracked.executemany_calls[0][0] == (
@@ -78,6 +79,151 @@ def test_sqlite_bulk_update_uses_one_transaction_and_executemany(tmp_path, monke
 
     reopened = SQLiteTableBackend(backend.path)
     assert [doc["count"] for doc in reopened.find("items", {})] == [11, 12, 3]
+
+
+def test_sqlite_exact_id_update_decodes_only_target_and_miss(
+    tmp_path,
+    monkeypatch,
+):
+    backend = SQLiteTableBackend(str(tmp_path / "targeted-id.sqlite"))
+    backend.insert_many(
+        "items",
+        [{"_id": index, "count": index} for index in range(100)],
+    )
+    decoded_ids = []
+    original_loads = table_backends._json_loads
+
+    def tracked_loads(value):
+        document = original_loads(value)
+        decoded_ids.append(document["_id"])
+        return document
+
+    monkeypatch.setattr(table_backends, "_json_loads", tracked_loads)
+
+    assert backend.update_many(
+        "items",
+        {"_id": 99},
+        {"$inc": {"count": 1}},
+        multi=False,
+    ) == [99]
+    assert decoded_ids == [99]
+
+    decoded_ids.clear()
+    assert (
+        backend.update_many(
+            "items",
+            {"_id": "missing"},
+            {"$set": {"seen": True}},
+            multi=False,
+        )
+        == []
+    )
+    assert decoded_ids == []
+
+
+def test_sqlite_indexed_update_decodes_only_bson_matching_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    backend = SQLiteTableBackend(str(tmp_path / "targeted-index.sqlite"))
+    backend.insert_many(
+        "items",
+        [
+            {"_id": "array-bool", "flag": [True]},
+            {"_id": "scalar-bool", "flag": True},
+            {"_id": "scalar-number", "flag": 1},
+            {"_id": "array-number", "flag": [1]},
+            {"_id": "other", "flag": False},
+        ],
+    )
+    backend.create_index("items", parse_index_spec("flag"))
+    decoded_ids = []
+    original_loads = table_backends._json_loads
+
+    def tracked_loads(value):
+        document = original_loads(value)
+        decoded_ids.append(document["_id"])
+        return document
+
+    monkeypatch.setattr(table_backends, "_json_loads", tracked_loads)
+
+    assert backend.update_many(
+        "items",
+        {"flag": True},
+        {"$set": {"matched": True}},
+    ) == ["array-bool", "scalar-bool"]
+    assert decoded_ids == ["scalar-bool", "array-bool"]
+
+
+def test_sqlite_indexed_update_one_keeps_natural_first_match(tmp_path):
+    backend = SQLiteTableBackend(str(tmp_path / "targeted-order.sqlite"))
+    backend.insert_many(
+        "items",
+        [
+            {"_id": "array-first", "group": ["selected"], "state": "done"},
+            {"_id": "scalar-second", "group": "selected", "state": "pending"},
+        ],
+    )
+    backend.create_index("items", parse_index_spec("group"))
+
+    assert (
+        backend.update_many(
+            "items",
+            {"group": "selected"},
+            {"$set": {"state": "done"}},
+            multi=False,
+        )
+        == []
+    )
+    assert backend.find_one("items", {"_id": "scalar-second"})["state"] == "pending"
+
+
+def test_sqlite_targeted_update_falls_back_for_legacy_and_unsafe_candidates(
+    tmp_path,
+):
+    backend = SQLiteTableBackend(str(tmp_path / "targeted-fallbacks.sqlite"))
+    backend.insert_many(
+        "items",
+        [
+            {"_id": "number", "value": 1},
+            {"_id": "object", "value": {"nested": 1}},
+        ],
+    )
+    backend.create_index("items", parse_index_spec("value"))
+
+    assert (
+        backend.update_many(
+            "items",
+            {"_id": {"missing": True}},
+            {"$set": {"seen": True}},
+            multi=False,
+        )
+        == []
+    )
+    assert (
+        backend.update_many(
+            "items",
+            {"value": float("nan")},
+            {"$set": {"seen": True}},
+            multi=False,
+        )
+        == []
+    )
+    assert (
+        backend.update_many(
+            "items",
+            {"value": 10**100},
+            {"$set": {"seen": True}},
+            multi=False,
+        )
+        == []
+    )
+    assert backend.update_many(
+        "items",
+        {"value": 1},
+        {"$set": {"seen": True}},
+    ) == ["number"]
+    assert backend.find_one("items", {"_id": "object"}).get("seen") is None
 
 
 def test_sqlite_bulk_update_validates_unique_post_image_atomically(tmp_path):

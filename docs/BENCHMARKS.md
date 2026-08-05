@@ -4,7 +4,7 @@ These numbers are local benchmark results from the TinyMongo storage load
 benchmark. They are useful for comparing relative behavior on this machine, not
 for making universal performance claims.
 
-## SQLite performance work: 2026-08-04
+## SQLite performance work: 2026-08-04 through 2026-08-05
 
 ### Fixed-size batch scaling (TM-040)
 
@@ -44,6 +44,7 @@ The focused comparison uses the same 10,000 JSON-shaped documents and performs:
 
 - One `insert_many()` batch.
 - 200 warmed, deterministic `_id` point lookups.
+- 200 durable `_id` point updates using `$inc`.
 - 200 warmed equality queries through an index on `group`. Each query returns
   1,000 documents, for 200,000 decoded result rows in total.
 - One indexed update affecting 1,000 documents.
@@ -53,8 +54,8 @@ SQLite is a lower-bound comparison: it does not provide TinyMongo's BSON,
 MongoDB query, validation, or update semantics, and its update is native SQL.
 MongoDB 8.0 ran locally through PyMongo 4.17.0 in a disposable Docker container
 with a persistent Docker volume. Its collection explicitly used
-`WriteConcern(w=1, j=True)`, and the benchmark verifies that both measured
-writes were acknowledged. The two SQLite connections reported WAL mode with
+`WriteConcern(w=1, j=True)`, and the benchmark verifies that every measured
+write was acknowledged. The two SQLite connections reported WAL mode with
 `synchronous=NORMAL`.
 
 Command:
@@ -67,6 +68,9 @@ TINYMONGO_MONGODB_URI='mongodb://127.0.0.1:27017/?directConnection=true' \
     --json-output /tmp/tinymongo-sqlite-comparison.json
 ```
 
+The original 2026-08-04 capture below predates the point-update measurement;
+the 2026-08-05 follow-up records that new column separately.
+
 | Engine | Insert docs/s | Point avg ms | Point p95 ms | Indexed queries/s | Indexed rows/s | Update docs/s | Update s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | tinymongo-sqlite | 18,985 | 0.414 | 0.470 | 116.7 | 116,688 | 5,054 | 0.198 |
@@ -78,6 +82,30 @@ MongoDB is not receiving an unacknowledged-write advantage in this run. MongoDB
 uses Docker's storage stack while SQLite uses the host filesystem, which means
 the absolute write-throughput comparison remains directional rather than a
 claim that the storage media are identical.
+
+### Candidate-selective SQLite updates: 2026-08-05
+
+The comparison driver now measures the ordinary durable
+`update_one({"_id": ...}, {"$inc": ...})` path as well as the existing indexed
+`update_many()` batch. The same updated driver ran against commit `8d627af`
+before candidate selection and against the working branch afterward. Both runs
+used 10,000 documents, 200 deterministic point updates, Python 3.9.6 on the
+same macOS host, and SQLite WAL with `synchronous=NORMAL`:
+
+| Engine or revision | Point update avg ms | Point update p95 ms | Indexed update 1,000 docs s | Indexed update docs/s |
+| --- | ---: | ---: | ---: | ---: |
+| TinyMongo SQLite before (`8d627af`) | 98.653 | 124.121 | 0.228 | 4,395 |
+| TinyMongo SQLite after | 4.330 | 4.965 | 0.144 | 6,968 |
+| Raw SQLite lower bound | 0.091 | 0.238 | 0.034 | 29,233 |
+
+The targeted TinyMongo point update is about 22.8x faster in this run. Decode
+instrumentation also changed from all 10,000 stored documents per `_id` update
+to one document for a hit and zero for an ordinary miss. Declared non-unique
+indexes now bound top-level bool/int/float/string equality-update candidates
+too; exact BSON matching still runs before any row changes. Collections with
+user-created unique indexes continue using complete post-image validation
+because overlapping multikey tokens and fail-closed legacy catalogs cannot
+safely rely on a simple native constraint alone.
 
 The same 1,000-document storage benchmark was captured immediately before and
 after the SQLite work on this machine:

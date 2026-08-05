@@ -334,6 +334,10 @@ the Python API instead.
 SQLite, DuckDB, and Parquet compile supported Mongo-style filters into SQL over
 the `_id` column and JSON document payload. Unsupported filter shapes fall back
 to Python document matching so existing TinyMongo behavior remains available.
+SQLite also uses its primary key and declared non-unique indexes for top-level
+bool/int/float/string equality to restrict ordinary update candidates before
+BSON decoding. Collections with user-created unique indexes retain complete
+post-image validation.
 Older blob-format SQLite and DuckDB files are migrated to collection tables when
 opened.
 
