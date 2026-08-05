@@ -211,6 +211,83 @@ def test_engine_insert_many_uses_optional_conflict_candidate_hook():
     assert engine.candidate_calls == [("items", documents, [])]
 
 
+def test_engine_insert_many_candidate_hook_can_request_a_full_scan():
+    class Engine:
+        def find_insert_conflict_candidates(self, _collection, _documents, _specs):
+            return None
+
+        def find(self, _collection, _filter):
+            return []
+
+        def get_index_specs(self, _collection):
+            return []
+
+        def insert_many(self, _collection, documents, **_kwargs):
+            return list(range(len(documents)))
+
+    collection = SimpleNamespace(
+        full_name="app.items",
+        tablename="items",
+        parent=SimpleNamespace(engine=Engine()),
+    )
+    documents = [{"_id": "new"}]
+
+    results, accepted, errors = core._execute_engine_insert_many(
+        collection,
+        documents,
+        ordered=True,
+        bypass_document_validation=False,
+    )
+
+    assert results == [0]
+    assert accepted == documents
+    assert errors == []
+
+
+def test_sqlite_prepared_insert_internal_fallbacks(tmp_path):
+    backend = table_backends.SQLiteTableBackend(str(tmp_path / "prepared.sqlite"))
+    try:
+        with pytest.raises(ValueError, match="encoded documents must align"):
+            backend._prepare_insert_many(
+                [{"_id": "one"}],
+                encoded_documents=[],
+            )
+
+        prepared = backend._prepare_insert_many(
+            [{"_id": "one"}],
+            previous=[],
+        )
+        assert [item.document for item in prepared] == [{"_id": "one"}]
+
+        backend.insert_many_prevalidated("items", [{"_id": "existing"}])
+        assert (
+            backend.find_insert_conflict_candidates(
+                "items",
+                [{"_id": "new"}],
+                [],
+            )
+            == []
+        )
+        assert backend.find_insert_conflict_candidates(
+            "items",
+            [{"_id": "existing"}],
+            [],
+        ) == [{"_id": "existing"}]
+        assert (
+            backend.find_insert_conflict_candidates(
+                "items",
+                [{"_id": "new"}],
+                [IndexSpec("email", unique=True)],
+            )
+            is None
+        )
+        backend.create_collection("empty")
+        assert backend._commit_insert_rows("empty", []) == []
+        assert "empty" not in backend._known_nonempty_collections
+    finally:
+        backend.close()
+
+
 def test_sqlite_public_bulk_insert_queries_only_incoming_id_candidates(
     tmp_path,
     monkeypatch,

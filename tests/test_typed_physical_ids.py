@@ -1,6 +1,8 @@
 """Focused contracts for BSON-aware SQL and Parquet physical `_id` keys."""
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 
 import pytest
 
@@ -100,6 +102,21 @@ def test_physical_id_keys_follow_registered_bson_identity():
     assert _physical_id_key(float("inf")) != _physical_id_key(float("-inf"))
     assert _physical_id_key(float("nan")) == _physical_id_key(float("nan"))
     assert _physical_id_key([1, True]) == _physical_id_key((1, True))
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("", 'quote-"', "line\nbreak", "nul-\0", "snowman-\N{SNOWMAN}"),
+)
+def test_exact_string_physical_id_fast_path_matches_canonical_format(value):
+    canonical = json.dumps(
+        _canonical_id_value(value),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    expected = "__tinymongo_id_v2__:" + hashlib.sha256(canonical).hexdigest()
+
+    assert _physical_id_key(value) == expected
 
 
 def test_physical_id_fallback_and_malformed_legacy_rows(monkeypatch):

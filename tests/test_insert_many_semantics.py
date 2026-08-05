@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 import tinymongo
+import tinymongo.bson_codec as bson_codec
 import tinymongo.table_backends as table_backends
 from tinymongo.asyncio import AsyncTinyMongoClient
 from tinymongo.errors import BulkWriteError, DuplicateKeyError, InvalidDocument
@@ -152,10 +153,26 @@ def test_sqlite_targeted_preflight_replans_a_native_id_race(
     collection = client.app.native_race
     backend = collection.parent.engine
     collection.insert_one({"_id": "seed"})
-    original_insert_rows = backend._insert_rows
+    raced_key = table_backends._physical_id_key("raced")
+    raced_payload = table_backends._json_dumps({"_id": "raced"})
+    original_commit_insert_rows = backend._commit_insert_rows
+    original_dumps = bson_codec.dumps
+    original_physical_id_key = table_backends._physical_id_key
     attempts = 0
+    document_encodes = 0
+    physical_id_keys = 0
 
-    def racing_insert_rows(collection_name, documents):
+    def counting_dumps(value, *args, **kwargs):
+        nonlocal document_encodes
+        document_encodes += 1
+        return original_dumps(value, *args, **kwargs)
+
+    def counting_physical_id_key(value):
+        nonlocal physical_id_keys
+        physical_id_keys += 1
+        return original_physical_id_key(value)
+
+    def racing_commit_insert_rows(collection_name, rows):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -164,27 +181,35 @@ def test_sqlite_targeted_preflight_replans_a_native_id_race(
                 conn.execute(
                     'INSERT INTO "native_race" (_id, data) VALUES (?, ?)',
                     (
-                        table_backends._physical_id_key("raced"),
-                        table_backends._json_dumps({"_id": "raced"}),
+                        raced_key,
+                        raced_payload,
                     ),
                 )
                 conn.commit()
             finally:
                 conn.close()
-            return original_insert_rows(collection_name, documents)
-        return original_insert_rows(collection_name, documents)
+            return original_commit_insert_rows(collection_name, rows)
+        return original_commit_insert_rows(collection_name, rows)
 
     def unexpected_full_scan(*_args, **_kwargs):
         raise AssertionError("the native-race retry should repeat the PK probe")
 
-    monkeypatch.setattr(backend, "_insert_rows", racing_insert_rows)
+    monkeypatch.setattr(backend, "_commit_insert_rows", racing_commit_insert_rows)
     monkeypatch.setattr(backend, "find", unexpected_full_scan)
+    monkeypatch.setattr(bson_codec, "dumps", counting_dumps)
+    monkeypatch.setattr(
+        table_backends,
+        "_physical_id_key",
+        counting_physical_id_key,
+    )
     documents = [{"_id": "first"}, {"_id": "raced"}, {"_id": "last"}]
     try:
         with pytest.raises(BulkWriteError) as caught:
             collection.insert_many(documents, ordered=ordered)
 
         assert attempts == 2
+        assert document_encodes == len(documents)
+        assert physical_id_keys == len(documents)
         assert caught.value.details["nInserted"] == expected_inserted
         assert [error["index"] for error in caught.value.details["writeErrors"]] == [1]
         conn = backend._connect()
@@ -193,6 +218,88 @@ def test_sqlite_targeted_preflight_replans_a_native_id_race(
         finally:
             conn.close()
         assert stored == expected_count
+    finally:
+        client.close()
+
+
+def test_sqlite_bulk_insert_encodes_and_keys_each_document_once(
+    tmp_path,
+    monkeypatch,
+):
+    client = _client(tmp_path, "sqlite")
+    collection = client.app.prepared_once
+    backend = collection.parent.engine
+    backend.create_collection(collection.name)
+    original_dumps = bson_codec.dumps
+    original_physical_id_key = table_backends._physical_id_key
+    document_encodes = 0
+    physical_id_keys = 0
+
+    def counting_dumps(value, *args, **kwargs):
+        nonlocal document_encodes
+        document_encodes += 1
+        return original_dumps(value, *args, **kwargs)
+
+    def counting_physical_id_key(value):
+        nonlocal physical_id_keys
+        physical_id_keys += 1
+        return original_physical_id_key(value)
+
+    monkeypatch.setattr(bson_codec, "dumps", counting_dumps)
+    monkeypatch.setattr(
+        table_backends,
+        "_physical_id_key",
+        counting_physical_id_key,
+    )
+    documents = [
+        {"_id": "prepared-{0}".format(index), "value": index} for index in range(8)
+    ]
+    try:
+        result = collection.insert_many(documents)
+
+        assert result.inserted_ids == [document["_id"] for document in documents]
+        assert document_encodes == len(documents)
+        assert physical_id_keys == len(documents)
+    finally:
+        client.close()
+
+
+def test_sqlite_prepared_rows_align_after_mixed_duplicate_rejections(tmp_path):
+    client = _client(tmp_path, "sqlite")
+    collection = client.app.prepared_alignment
+    collection.create_index("email", unique=True)
+    collection.insert_many(
+        [
+            {"_id": "id-owner", "email": "id-owner@example.com"},
+            {"_id": "email-owner", "email": "taken@example.com"},
+        ]
+    )
+    documents = [
+        {"_id": "accepted-first", "email": "batch@example.com"},
+        {"_id": "id-owner", "email": "unused@example.com"},
+        {"_id": "email-conflict", "email": "taken@example.com"},
+        {"_id": "batch-conflict", "email": "batch@example.com"},
+        {"_id": "accepted-last", "email": "last@example.com"},
+    ]
+    try:
+        with pytest.raises(BulkWriteError) as caught:
+            collection.insert_many(documents, ordered=False)
+
+        details = caught.value.details
+        assert details["nInserted"] == 2
+        assert [error["index"] for error in details["writeErrors"]] == [1, 2, 3]
+        assert [error["op"] for error in details["writeErrors"]] == documents[1:4]
+        assert all(
+            error["op"] is documents[error["index"]] for error in details["writeErrors"]
+        )
+        assert {
+            document["_id"]: document["email"] for document in collection.find({})
+        } == {
+            "id-owner": "id-owner@example.com",
+            "email-owner": "taken@example.com",
+            "accepted-first": "batch@example.com",
+            "accepted-last": "last@example.com",
+        }
     finally:
         client.close()
 
@@ -230,8 +337,12 @@ def test_insert_many_applies_ordering_to_unique_index_failures(
 
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("ordered", [True, False])
+@pytest.mark.parametrize("bypass_document_validation", [False, True])
 def test_insert_many_serialization_preflight_is_all_or_nothing(
-    tmp_path, backend, ordered
+    tmp_path,
+    backend,
+    ordered,
+    bypass_document_validation,
 ):
     client = _client(tmp_path, backend)
     collection = client.app.items
@@ -242,7 +353,11 @@ def test_insert_many_serialization_preflight_is_all_or_nothing(
     ]
 
     with pytest.raises(InvalidDocument) as caught:
-        collection.insert_many(documents, ordered=ordered)
+        collection.insert_many(
+            documents,
+            ordered=ordered,
+            bypass_document_validation=bypass_document_validation,
+        )
 
     message = str(caught.value)
     assert caught.value.document is documents[1]

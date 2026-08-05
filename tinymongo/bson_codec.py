@@ -64,6 +64,7 @@ _REGEX_BSON = "bson"
 _REGEX_TEXT = "string"
 _REGEX_BYTES = "bytes"
 _ROOT_UNSET = object()
+_BUILTIN_TREE_FALLBACK = object()
 
 
 def bson_available():
@@ -141,10 +142,71 @@ def _bounded_repr(value, limit=160):
     return rendered[: limit - 3] + "..."
 
 
+def _context_suffix(context):
+    if callable(context):
+        context = context()
+    return " for {0}".format(context) if context else ""
+
+
+def _encode_builtin_tree(value):
+    """Encode an exact-built-in tree or request the full BSON-aware path.
+
+    Most persisted documents contain only ordinary Python JSON values. Walking
+    those trees here avoids constructing an error path and consulting the BSON
+    registry for every leaf. Encountering any subclass, BSON value, unsupported
+    object, or reserved tag-shaped mapping restarts through ``encode_value`` so
+    validation errors and subclass precedence remain unchanged.
+    """
+
+    value_type = type(value)
+    if value is None or value_type is bool or value_type is int or value_type is str:
+        return value
+    if value_type is float:
+        return value if math.isfinite(value) else _encode_nonfinite_float(value)
+    if value_type is dict:
+        if set(value) == {_TYPE_MARKER, _VALUE_MARKER}:
+            return _BUILTIN_TREE_FALLBACK
+        encoded = {}
+        for key, item in value.items():
+            encoded_item = _encode_builtin_tree(item)
+            if encoded_item is _BUILTIN_TREE_FALLBACK:
+                return _BUILTIN_TREE_FALLBACK
+            encoded[str(key)] = encoded_item
+        return encoded
+    if value_type is list or value_type is tuple:
+        encoded = []
+        for item in value:
+            encoded_item = _encode_builtin_tree(item)
+            if encoded_item is _BUILTIN_TREE_FALLBACK:
+                return _BUILTIN_TREE_FALLBACK
+            encoded.append(encoded_item)
+        return encoded
+    return _BUILTIN_TREE_FALLBACK
+
+
 def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
     """Recursively convert supported non-JSON values into tagged JSON data."""
     if _root is _ROOT_UNSET:
         _root = value
+
+    # Ordinary JSON values make up the overwhelming majority of stored
+    # documents. Keep exact built-ins off the BSON registry path: checking the
+    # complete optional BSON type hierarchy for every string, integer, and
+    # container is both unnecessary and expensive. Exact-type checks are
+    # deliberate here. PyMongo types such as ``Code`` and ``Binary`` subclass
+    # native Python types and must continue through the registry below.
+    value_type = type(value)
+    if value is None or value_type is bool or value_type is int or value_type is str:
+        return value
+    if value_type is float:
+        if math.isfinite(value):
+            return value
+        return _encode_nonfinite_float(value)
+    if value_type is dict:
+        return _encode_mapping(value, _path, _root, _context)
+    if value_type is list or value_type is tuple:
+        return _encode_sequence(value, _path, _root, _context)
+
     spec = bson_types.bson_type_spec(value)
     storage_tag = spec.storage_tag if spec is not None else None
     if storage_tag == "objectid":
@@ -196,7 +258,7 @@ def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
                 _VALUE_MARKER: _encode_regex(value),
             }
         except (UnicodeDecodeError, ValueError) as error:
-            context = " for {0}".format(_context) if _context else ""
+            context = _context_suffix(_context)
             raise InvalidDocument(
                 "Invalid document{0} at {1!r}: cannot encode regular "
                 "expression {2}: {3}".format(
@@ -208,56 +270,15 @@ def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
                 document=_root,
             ) from error
     if isinstance(value, float) and not math.isfinite(value):
-        if math.isnan(value):
-            payload = "nan"
-        elif value < 0:
-            payload = "-infinity"
-        else:
-            payload = "infinity"
-        return {_TYPE_MARKER: _NONFINITE_FLOAT, _VALUE_MARKER: payload}
+        return _encode_nonfinite_float(value)
     if isinstance(value, Mapping):
-        # A user mapping can legitimately have the same two keys as one of our
-        # scalar tags. Wrap that exact shape so it cannot be silently decoded as
-        # a datetime/ObjectId when it crosses a persistence boundary.
-        if set(value) == {_TYPE_MARKER, _VALUE_MARKER}:
-            return {
-                _TYPE_MARKER: _ESCAPED_MAPPING,
-                _VALUE_MARKER: [
-                    [
-                        str(key),
-                        encode_value(
-                            item,
-                            _path=_nested_path(_path, key),
-                            _root=_root,
-                            _context=_context,
-                        ),
-                    ]
-                    for key, item in value.items()
-                ],
-            }
-        return {
-            str(key): encode_value(
-                item,
-                _path=_nested_path(_path, key),
-                _root=_root,
-                _context=_context,
-            )
-            for key, item in value.items()
-        }
+        return _encode_mapping(value, _path, _root, _context)
     if isinstance(value, (list, tuple)):
-        return [
-            encode_value(
-                item,
-                _path=_nested_path(_path, index),
-                _root=_root,
-                _context=_context,
-            )
-            for index, item in enumerate(value)
-        ]
+        return _encode_sequence(value, _path, _root, _context)
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
 
-    context = " for {0}".format(_context) if _context else ""
+    context = _context_suffix(_context)
     raise InvalidDocument(
         "Invalid document{0} at {1!r}: cannot encode object {2}, "
         "of type {3!r}".format(
@@ -268,6 +289,59 @@ def encode_value(value, _path="$", _root=_ROOT_UNSET, _context=None):
         ),
         document=_root,
     )
+
+
+def _encode_nonfinite_float(value):
+    if math.isnan(value):
+        payload = "nan"
+    elif value < 0:
+        payload = "-infinity"
+    else:
+        payload = "infinity"
+    return {_TYPE_MARKER: _NONFINITE_FLOAT, _VALUE_MARKER: payload}
+
+
+def _encode_mapping(value, path, root, context):
+    # A user mapping can legitimately have the same two keys as one of our
+    # scalar tags. Wrap that exact shape so it cannot be silently decoded as a
+    # datetime/ObjectId when it crosses a persistence boundary.
+    if set(value) == {_TYPE_MARKER, _VALUE_MARKER}:
+        return {
+            _TYPE_MARKER: _ESCAPED_MAPPING,
+            _VALUE_MARKER: [
+                [
+                    str(key),
+                    encode_value(
+                        item,
+                        _path=_nested_path(path, key),
+                        _root=root,
+                        _context=context,
+                    ),
+                ]
+                for key, item in value.items()
+            ],
+        }
+    return {
+        str(key): encode_value(
+            item,
+            _path=_nested_path(path, key),
+            _root=root,
+            _context=context,
+        )
+        for key, item in value.items()
+    }
+
+
+def _encode_sequence(value, path, root, context):
+    return [
+        encode_value(
+            item,
+            _path=_nested_path(path, index),
+            _root=root,
+            _context=context,
+        )
+        for index, item in enumerate(value)
+    ]
 
 
 def _encode_binary(value, subtype):
@@ -514,7 +588,10 @@ def decode_value(value):
 def dumps(value, document_context=None, **kwargs):
     """Serialize a TinyMongo value as JSON with BSON-compatible tagging."""
     kwargs.setdefault("allow_nan", False)
-    return json.dumps(encode_value(value, _context=document_context), **kwargs)
+    encoded = _encode_builtin_tree(value)
+    if encoded is _BUILTIN_TREE_FALLBACK:
+        encoded = encode_value(value, _context=document_context)
+    return json.dumps(encoded, **kwargs)
 
 
 def loads(value):

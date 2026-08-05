@@ -168,6 +168,29 @@ def _stamp_top_level_server_timestamps(document):
     return document if stamped is None else stamped
 
 
+def _can_try_optimistic_insert_many(documents):
+    """Return whether a batch can bypass planning if SQLite is empty.
+
+    Custom mapping classes retain the general planner because their iteration
+    and copy behavior can be observable. Direct all-zero timestamps must also
+    reach the planner in order so its logical clock and caller-copy guarantees
+    remain unchanged.
+    """
+
+    for document in documents:
+        if type(document) is not dict:
+            return False
+        if _TIMESTAMP is not None and any(
+            key != "_id"
+            and isinstance(value, _TIMESTAMP)
+            and value.time == 0
+            and value.inc == 0
+            for key, value in document.items()
+        ):
+            return False
+    return True
+
+
 def _get_nested(doc, path, default=_MISSING):
     current = doc
     for key in path.split("."):
@@ -295,6 +318,7 @@ def _plan_insert_many(
     specs,
     ordered,
     original_documents=None,
+    accepted_indexes=None,
 ):
     """Split a batch into inserts and duplicate-key write errors."""
     if original_documents is None:
@@ -365,6 +389,8 @@ def _plan_insert_many(
                 break
         else:
             accepted.append(document)
+            if accepted_indexes is not None:
+                accepted_indexes.append(index)
             if identity is None:
                 fallback_ids.append(value)
             else:
@@ -383,6 +409,7 @@ def _execute_engine_insert_many(
     ordered,
     bypass_document_validation,
     original_documents=None,
+    encoded_documents=None,
 ):
     """Plan and execute a table-backend batch, retrying native races."""
 
@@ -392,18 +419,49 @@ def _execute_engine_insert_many(
     last_error = None
     accepted = []
     write_errors = []
+    prepare_documents = getattr(engine, "_prepare_insert_many", None)
+    prepared_documents = None
+    if callable(prepare_documents):
+        prepared_documents = prepare_documents(
+            documents,
+            encoded_documents=encoded_documents,
+        )
+
+    try_empty_insert = getattr(engine, "_try_empty_collection_insert_many", None)
+    if (
+        prepared_documents is not None
+        and callable(try_empty_insert)
+        and _can_try_optimistic_insert_many(documents)
+    ):
+        optimistic_results = try_empty_insert(
+            collection.tablename,
+            prepared_documents,
+            bypass_document_validation=bypass_document_validation is True,
+        )
+        if optimistic_results is not None:
+            return list(optimistic_results), list(documents), []
 
     # Remote SQL constraints are the final cross-process authority. If another
     # writer commits after our preflight, the native insert fails atomically;
     # re-read and re-plan so the public error still identifies the original
     # operation and preserves ordered/unordered semantics.
     for _attempt in range(3):
-        find_candidates = getattr(
+        find_prepared_candidates = getattr(
             engine,
-            "find_insert_conflict_candidates",
+            "_find_prepared_insert_conflict_candidates",
             None,
         )
-        if not callable(find_candidates):
+        find_candidates = getattr(engine, "find_insert_conflict_candidates", None)
+        if prepared_documents is not None and callable(find_prepared_candidates):
+            specs = engine.get_index_specs(collection.tablename)
+            existing_documents = find_prepared_candidates(
+                collection.tablename,
+                prepared_documents,
+                specs,
+            )
+            if existing_documents is None:
+                existing_documents = engine.find(collection.tablename, {})
+        elif not callable(find_candidates):
             existing_documents = engine.find(collection.tablename, {})
             specs = engine.get_index_specs(collection.tablename)
         else:
@@ -415,6 +473,7 @@ def _execute_engine_insert_many(
             )
             if existing_documents is None:
                 existing_documents = engine.find(collection.tablename, {})
+        accepted_indexes = []
         accepted, write_errors = _plan_insert_many(
             collection,
             documents,
@@ -422,20 +481,43 @@ def _execute_engine_insert_many(
             specs,
             ordered,
             original_documents=original_documents,
+            accepted_indexes=accepted_indexes,
         )
         if not accepted:
             return [], accepted, write_errors
+
+        accepted_prepared = None
+        if prepared_documents is not None:
+            # The planner replaces documents containing a top-level
+            # Timestamp(0, 0) with their stamped copies. Reconcile only those
+            # slots while reusing every ordinary document's validated payload
+            # and physical key, including across a native-constraint retry.
+            prepared_documents = prepare_documents(
+                documents,
+                previous=prepared_documents,
+            )
+            accepted_prepared = [
+                prepared_documents[index] for index in accepted_indexes
+            ]
         try:
-            insert_prevalidated = getattr(
-                engine,
-                "insert_many_prevalidated",
-                engine.insert_many,
-            )
-            results = insert_prevalidated(
-                collection.tablename,
-                accepted,
-                bypass_document_validation=bypass_document_validation is True,
-            )
+            insert_prepared = getattr(engine, "_insert_many_prepared", None)
+            if accepted_prepared is not None and callable(insert_prepared):
+                results = insert_prepared(
+                    collection.tablename,
+                    accepted_prepared,
+                    bypass_document_validation=bypass_document_validation is True,
+                )
+            else:
+                insert_prevalidated = getattr(
+                    engine,
+                    "insert_many_prevalidated",
+                    engine.insert_many,
+                )
+                results = insert_prevalidated(
+                    collection.tablename,
+                    accepted,
+                    bypass_document_validation=bypass_document_validation is True,
+                )
         except DuplicateKeyError as error:
             last_error = error
             continue
@@ -2108,15 +2190,19 @@ class TinyMongoCollection(object):
 
         from .bson_codec import dumps as encode_storage_payload
 
-        context = "collection {0!r}".format(self.full_name)
-        if index is not None:
-            context += ", document index {0}".format(index)
-        if "_id" in document:
-            context += ", document _id={0!r}".format(document["_id"])
-        encode_storage_payload(
+        def document_context():
+            context = "collection {0!r}".format(self.full_name)
+            if index is not None:
+                context += ", document index {0}".format(index)
+            if "_id" in document:
+                context += ", document _id={0!r}".format(document["_id"])
+            return context
+
+        return encode_storage_payload(
             document,
-            document_context=context,
+            document_context=document_context,
             ensure_ascii=False,
+            separators=(",", ":"),
         )
 
     @property
@@ -2732,10 +2818,25 @@ class TinyMongoCollection(object):
         # changing storage. PyMongo can split very large inputs across multiple
         # wire batches, so TinyMongo intentionally provides a stronger
         # whole-list guarantee here.
-        for index, doc in enumerate(stored_docs):
-            self._validate_storage_document(doc, index=index)
-
         engine = self.parent.engine
+        prepared_hook_names = (
+            "_prepare_insert_many",
+            "_find_prepared_insert_conflict_candidates",
+            "_insert_many_prepared",
+        )
+        retain_encoded_documents = engine is not None and all(
+            callable(getattr(engine, name, None)) for name in prepared_hook_names
+        )
+        if retain_encoded_documents:
+            encoded_documents = [
+                self._validate_storage_document(doc, index=index)
+                for index, doc in enumerate(stored_docs)
+            ]
+        else:
+            encoded_documents = None
+            for index, doc in enumerate(stored_docs):
+                self._validate_storage_document(doc, index=index)
+
         if engine is not None:
             results, accepted, write_errors = _execute_engine_insert_many(
                 self,
@@ -2743,6 +2844,7 @@ class TinyMongoCollection(object):
                 ordered,
                 bypass_document_validation,
                 original_documents=docs,
+                encoded_documents=encoded_documents,
             )
             if write_errors:
                 raise BulkWriteError(_bulk_write_details(len(accepted), write_errors))
