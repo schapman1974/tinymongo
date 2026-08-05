@@ -2988,67 +2988,13 @@ class SQLiteTableBackend(TableBackend):
                 return _MISSING
 
             self._ensure_type_index_on_connection(conn, collection, spec)
-            where, params = self.compiler.compile(filter_doc)
-            path = _sql_literal(_json_path(field))
-            if isinstance(expected, bool):
-                scalar_types = ("true" if expected else "false",)
-            elif isinstance(expected, str):
-                scalar_types = ("text",)
-            else:
-                scalar_types = ("integer", "real")
-            scalar_sql = (
-                "SELECT data FROM {table}{where} "
-                "AND json_type(data, {path}) IN ({types})"
-            ).format(
-                table=_quote_identifier(collection),
-                where=where,
-                path=path,
-                types=", ".join(_sql_literal(kind) for kind in scalar_types),
-            )
-            type_expression = "json_type(data, {0})".format(path)
-            if isinstance(expected, bool):
-                member_predicate = "item.type = {0} AND item.value = ?".format(
-                    _sql_literal("true" if expected else "false")
-                )
-                member_params = [int(expected)]
-                candidate_predicate = (
-                    "{type_expression} = 'array' AND EXISTS ("
-                    "SELECT 1 FROM json_each(data, {path}) AS item "
-                    "WHERE {member_predicate})"
-                ).format(
-                    type_expression=type_expression,
-                    path=path,
-                    member_predicate=member_predicate,
-                )
-            elif isinstance(expected, str):
-                member_params = [expected]
-                candidate_predicate = (
-                    "{type_expression} = 'array' AND EXISTS ("
-                    "SELECT 1 FROM json_each(data, {path}) AS item "
-                    "WHERE item.type = 'text' AND item.value = ?)"
-                ).format(type_expression=type_expression, path=path)
-            else:
-                member_params = [expected]
-                candidate_predicate = (
-                    "({type_expression} = 'object' OR "
-                    "({type_expression} = 'array' AND EXISTS ("
-                    "SELECT 1 FROM json_each(data, {path}) AS item WHERE "
-                    "(item.type IN ('integer', 'real') AND item.value = ?) "
-                    "OR item.type = 'object')))"
-                ).format(type_expression=type_expression, path=path)
-            array_sql = (
-                "SELECT data FROM {table} WHERE {type_expression} "
-                "IN ('array', 'object') AND ({candidate_predicate})"
-            ).format(
-                table=_quote_identifier(collection),
-                type_expression=type_expression,
-                candidate_predicate=candidate_predicate,
-            )
             documents = []
             matched = 0
-            branches = (
-                (scalar_sql, params, False),
-                (array_sql, member_params, True),
+            branches = self._scalar_equality_query_branches(
+                collection,
+                filter_doc,
+                field,
+                expected,
             )
             for sql, sql_params, needs_postfilter in branches:
                 for row in conn.execute(sql, sql_params):
@@ -3076,6 +3022,174 @@ class SQLiteTableBackend(TableBackend):
             # those otherwise valid BSON numeric values.
             return None
         return None if result is _MISSING else result
+
+    def _scalar_equality_query_branches(
+        self,
+        collection,
+        filter_doc,
+        field,
+        expected,
+        select_columns="data",
+    ):
+        """Build exact scalar and conservative array equality candidates.
+
+        The scalar branch is exact after JSON type bracketing. The second
+        branch is a superset for array membership and encoded numeric objects,
+        so callers must apply the shared Python matcher when its final flag is
+        true. Keeping this SQL in one place lets reads and writes use the same
+        native expression indexes without changing MongoDB equality semantics.
+        """
+
+        where, params = self.compiler.compile(filter_doc)
+        path = _sql_literal(_json_path(field))
+        if isinstance(expected, bool):
+            scalar_types = ("true" if expected else "false",)
+        elif isinstance(expected, str):
+            scalar_types = ("text",)
+        else:
+            scalar_types = ("integer", "real")
+        scalar_sql = (
+            "SELECT {columns} FROM {table}{where} "
+            "AND json_type(data, {path}) IN ({types})"
+        ).format(
+            columns=select_columns,
+            table=_quote_identifier(collection),
+            where=where,
+            path=path,
+            types=", ".join(_sql_literal(kind) for kind in scalar_types),
+        )
+        type_expression = "json_type(data, {0})".format(path)
+        if isinstance(expected, bool):
+            member_predicate = "item.type = {0} AND item.value = ?".format(
+                _sql_literal("true" if expected else "false")
+            )
+            member_params = [int(expected)]
+            candidate_predicate = (
+                "{type_expression} = 'array' AND EXISTS ("
+                "SELECT 1 FROM json_each(data, {path}) AS item "
+                "WHERE {member_predicate})"
+            ).format(
+                type_expression=type_expression,
+                path=path,
+                member_predicate=member_predicate,
+            )
+        elif isinstance(expected, str):
+            member_params = [expected]
+            candidate_predicate = (
+                "{type_expression} = 'array' AND EXISTS ("
+                "SELECT 1 FROM json_each(data, {path}) AS item "
+                "WHERE item.type = 'text' AND item.value = ?)"
+            ).format(type_expression=type_expression, path=path)
+        else:
+            member_params = [expected]
+            candidate_predicate = (
+                "({type_expression} = 'object' OR "
+                "({type_expression} = 'array' AND EXISTS ("
+                "SELECT 1 FROM json_each(data, {path}) AS item WHERE "
+                "(item.type IN ('integer', 'real') AND item.value = ?) "
+                "OR item.type = 'object')))"
+            ).format(type_expression=type_expression, path=path)
+        array_sql = (
+            "SELECT {columns} FROM {table} WHERE {type_expression} "
+            "IN ('array', 'object') AND ({candidate_predicate})"
+        ).format(
+            columns=select_columns,
+            table=_quote_identifier(collection),
+            type_expression=type_expression,
+            candidate_predicate=candidate_predicate,
+        )
+        return (
+            (scalar_sql, params, False),
+            (array_sql, member_params, True),
+        )
+
+    def _update_candidate_rows_on_connection(
+        self,
+        conn,
+        collection,
+        filter_doc,
+        query_index_spec=None,
+    ):
+        """Load a naturally ordered superset for a non-unique update.
+
+        Direct ``_id`` predicates use the primary key. A top-level scalar
+        equality with a declared index uses the same scalar/array candidate
+        union as indexed reads. Unindexed and richer BSON predicates retain
+        the complete scan fallback. Every returned row is still checked by
+        :func:`matches_filter` before it can be changed.
+        """
+
+        table = _quote_identifier(collection)
+        direct_id = _direct_id_equality(filter_doc)
+        if direct_id is not _MISSING:
+            candidates = _physical_id_candidates(direct_id)
+            rows = conn.execute(
+                "SELECT rowid, _id, data FROM {0} WHERE _id IN ({1}) "
+                "ORDER BY rowid".format(
+                    table,
+                    ", ".join("?" for _ in candidates),
+                ),
+                candidates,
+            ).fetchall()
+            decoded = [
+                (
+                    natural_order,
+                    row_id,
+                    _restore_legacy_document_id(
+                        row_id,
+                        _json_loads(data),
+                        requested_id=direct_id,
+                    ),
+                )
+                for natural_order, row_id, data in rows
+            ]
+            if any(
+                matches_filter(document, filter_doc)
+                for _order, _id, document in decoded
+            ):
+                return decoded
+            if not _requires_legacy_id_scan(direct_id):
+                return decoded
+
+        equality = _simple_scalar_equality(filter_doc)
+        if query_index_spec is not None and equality is not None:
+            field, expected = equality
+            if isinstance(expected, float) and math.isnan(expected):
+                pass
+            else:
+                rows_by_id = {}
+                try:
+                    branches = self._scalar_equality_query_branches(
+                        collection,
+                        filter_doc,
+                        field,
+                        expected,
+                        select_columns="rowid, _id, data",
+                    )
+                    for sql, params, needs_postfilter in branches:
+                        for natural_order, row_id, data in conn.execute(sql, params):
+                            document = _json_loads(data)
+                            if needs_postfilter and not matches_filter(
+                                document,
+                                filter_doc,
+                            ):
+                                continue
+                            rows_by_id[row_id] = (
+                                natural_order,
+                                row_id,
+                                document,
+                            )
+                except OverflowError:
+                    pass
+                else:
+                    return sorted(rows_by_id.values(), key=lambda row: row[0])
+
+        return [
+            (natural_order, row_id, _json_loads(data))
+            for natural_order, row_id, data in conn.execute(
+                "SELECT rowid, _id, data FROM {0} ORDER BY rowid".format(table)
+            )
+        ]
 
     def _all_docs_unfiltered(self, collection):
         rows = self._run_collection_read(
@@ -3149,20 +3263,49 @@ class SQLiteTableBackend(TableBackend):
 
         self.create_collection(collection)
         specs = self.get_index_specs(collection)
+        unique_specs = [spec for spec in specs if spec.unique]
+        equality = _simple_scalar_equality(filter_doc)
+        query_index_spec = None
+        if equality is not None and "." not in equality[0]:
+            query_index_spec = next(
+                (spec for spec in specs if spec.field == equality[0]),
+                None,
+            )
         table = _quote_identifier(collection)
         conn = self._connect()
         try:
+            # Creating a companion array-candidate index commits SQLite schema
+            # work, so reconcile it before opening the update transaction.
+            if query_index_spec is not None and not unique_specs:
+                self._ensure_type_index_on_connection(
+                    conn,
+                    collection,
+                    query_index_spec,
+                )
             # Acquire SQLite's writer reservation before selecting candidates.
             # Together with TinyMongo's cross-process write lock this keeps the
             # validated post-image and the committed rows in the same atomic
             # read-check-write unit.
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute("SELECT _id, data FROM {0}".format(table)).fetchall()
-            originals = [(row_id, _json_loads(data)) for row_id, data in rows]
+            if unique_specs:
+                rows = conn.execute(
+                    "SELECT rowid, _id, data FROM {0} ORDER BY rowid".format(table)
+                ).fetchall()
+                originals = [
+                    (natural_order, row_id, _json_loads(data))
+                    for natural_order, row_id, data in rows
+                ]
+            else:
+                originals = self._update_candidate_rows_on_connection(
+                    conn,
+                    collection,
+                    filter_doc,
+                    query_index_spec=query_index_spec,
+                )
 
             matches = [
                 (row_id, document)
-                for row_id, document in originals
+                for _natural_order, row_id, document in originals
                 if matches_filter(document, filter_doc)
             ]
             if not multi:
@@ -3189,11 +3332,12 @@ class SQLiteTableBackend(TableBackend):
                 conn.rollback()
                 return [], 0, 0
 
-            post_image = [
-                replacement_by_row_id.get(row_id, document)
-                for row_id, document in originals
-            ]
-            validate_unique_documents(post_image, specs)
+            if unique_specs:
+                post_image = [
+                    replacement_by_row_id.get(row_id, document)
+                    for _natural_order, row_id, document in originals
+                ]
+                validate_unique_documents(post_image, specs)
 
             if replacements:
                 conn.executemany(

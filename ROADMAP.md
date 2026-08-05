@@ -226,6 +226,23 @@ The normalized unique-token ledger remains a possible later optimization for
 bulk inserts into collections with user-created unique indexes. TM-040's
 measured no-index application path no longer needs that larger migration.
 
+#### SQLite candidate-selective updates
+
+- [x] Route exact `_id` updates through SQLite's primary key inside the existing
+  `BEGIN IMMEDIATE` transaction instead of BSON-decoding the complete
+  collection. Missing ordinary IDs decode no payload rows, while legacy
+  container and datetime IDs retain the compatibility scan when necessary.
+- [x] Reuse declared non-unique indexes for top-level bool/int/float/string
+  equality to restrict `update_one()` and `update_many()` to scalar plus
+  array/object candidates, then apply the exact shared BSON matcher in natural
+  row order. NaN, oversized integers, rich BSON predicates, dotted fields, and
+  collections with user-created unique indexes deliberately retain the
+  conservative full scan.
+- [x] Extend the SQLite/raw SQLite/MongoDB comparison benchmark with durable
+  `_id` point updates. In the controlled 10,000-document local comparison, the
+  TinyMongo point-update average fell from 98.653 ms to 4.330 ms (22.8x), and
+  the indexed 1,000-document update fell from 0.228 seconds to 0.144 seconds.
+
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
   indexes. Native constraints now enforce exact cross-process equality for

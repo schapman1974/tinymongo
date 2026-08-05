@@ -78,6 +78,7 @@ def _result(
     queries,
     insert_seconds,
     point_latencies,
+    point_update_latencies,
     indexed_seconds,
     indexed_rows,
     update_seconds,
@@ -94,6 +95,8 @@ def _result(
         ),
         "point_avg_ms": statistics.mean(point_latencies) * 1000,
         "point_p95_ms": _percentile(point_latencies, 95) * 1000,
+        "point_update_avg_ms": statistics.mean(point_update_latencies) * 1000,
+        "point_update_p95_ms": _percentile(point_update_latencies, 95) * 1000,
         "indexed_seconds": indexed_seconds,
         "indexed_queries_per_second": (
             queries / indexed_seconds if indexed_seconds else 0.0
@@ -159,6 +162,18 @@ def _run_tinymongo_sqlite_client(client, documents, queries):
             raise AssertionError("TinyMongo point lookup missed {0}".format(target))
         point_latencies.append(elapsed)
 
+    point_update_latencies = []
+    for target in targets:
+        elapsed, update_result = _time_call(
+            lambda target=target: collection.update_one(
+                {"_id": target},
+                {"$inc": {"point_updates": 1}},
+            )
+        )
+        if update_result.matched_count != 1 or update_result.modified_count != 1:
+            raise AssertionError("TinyMongo point update missed {0}".format(target))
+        point_update_latencies.append(elapsed)
+
     def indexed_queries():
         rows = 0
         for index in range(queries):
@@ -197,6 +212,7 @@ def _run_tinymongo_sqlite_client(client, documents, queries):
         queries,
         insert_seconds,
         point_latencies,
+        point_update_latencies,
         indexed_seconds,
         indexed_rows,
         update_seconds,
@@ -260,6 +276,25 @@ def _run_raw_sqlite_connection(conn, documents, queries):
         if found is None or found["_id"] != target:
             raise AssertionError("raw SQLite point lookup missed {0}".format(target))
         point_latencies.append(elapsed)
+
+    point_update_latencies = []
+    for target in targets:
+
+        def point_update(target=target):
+            cursor = conn.execute(
+                "UPDATE records SET data = json_set("
+                "data, '$.point_updates', "
+                "COALESCE(json_extract(data, '$.point_updates'), 0) + 1) "
+                "WHERE _id = ?",
+                (target,),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+        elapsed, updated = _time_call(point_update)
+        if updated != 1:
+            raise AssertionError("raw SQLite point update missed {0}".format(target))
+        point_update_latencies.append(elapsed)
 
     def indexed_queries():
         rows_found = 0
@@ -326,6 +361,7 @@ def _run_raw_sqlite_connection(conn, documents, queries):
         queries,
         insert_seconds,
         point_latencies,
+        point_update_latencies,
         indexed_seconds,
         indexed_rows,
         update_seconds,
@@ -388,6 +424,20 @@ def _run_mongodb(documents, queries, mongo_uri):
                 raise AssertionError("MongoDB point lookup missed {0}".format(target))
             point_latencies.append(elapsed)
 
+        point_update_latencies = []
+        for target in targets:
+            elapsed, update_result = _time_call(
+                lambda target=target: collection.update_one(
+                    {"_id": target},
+                    {"$inc": {"point_updates": 1}},
+                )
+            )
+            if not update_result.acknowledged:
+                raise AssertionError("MongoDB did not acknowledge the point update")
+            if update_result.matched_count != 1 or update_result.modified_count != 1:
+                raise AssertionError("MongoDB point update missed {0}".format(target))
+            point_update_latencies.append(elapsed)
+
         def indexed_queries():
             rows = 0
             for index in range(queries):
@@ -428,6 +478,7 @@ def _run_mongodb(documents, queries, mongo_uri):
             queries,
             insert_seconds,
             point_latencies,
+            point_update_latencies,
             indexed_seconds,
             indexed_rows,
             update_seconds,
@@ -444,22 +495,23 @@ def _run_mongodb(documents, queries, mongo_uri):
 
 def format_markdown(results):
     rows = [
-        "| Engine | Insert docs/s | Point avg ms | Point p95 ms | "
+        "| Engine | Insert docs/s | Point read avg ms | Point read p95 ms | "
+        "Point update avg ms | Point update p95 ms | "
         "Indexed queries/s | Indexed rows/s | Update docs/s | Update s |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for result in results:
         if not result.get("available"):
             rows.append(
-                "| {0} | unavailable | unavailable | unavailable | "
-                "unavailable | unavailable | unavailable | unavailable |".format(
-                    result["engine"]
-                )
+                "| {0} | unavailable | unavailable | unavailable | unavailable | "
+                "unavailable | unavailable | unavailable | unavailable | "
+                "unavailable |".format(result["engine"])
             )
             continue
         rows.append(
             "| {engine} | {insert_docs_per_second:,.0f} | {point_avg_ms:.3f} | "
-            "{point_p95_ms:.3f} | {indexed_queries_per_second:,.1f} | "
+            "{point_p95_ms:.3f} | {point_update_avg_ms:.3f} | "
+            "{point_update_p95_ms:.3f} | {indexed_queries_per_second:,.1f} | "
             "{indexed_rows_per_second:,.0f} | {update_docs_per_second:,.0f} | "
             "{update_seconds:.3f} |".format(**result)
         )
