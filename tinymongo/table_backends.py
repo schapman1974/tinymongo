@@ -138,6 +138,7 @@ _BSON_QUERY_TYPE_ALIASES = frozenset(
 _SIGNED_INT64_MIN = -(2**63)
 _SIGNED_INT64_MAX = 2**63 - 1
 _SIGNED_INT32_MAX = 2**31 - 1
+_SQLITE_SAFE_QUERY_NUMBER = 2**53 - 1
 
 
 class _PreparedSQLiteInsert(object):
@@ -707,6 +708,27 @@ def _simple_scalar_equality(filter_doc):
     ):
         return None
     return field, expected
+
+
+def _positive_filter_conjuncts(filter_doc):
+    """Return field predicates that are positive siblings in an implicit AND.
+
+    Logical OR/NOR branches cannot independently narrow their parent without a
+    complete candidate plan for every arm.  An explicit ``$and`` is different:
+    every child is required, so any safely plannable field below it remains a
+    valid candidate constraint even when its siblings require Python matching.
+    """
+
+    if not isinstance(filter_doc, Mapping):
+        return []
+    conjuncts = []
+    for field, expected in filter_doc.items():
+        if field == "$and" and isinstance(expected, (list, tuple)):
+            for item in expected:
+                conjuncts.extend(_positive_filter_conjuncts(item))
+        elif isinstance(field, str) and not field.startswith("$"):
+            conjuncts.append((field, expected))
+    return conjuncts
 
 
 def _direct_id_equality(filter_doc):
@@ -2786,6 +2808,9 @@ class SQLiteTableBackend(TableBackend):
         if indexed is not None:
             return indexed
         if requires_python_filter(filter_doc):
+            candidates = self._find_complex_index_candidates(collection, filter_doc)
+            if candidates is not _MISSING:
+                return candidates
             return [
                 doc
                 for doc in self._all_docs_unfiltered(collection)
@@ -2872,6 +2897,14 @@ class SQLiteTableBackend(TableBackend):
         if indexed is not None:
             return indexed
         if requires_python_filter(filter_doc):
+            candidates = self._find_complex_index_candidates(
+                collection,
+                filter_doc,
+                skip=skip,
+                limit=limit,
+            )
+            if candidates is not _MISSING:
+                return candidates
             return self._scan_bounded(collection, filter_doc, skip, limit)
         try:
             if _filter_references_id(filter_doc):
@@ -2906,6 +2939,13 @@ class SQLiteTableBackend(TableBackend):
         if indexed is not None:
             return len(indexed)
         if requires_python_filter(filter_doc):
+            candidates = self._find_complex_index_candidates(
+                collection,
+                filter_doc,
+                count_only=True,
+            )
+            if candidates is not _MISSING:
+                return candidates
             return self._count_filtered_scan(collection, filter_doc)
         try:
             if _filter_references_id(filter_doc):
@@ -3004,8 +3044,16 @@ class SQLiteTableBackend(TableBackend):
         )
         if indexed is not None:
             return indexed
-
         if requires_python_filter(filter_doc):
+            candidates = self._find_complex_index_candidates(
+                collection,
+                filter_doc,
+                projection=projection,
+                skip=skip,
+                limit=limit,
+            )
+            if candidates is not _MISSING:
+                return candidates
             return self._scan_projected(
                 collection,
                 projection,
@@ -3233,6 +3281,290 @@ class SQLiteTableBackend(TableBackend):
                     )
                 conn.commit()
                 self._ready_type_indexes.add(key)
+
+    @staticmethod
+    def _sqlite_candidate_scalar(value):
+        """Return one SQLite-bindable ordinary scalar, or ``None``.
+
+        Candidate planning deliberately starts with exact built-in values.
+        BSON subclasses and extended values keep the established Python scan
+        unless another positive predicate can safely bound their candidates.
+        """
+
+        if type(value) is bool:
+            return "boolean", int(value)
+        if type(value) is int:
+            if _SIGNED_INT64_MIN <= value <= _SIGNED_INT64_MAX:
+                return "number", value
+            return None
+        if type(value) is float:
+            return ("number", value) if math.isfinite(value) else None
+        if type(value) is str:
+            return "string", value
+        return None
+
+    def _sqlite_index_candidate_values(self, expected):
+        """Extract scalar equality alternatives suitable for one index anchor."""
+
+        if isinstance(expected, Mapping):
+            if "$eq" in expected:
+                values = (expected["$eq"],)
+            elif "$in" in expected and isinstance(expected["$in"], (list, tuple)):
+                values = tuple(expected["$in"])
+            else:
+                return None
+        else:
+            values = (expected,)
+
+        if not values:
+            return ()
+        if len(values) > _SQLITE_CONFLICT_QUERY_SIZE:
+            return None
+        if any(self._sqlite_candidate_scalar(value) is None for value in values):
+            return None
+        return values
+
+    def _sqlite_index_candidate_id_query(self, collection, field, values):
+        """Build an indexed union that yields a conservative physical-ID set."""
+
+        table = _quote_identifier(collection)
+        if not values:
+            return (
+                "SELECT rowid AS candidate_rowid FROM {0} WHERE 0".format(table),
+                [],
+            )
+
+        path = _sql_literal(_json_path(field))
+        expression = "json_extract(data, {0})".format(path)
+        type_expression = "json_type(data, {0})".format(path)
+        branches = []
+        params = []
+        grouped = {"boolean": [], "number": [], "string": []}
+        seen = set()
+        for value in values:
+            family, sql_value = self._sqlite_candidate_scalar(value)
+            identity = bson_identity_key(value)
+            key = (family, identity)
+            if key in seen:
+                continue
+            seen.add(key)
+            grouped[family].append(sql_value)
+
+        for family, sql_values in grouped.items():
+            if not sql_values:
+                continue
+            if family == "boolean":
+                type_clause = "{0} IN ('true', 'false')".format(type_expression)
+            elif family == "number":
+                type_clause = "{0} IN ('integer', 'real')".format(type_expression)
+            else:
+                type_clause = "{0} = 'text'".format(type_expression)
+            placeholders = ", ".join("?" for _ in sql_values)
+            branches.append(
+                "SELECT rowid AS candidate_rowid FROM {table} "
+                "WHERE {expression} IN ({placeholders}) AND {type_clause}".format(
+                    table=table,
+                    expression=expression,
+                    placeholders=placeholders,
+                    type_clause=type_clause,
+                )
+            )
+            params.extend(sql_values)
+
+        # MongoDB scalar equality also matches array members, while extended
+        # BSON scalars are stored as JSON objects.  The companion partial index
+        # makes this broad ambiguity branch inexpensive and the exact matcher
+        # removes its false positives after decoding.
+        branches.append(
+            "SELECT rowid AS candidate_rowid FROM {table} WHERE {type_expression} "
+            "IN ('array', 'object')".format(
+                table=table,
+                type_expression=type_expression,
+            )
+        )
+        # The scalar families and the container branch are type-disjoint, and
+        # values inside each family were de-duplicated above. UNION ALL avoids
+        # SQLite's temporary de-duplication B-tree without duplicating rows.
+        return " UNION ALL ".join(branches), params
+
+    @staticmethod
+    def _sqlite_range_candidate_operand(value):
+        if type(value) is int:
+            return value if abs(value) <= _SQLITE_SAFE_QUERY_NUMBER else None
+        if type(value) is float:
+            if math.isfinite(value) and abs(value) <= _SQLITE_SAFE_QUERY_NUMBER:
+                return value
+        return None
+
+    @staticmethod
+    def _sqlite_numeric_candidate_clause(field, predicates, params):
+        """Return a type-bracketed numeric superset for field predicates."""
+
+        path = _sql_literal(_json_path(field))
+        expression = "json_extract(source.data, {0})".format(path)
+        type_expression = "json_type(source.data, {0})".format(path)
+        safe_range = "{0} BETWEEN {1} AND {2}".format(
+            expression,
+            -_SQLITE_SAFE_QUERY_NUMBER,
+            _SQLITE_SAFE_QUERY_NUMBER,
+        )
+        predicate = " AND ".join(
+            item.format(expression=expression) for item in predicates
+        )
+        clause = (
+            "((({kind} IN ('integer', 'real') AND {safe_range}) AND {predicate}) "
+            "OR ({kind} IN ('integer', 'real') AND NOT ({safe_range})) "
+            "OR {kind} IN ('array', 'object'))"
+        ).format(
+            kind=type_expression,
+            safe_range=safe_range,
+            predicate=predicate,
+        )
+        return clause, params
+
+    def _sqlite_candidate_residual_where(self, conjuncts):
+        """Compile safe positive numeric constraints and leave all others residual."""
+
+        predicates_by_field = {}
+        comparisons = {
+            "$gt": ">",
+            "$gte": ">=",
+            "$lt": "<",
+            "$lte": "<=",
+        }
+        for field, expected in conjuncts:
+            if (
+                not isinstance(field, str)
+                or field == "_id"
+                or "." in field
+                or not isinstance(expected, Mapping)
+            ):
+                continue
+            for operator, operand in expected.items():
+                predicate = None
+                predicate_params = []
+                if operator in comparisons:
+                    sql_operand = self._sqlite_range_candidate_operand(operand)
+                    if sql_operand is not None:
+                        predicate = "{expression} " + comparisons[operator] + " ?"
+                        predicate_params = [sql_operand]
+                elif operator == "$mod":
+                    divisor, remainder = _normalize_mod_operand(operand)
+                    if max(abs(divisor), abs(remainder)) <= _SQLITE_SAFE_QUERY_NUMBER:
+                        predicate = "CAST({expression} AS INTEGER) % ? = ?"
+                        predicate_params = [divisor, remainder]
+                if predicate is not None:
+                    field_plan = predicates_by_field.setdefault(field, ([], []))
+                    field_plan[0].append(predicate)
+                    field_plan[1].extend(predicate_params)
+
+        clauses = []
+        params = []
+        for field, (predicates, predicate_params) in predicates_by_field.items():
+            clause, clause_params = self._sqlite_numeric_candidate_clause(
+                field,
+                predicates,
+                predicate_params,
+            )
+            clauses.append(clause)
+            params.extend(clause_params)
+        return clauses, params
+
+    def _sqlite_complex_candidate_query(self, conn, collection, filter_doc):
+        """Return SQL selecting a conservative complex-query candidate set."""
+
+        conjuncts = _positive_filter_conjuncts(filter_doc)
+        specs = self._get_query_index_specs_on_connection(conn, collection)
+        by_field = {spec.field: spec for spec in specs}
+        anchor = None
+        for field, expected in conjuncts:
+            if isinstance(field, str) and field != "_id" and "." not in field:
+                values = self._sqlite_index_candidate_values(expected)
+                spec = by_field.get(field)
+                if values is not None and spec is not None:
+                    self._ensure_type_index_on_connection(conn, collection, spec)
+                    anchor = self._sqlite_index_candidate_id_query(
+                        collection,
+                        field,
+                        values,
+                    )
+                    break
+        if anchor is None:
+            return None
+
+        candidate_sql, candidate_params = anchor
+        residual_clauses, residual_params = self._sqlite_candidate_residual_where(
+            conjuncts
+        )
+        where = ""
+        if residual_clauses:
+            where = " WHERE " + " AND ".join(residual_clauses)
+        table = _quote_identifier(collection)
+        sql = (
+            "WITH candidate_ids AS ({candidates}) "
+            "SELECT source.data FROM {table} AS source "
+            "JOIN candidate_ids ON candidate_ids.candidate_rowid = source.rowid"
+            "{where} ORDER BY source.rowid"
+        ).format(
+            candidates=candidate_sql,
+            table=table,
+            where=where,
+        )
+        params = candidate_params + residual_params
+        if len(params) > _SQLITE_CONFLICT_QUERY_SIZE:
+            # Older SQLite builds commonly cap statements at 999 variables.
+            # Stay below that portable boundary and leave headroom for future
+            # planner predicates instead of turning a large query into an
+            # OperationalError at execution time.
+            return None
+        return sql, params
+
+    def _find_complex_index_candidates(
+        self,
+        collection,
+        filter_doc,
+        projection=None,
+        skip=0,
+        limit=0,
+        count_only=False,
+    ):
+        """Decode only indexed SQL candidates, then apply exact Mongo matching."""
+
+        def indexed_read(conn):
+            candidate = self._sqlite_complex_candidate_query(
+                conn,
+                collection,
+                filter_doc,
+            )
+            if candidate is None:
+                return _MISSING
+            sql, params = candidate
+            documents = []
+            matched = 0
+            count = 0
+            for row in conn.execute(sql, params):
+                document = _json_loads(row[0])
+                if not matches_filter(document, filter_doc):
+                    continue
+                if matched < skip:
+                    matched += 1
+                    continue
+                if count_only:
+                    count += 1
+                else:
+                    documents.append(
+                        project_document(document, projection)
+                        if projection is not None
+                        else document
+                    )
+                if limit and (count if count_only else len(documents)) >= limit:
+                    break
+            return count if count_only else documents
+
+        try:
+            return self._run_collection_read(collection, indexed_read)
+        except OverflowError:
+            return _MISSING
 
     def _find_indexed_scalar_with_array_union(
         self,
