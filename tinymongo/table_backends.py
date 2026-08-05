@@ -59,6 +59,7 @@ _DECIMAL128 = decimal128_type()
 _ID_RATIO_HEX_TAG = "exact-ratio-hex-v1"
 _SAFE_JSON_INTEGER_BITS = 1800
 _SQLITE_UNIQUE_TOKEN_VERSION = 3
+_SQLITE_CONFLICT_QUERY_SIZE = 900
 _REMOTE_UNIQUE_TOKEN_VERSION = 1
 _OBJECT_STORE_SCHEMES = {"s3", "gs", "gcs", "az", "azure", "abfs", "abfss"}
 _PHYSICAL_ID_PREFIX = "__tinymongo_id_v2__:"
@@ -262,6 +263,8 @@ def _physical_id_candidates(value):
                     legacy.append(str(-0.0))
     elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
         legacy.append(str(int(value)))
+        if value == 0:
+            legacy.extend(("0.0", "-0.0"))
 
     return tuple(dict.fromkeys([current] + legacy))
 
@@ -273,6 +276,17 @@ def _requires_legacy_id_scan(value):
         return True
     identity = bson_identity_key(value)
     return identity is not None and identity[0] == "datetime"
+
+
+def _requires_legacy_insert_scan(value):
+    """Return whether an insert preflight cannot enumerate every legacy key."""
+
+    # Decimal128 support arrived after typed physical IDs. An incoming decimal
+    # can still equal an int/float row written by a released pre-typed codec,
+    # whose string key may not preserve the decimal's scale.
+    return _requires_legacy_id_scan(value) or (
+        _DECIMAL128 is not None and isinstance(value, _DECIMAL128)
+    )
 
 
 def _validate_physical_ids(existing_documents, new_documents):
@@ -2356,6 +2370,48 @@ class SQLiteTableBackend(TableBackend):
         self.validate_unique_post_image(collection, existing_docs + docs)
         _validate_physical_ids(existing_docs, docs)
         return self._insert_rows(collection, docs)
+
+    def find_insert_conflict_candidates(self, collection, documents, specs):
+        """Load SQLite rows whose primary keys can conflict with a batch.
+
+        ``None`` asks the collection planner to use its conservative full
+        scan. Candidate rows may be a superset; the shared BSON-aware planner
+        remains the semantic authority.
+        """
+
+        if any(spec.unique for spec in specs) or any(
+            _requires_legacy_insert_scan(document["_id"]) for document in documents
+        ):
+            return None
+
+        candidates = tuple(
+            dict.fromkeys(
+                candidate
+                for document in documents
+                for candidate in _physical_id_candidates(document["_id"])
+            )
+        )
+        if not candidates:  # pragma: no cover - public batches are non-empty
+            return []
+
+        table = _quote_identifier(collection)
+
+        def load_candidates(conn):
+            rows = []
+            for offset in range(0, len(candidates), _SQLITE_CONFLICT_QUERY_SIZE):
+                chunk = candidates[offset : offset + _SQLITE_CONFLICT_QUERY_SIZE]
+                rows.extend(
+                    conn.execute(
+                        "SELECT data FROM {0} WHERE _id IN ({1})".format(
+                            table,
+                            ", ".join("?" for _ in chunk),
+                        ),
+                        chunk,
+                    ).fetchall()
+                )
+            return [_json_loads(row[0]) for row in rows]
+
+        return self._run_collection_read(collection, load_candidates)
 
     @_write_locked
     def insert_many_prevalidated(

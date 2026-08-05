@@ -207,6 +207,23 @@ with the follow-up audit of his
   asynchronous client, including the returned `upserted_id` and immediate
   lookup by the same key.
 
+#### Mike's [TM-040 SQLite batch-scaling follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5186712357)
+
+- [x] **TM-040:** Replace repeated collection-wide SQLite duplicate preflights
+  with chunked primary-key probes for the incoming `_id` candidates when no
+  user-created unique index requires complete token state. Preserve exact BSON
+  identity, ordered and unordered partial failures, native-race retries, and
+  compatibility with released legacy-store formats through conservative
+  fallbacks.
+- [x] Add a fixed-200-batch scaling benchmark that reports successive
+  collection-size windows and decoded existing-row counts. On the local
+  30,000-document comparison, the targeted path reduced total time from
+  18.90 seconds to 3.94 seconds and removed a 5.35x first-to-last slowdown.
+
+The normalized unique-token ledger remains a possible later optimization for
+bulk inserts into collections with user-created unique indexes. TM-040's
+measured no-index application path no longer needs that larger migration.
+
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
   indexes. Native constraints now enforce exact cross-process equality for

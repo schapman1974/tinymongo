@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 import tinymongo
+import tinymongo.table_backends as table_backends
 from tinymongo.asyncio import AsyncTinyMongoClient
 from tinymongo.errors import BulkWriteError, DuplicateKeyError, InvalidDocument
 from tinymongo.tinymongo import TinyMongoCollection
@@ -84,6 +85,116 @@ def test_unordered_insert_many_continues_and_reports_every_duplicate(tmp_path, b
         "last",
     }
     client.close()
+
+
+@pytest.mark.parametrize(
+    ("ordered", "expected_inserted", "expected_errors"),
+    [
+        (True, 1, [1]),
+        (False, 2, [1, 2]),
+    ],
+)
+def test_sqlite_targeted_preflight_preserves_batch_duplicate_semantics(
+    tmp_path,
+    monkeypatch,
+    ordered,
+    expected_inserted,
+    expected_errors,
+):
+    client = _client(tmp_path, "sqlite")
+    collection = client.app.targeted
+    collection.insert_one({"_id": "seed"})
+    backend = collection.parent.engine
+
+    def unexpected_full_scan(*_args, **_kwargs):
+        raise AssertionError("scalar IDs should use targeted SQLite preflight")
+
+    monkeypatch.setattr(backend, "find", unexpected_full_scan)
+    documents = [
+        {"_id": "first"},
+        {"_id": "seed"},
+        {"_id": "first"},
+        {"_id": "last"},
+    ]
+    try:
+        with pytest.raises(BulkWriteError) as caught:
+            collection.insert_many(documents, ordered=ordered)
+
+        assert caught.value.details["nInserted"] == expected_inserted
+        assert [
+            error["index"] for error in caught.value.details["writeErrors"]
+        ] == expected_errors
+        conn = backend._connect()
+        try:
+            stored = conn.execute('SELECT COUNT(*) FROM "targeted"').fetchone()[0]
+        finally:
+            conn.close()
+        assert stored == expected_inserted + 1
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    ("ordered", "expected_inserted", "expected_count"),
+    [
+        (True, 1, 3),
+        (False, 2, 4),
+    ],
+)
+def test_sqlite_targeted_preflight_replans_a_native_id_race(
+    tmp_path,
+    monkeypatch,
+    ordered,
+    expected_inserted,
+    expected_count,
+):
+    client = _client(tmp_path, "sqlite")
+    collection = client.app.native_race
+    backend = collection.parent.engine
+    collection.insert_one({"_id": "seed"})
+    original_insert_rows = backend._insert_rows
+    attempts = 0
+
+    def racing_insert_rows(collection_name, documents):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            conn = backend._connect()
+            try:
+                conn.execute(
+                    'INSERT INTO "native_race" (_id, data) VALUES (?, ?)',
+                    (
+                        table_backends._physical_id_key("raced"),
+                        table_backends._json_dumps({"_id": "raced"}),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            return original_insert_rows(collection_name, documents)
+        return original_insert_rows(collection_name, documents)
+
+    def unexpected_full_scan(*_args, **_kwargs):
+        raise AssertionError("the native-race retry should repeat the PK probe")
+
+    monkeypatch.setattr(backend, "_insert_rows", racing_insert_rows)
+    monkeypatch.setattr(backend, "find", unexpected_full_scan)
+    documents = [{"_id": "first"}, {"_id": "raced"}, {"_id": "last"}]
+    try:
+        with pytest.raises(BulkWriteError) as caught:
+            collection.insert_many(documents, ordered=ordered)
+
+        assert attempts == 2
+        assert caught.value.details["nInserted"] == expected_inserted
+        assert [error["index"] for error in caught.value.details["writeErrors"]] == [1]
+        conn = backend._connect()
+        try:
+            stored = conn.execute('SELECT COUNT(*) FROM "native_race"').fetchone()[0]
+        finally:
+            conn.close()
+        assert stored == expected_count
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
