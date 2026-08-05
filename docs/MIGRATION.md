@@ -12,7 +12,8 @@ release line.
 - The common update subset now includes `$rename`, `$min`, `$max`, `$pop`, and
   `$pullAll` in addition to `$set`, `$unset`, `$inc`, `$push`, `$pull`, and
   `$addToSet`. `$pull` supports ranges, `$in`, `$nin`, `$regex` with optional
-  `$options`, and `$elemMatch`; `$pullAll` uses literal BSON equality. The
+  `$options`, `$elemMatch`, `$exists`, `$type`, `$ne`, `$mod`, `$all`, `$size`,
+  and document-field `$not`; `$pullAll` uses literal BSON equality. The
   operators use MongoDB-compatible dotted-path, BSON comparison, array,
   immutable `_id`, and atomic error behavior across synchronous and
   asynchronous clients.
@@ -85,6 +86,10 @@ pip install ".[all]"
   dependency-free. Native compiled patterns deliberately continue to read back
   as `re.Pattern`; PyMongo normally returns `bson.Regex` for the corresponding
   BSON value.
+- Direct, non-`_id` `Timestamp(0, 0)` values in inserts and replacements now
+  receive a process-local logical timestamp. Nested, array, `_id`, and
+  modifier-update zeros remain literal; callers that need a stored zero should
+  nest it or use `$set`. Separate processes do not share the logical clock.
 - New `Code` values preserve their BSON type, source, and optional recursive
   scope. Older TinyMongo releases stored `Code` as an ordinary string, so no
   migration can distinguish those values from intentional strings or recover

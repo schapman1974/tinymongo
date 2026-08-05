@@ -193,12 +193,14 @@ with the follow-up audit of his
 - [x] **TM-036:** Exempt `MinKey` and `MaxKey` range operands from BSON type
   bracketing so inclusive whole-range scans work through `find()`, aggregation
   `$match`, and `$pull`, including missing fields and stored boundary values.
-- [ ] **TM-037:** Decide whether top-level `Timestamp(0, 0)` inserts should
-  receive MongoDB's server timestamp or remain a documented embedded-database
-  difference.
-- [ ] **TM-038:** Extend `$pull` through the shared matcher for the remaining
+- [x] **TM-037:** Stamp direct, non-`_id` `Timestamp(0, 0)` values during
+  inserts and replacement writes with a process-local logical clock while
+  preserving literal zeros in nested values, arrays, IDs, and modifier
+  updates, matching MongoDB's write boundary.
+- [x] **TM-038:** Extend `$pull` through the shared matcher for the remaining
   measured predicate set: `$exists`, `$type`, `$ne`, `$mod`, `$all`, `$size`,
-  and document-field `$not`.
+  and document-field `$not`; preserve top-level `$not` code `2` and MongoDB's
+  `$expr` refusal code `224`.
 
 #### Mike's [TM-039 replacement-upsert follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5174549635)
 
@@ -538,6 +540,8 @@ Exit criteria:
      and `$pop` across synchronous and asynchronous clients.
    - [x] Complete Mike's TM-031 through TM-035 `$pull`, `$pullAll`, error-code,
      and remaining measured BSON compatibility findings.
+   - [x] Complete Mike's TM-036 through TM-038 range, zero-timestamp, and
+     remaining `$pull` predicate follow-ups.
 7. [ ] Implement GridFS on stable BSON, index, and cursor foundations.
 8. [ ] Build the wire-server foundation, followed by read-only Compass browsing and
    then editing support.

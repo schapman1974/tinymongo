@@ -315,7 +315,7 @@ def test_pull_all_uses_literal_bson_equality_and_validates_operands():
         ({"$and": [1]}, "requires an array of documents"),
         ({"$or": []}, "requires an array of documents"),
         ({"$not": {"$unknown": 1}}, "does not support query operator"),
-        ({"$all": [2]}, "does not support query operator"),
+        ({"$all": 2}, r"\$all requires an array"),
         ({"$not": {"$eq": 2}}, "does not support query operator"),
         ({"$options": "i"}, r"\$options requires \$regex"),
         ({"$regex": "["}, "regex pattern is not valid"),

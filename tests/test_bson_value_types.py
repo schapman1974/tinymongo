@@ -9,7 +9,9 @@ import pytest
 
 import tinymongo as tm
 from tinymongo import bson_codec, bson_types
+from tinymongo import tinymongo as core
 from tinymongo.errors import (
+    BulkWriteError,
     InvalidDocument,
     OperationFailure,
     TinyMongoNotSupportedError,
@@ -22,6 +24,122 @@ Code = bson.Code
 MaxKey = bson.MaxKey
 MinKey = bson.MinKey
 Timestamp = bson.Timestamp
+
+
+def test_tm037_logical_timestamp_clock_and_copy_boundaries(monkeypatch):
+    clock = iter((1000, 1000, 999, 1001))
+    monkeypatch.setattr(core.time_module, "time", lambda: next(clock))
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_SECONDS", 0)
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_INCREMENT", 0)
+
+    assert core._next_server_timestamp() == Timestamp(1000, 1)
+    assert core._next_server_timestamp() == Timestamp(1000, 2)
+    assert core._next_server_timestamp() == Timestamp(1000, 3)
+    assert core._next_server_timestamp() == Timestamp(1001, 1)
+
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_SECONDS", 2000)
+    monkeypatch.setattr(
+        core,
+        "_SERVER_TIMESTAMP_INCREMENT",
+        core._MAX_TIMESTAMP_COMPONENT,
+    )
+    monkeypatch.setattr(core.time_module, "time", lambda: 2000)
+    assert core._next_server_timestamp() == Timestamp(2001, 1)
+
+    zero = Timestamp(0, 0)
+    original = {
+        "_id": zero,
+        "stamp": zero,
+        "near-zero": Timestamp(0, 1),
+        "nested": {"stamp": zero},
+    }
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_SECONDS", 0)
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_INCREMENT", 0)
+    monkeypatch.setattr(core.time_module, "time", lambda: 1002)
+    stamped = core._stamp_top_level_server_timestamps(original)
+
+    assert stamped is not original
+    assert original["stamp"] == zero
+    assert stamped["_id"] == zero
+    assert stamped["stamp"] == Timestamp(1002, 1)
+    assert stamped["near-zero"] == Timestamp(0, 1)
+    assert stamped["nested"]["stamp"] == zero
+
+    unchanged = {"stamp": Timestamp(1, 0)}
+    assert core._stamp_top_level_server_timestamps(unchanged) is unchanged
+
+    monkeypatch.setattr(core, "_TIMESTAMP", None)
+    unavailable = {"stamp": zero}
+    assert core._stamp_top_level_server_timestamps(unavailable) is unavailable
+
+
+def test_tm037_ordered_and_unordered_batches_consume_expected_increments(
+    monkeypatch,
+):
+    monkeypatch.setattr(core.time_module, "time", lambda: 1000)
+    zero = Timestamp(0, 0)
+    client = tm.TinyMongoClient(backend="memory")
+
+    ordered = client.tm037.ordered
+    ordered.insert_one({"_id": "duplicate"})
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_SECONDS", 0)
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_INCREMENT", 0)
+    ordered_documents = [
+        {"_id": "accepted", "stamp": zero},
+        {"_id": "duplicate", "stamp": zero},
+        {"_id": "not-processed", "stamp": zero},
+    ]
+    with pytest.raises(BulkWriteError) as ordered_error:
+        ordered.insert_many(ordered_documents, ordered=True)
+    ordered.insert_one({"_id": "after", "stamp": zero})
+
+    ordered_operation = ordered_error.value.details["writeErrors"][0]["op"]
+    assert ordered_operation is ordered_documents[1]
+    assert ordered_operation["stamp"] == zero
+    assert ordered.find_one({"_id": "accepted"})["stamp"] == Timestamp(1000, 1)
+    assert ordered.find_one({"_id": "not-processed"}) is None
+    assert ordered.find_one({"_id": "after"})["stamp"] == Timestamp(1000, 3)
+
+    unordered = client.tm037.unordered
+    unordered.insert_one({"_id": "duplicate"})
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_SECONDS", 0)
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_INCREMENT", 0)
+    unordered_documents = [
+        {"_id": "accepted", "stamp": zero},
+        {"_id": "duplicate", "stamp": zero},
+        {"_id": "continued", "stamp": zero},
+    ]
+    with pytest.raises(BulkWriteError) as unordered_error:
+        unordered.insert_many(unordered_documents, ordered=False)
+    unordered.insert_one({"_id": "after", "stamp": zero})
+
+    unordered_operation = unordered_error.value.details["writeErrors"][0]["op"]
+    assert unordered_operation is unordered_documents[1]
+    assert unordered_operation["stamp"] == zero
+    assert unordered.find_one({"_id": "accepted"})["stamp"] == Timestamp(1000, 1)
+    assert unordered.find_one({"_id": "continued"})["stamp"] == Timestamp(1000, 3)
+    assert unordered.find_one({"_id": "after"})["stamp"] == Timestamp(1000, 4)
+    client.close()
+
+
+def test_tm037_invalid_insert_does_not_advance_clock_or_replace_error_document(
+    monkeypatch,
+):
+    monkeypatch.setattr(core.time_module, "time", lambda: 1000)
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_SECONDS", 0)
+    monkeypatch.setattr(core, "_SERVER_TIMESTAMP_INCREMENT", 0)
+    zero = Timestamp(0, 0)
+    client = tm.TinyMongoClient(backend="memory")
+    collection = client.tm037.validation
+    invalid = {"_id": "invalid", "stamp": zero, "bad": object()}
+
+    with pytest.raises(InvalidDocument) as caught:
+        collection.insert_one(invalid)
+
+    assert caught.value.document is invalid
+    collection.insert_one({"_id": "valid", "stamp": zero})
+    assert collection.find_one({"_id": "valid"})["stamp"] == Timestamp(1000, 1)
+    client.close()
 
 
 @pytest.mark.parametrize(
