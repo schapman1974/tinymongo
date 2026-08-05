@@ -6,6 +6,40 @@ for making universal performance claims.
 
 ## SQLite performance work: 2026-08-04
 
+### Fixed-size batch scaling (TM-040)
+
+The earlier benchmark inserted one large batch, which could not expose the
+collection-size curve reported by Mike Kennedy. The TM-040 benchmark instead
+inserts 200 documents per call and reports successive collection-size windows:
+
+```bash
+.venv/bin/python tests/benchmarks/bench_sqlite_insert_scaling.py \
+  --docs 75000 \
+  --batch-size 200 \
+  --window-size 7600 \
+  --repeats 3 \
+  --json-output /tmp/tinymongo-tm040-scaling.json
+```
+
+An apples-to-apples 30,000-document run compared `master` immediately before
+TM-040 at commit `673734f` with the targeted primary-key preflight. Each side
+used Python 3.9.6 on `macOS-26.2-arm64-arm-64bit`, the same interpreter,
+document generator, batch size, decode instrumentation, and host:
+
+| SQLite measurement | Total s | Overall docs/s | First-window docs/s | Last-window docs/s | First/last slowdown | Existing rows decoded |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before targeted preflight | 18.904 | 1,587 | 5,005 | 935 | 5.35x | 2,235,000 |
+| After targeted preflight | 3.939 | 7,615 | 7,696 | 7,090 | 1.09x | 0 |
+
+The 75,000-document, three-run result after TM-040 had a 10.966-second median,
+6,839 overall documents per second, and a 1.25x first-to-last ratio. All three
+runs decoded zero existing payloads during insert preflight. These results
+cover the ordinary no-unique-index path; collections with user-created unique
+indexes deliberately retain complete Python validation until an exact
+multikey-token ledger is justified.
+
+### SQLite, raw SQLite, and MongoDB comparison
+
 The focused comparison uses the same 10,000 JSON-shaped documents and performs:
 
 - One `insert_many()` batch.

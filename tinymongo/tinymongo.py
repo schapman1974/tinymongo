@@ -320,12 +320,28 @@ def _execute_engine_insert_many(
     # re-read and re-plan so the public error still identifies the original
     # operation and preserves ordered/unordered semantics.
     for _attempt in range(3):
-        existing_documents = engine.find(collection.tablename, {})
+        find_candidates = getattr(
+            engine,
+            "find_insert_conflict_candidates",
+            None,
+        )
+        if not callable(find_candidates):
+            existing_documents = engine.find(collection.tablename, {})
+            specs = engine.get_index_specs(collection.tablename)
+        else:
+            specs = engine.get_index_specs(collection.tablename)
+            existing_documents = find_candidates(
+                collection.tablename,
+                documents,
+                specs,
+            )
+            if existing_documents is None:
+                existing_documents = engine.find(collection.tablename, {})
         accepted, write_errors = _plan_insert_many(
             collection,
             documents,
             existing_documents,
-            engine.get_index_specs(collection.tablename),
+            specs,
             ordered,
         )
         if not accepted:

@@ -9,6 +9,9 @@
   collection-listing hints, and runs a pinned real-Beanie CRUD smoke contract.
 - A reproducible comparison benchmark now runs the same JSON-document workload
   against TinyMongo SQLite, raw `sqlite3`, and an optional real MongoDB server.
+- A TM-040 SQLite scaling benchmark reports successive fixed-size insert
+  windows, first-to-last throughput, and the number of existing rows decoded
+  during duplicate preflight.
 
 ### Changed
 - SQLite bulk inserts now use BSON-aware identity sets and one-pass unique-index
@@ -20,6 +23,12 @@
   declared scalar indexes use bounded reads plus a companion candidate index
   for array and object values. One-time migration, WAL, and collection setup is
   cached without losing recovery from external collection drops.
+- **TM-040:** Repeated SQLite `insert_many()` batches without user-created
+  unique indexes now probe only incoming `_id` candidates through the native
+  primary key instead of rereading and BSON-decoding the entire collection.
+  BSON-aware ordered and unordered planning remains shared, while unique
+  indexes, Decimal128 IDs, and non-enumerable legacy IDs retain the conservative
+  full-scan fallback for released legacy-store formats.
 
 ### Fixed
 - **TM-039:** Replacement upserts now retain an `_id` pinned by a top-level
