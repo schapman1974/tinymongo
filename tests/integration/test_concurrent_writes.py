@@ -1,5 +1,6 @@
 import multiprocessing as mp
 import os
+import queue
 import time
 
 import pytest
@@ -18,21 +19,43 @@ def _env_int(name, default):
     return parsed if parsed > 0 else default
 
 
+def _wait_for_workers(workers, errors, timeout=120):
+    deadline = time.monotonic() + timeout
+    for worker in workers:
+        worker.join(timeout=max(0, deadline - time.monotonic()))
+
+    failed = [worker.exitcode for worker in workers if worker.exitcode not in (0, None)]
+    for worker in workers:
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(timeout=5)
+            failed.append("timeout")
+
+    while True:
+        try:
+            failed.append(errors.get_nowait())
+        except queue.Empty:
+            break
+    errors.close()
+    errors.join_thread()
+    return failed
+
+
 def _writer_process(db_dir, backend, proc_id, writes_per_proc, start, errors):
     try:
         start.wait(timeout=30)
-        client = tm.TinyMongoClient(db_dir, backend=backend)
-        collection = client.integrationDB.concurrentWrites
-        docs = [
-            {
-                "_id": "{0}-{1}".format(proc_id, index),
-                "proc": proc_id,
-                "index": index,
-                "value": proc_id * writes_per_proc + index,
-            }
-            for index in range(writes_per_proc)
-        ]
-        collection.insert_many(docs)
+        with tm.TinyMongoClient(db_dir, backend=backend) as client:
+            collection = client.integrationDB.concurrentWrites
+            docs = [
+                {
+                    "_id": "{0}-{1}".format(proc_id, index),
+                    "proc": proc_id,
+                    "index": index,
+                    "value": proc_id * writes_per_proc + index,
+                }
+                for index in range(writes_per_proc)
+            ]
+            collection.insert_many(docs)
     except Exception as exc:
         errors.put("{0}: {1}".format(type(exc).__name__, exc))
         raise
@@ -60,23 +83,10 @@ def test_concurrent_bulk_writes_scale(tmp_path):
     for worker in workers:
         worker.start()
 
-    for worker in workers:
-        worker.join(timeout=120)
+    assert _wait_for_workers(workers, errors) == []
 
-    failed = [worker.exitcode for worker in workers if worker.exitcode != 0]
-    while not errors.empty():
-        failed.append(errors.get())
-
-    for worker in workers:
-        if worker.is_alive():
-            worker.terminate()
-            failed.append("timeout")
-
-    assert failed == []
-
-    client = tm.TinyMongoClient(db_dir, backend=backend)
-    collection = client.integrationDB.concurrentWrites
-    docs = list(collection.find({}))
+    with tm.TinyMongoClient(db_dir, backend=backend) as client:
+        docs = list(client.integrationDB.concurrentWrites.find({}))
     values = sorted(doc["value"] for doc in docs)
 
     assert len(docs) == expected
@@ -88,16 +98,16 @@ def test_concurrent_bulk_writes_scale(tmp_path):
 def _single_insert_writer(db_dir, backend, proc_id, writes_per_proc, start, errors):
     try:
         start.wait(timeout=30)
-        client = tm.TinyMongoClient(db_dir, backend=backend)
-        collection = client.integrationDB.singleInserts
-        for index in range(writes_per_proc):
-            collection.insert_one(
-                {
-                    "_id": "{0}-{1}".format(proc_id, index),
-                    "proc": proc_id,
-                    "index": index,
-                }
-            )
+        with tm.TinyMongoClient(db_dir, backend=backend) as client:
+            collection = client.integrationDB.singleInserts
+            for index in range(writes_per_proc):
+                collection.insert_one(
+                    {
+                        "_id": "{0}-{1}".format(proc_id, index),
+                        "proc": proc_id,
+                        "index": index,
+                    }
+                )
     except Exception as exc:
         errors.put("{0}: {1}".format(type(exc).__name__, exc))
         raise
@@ -123,22 +133,9 @@ def test_concurrent_single_writes_smoke(tmp_path):
 
     for worker in workers:
         worker.start()
-    for worker in workers:
-        worker.join(timeout=120)
+    assert _wait_for_workers(workers, errors) == []
 
-    failed = [worker.exitcode for worker in workers if worker.exitcode != 0]
-    while not errors.empty():
-        failed.append(errors.get())
-
-    for worker in workers:
-        if worker.is_alive():
-            worker.terminate()
-            failed.append("timeout")
-
-    assert failed == []
-
-    docs = list(
-        tm.TinyMongoClient(db_dir, backend=backend).integrationDB.singleInserts.find({})
-    )
+    with tm.TinyMongoClient(db_dir, backend=backend) as client:
+        docs = list(client.integrationDB.singleInserts.find({}))
     assert len(docs) == expected
     assert len({doc["_id"] for doc in docs}) == expected

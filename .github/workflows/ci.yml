@@ -1,10 +1,14 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+
+permissions:
+  contents: read
 
 jobs:
   core-only:
@@ -42,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.11', '3.13', '3.14']
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
 
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +67,11 @@ jobs:
           pip install ".[all]"
 
       - name: Run tests
+        if: matrix.python-version != '3.14'
+        run: python -m pytest
+
+      - name: Run tests with canonical coverage
+        if: matrix.python-version == '3.14'
         run: |
           coverage run --branch -m pytest
           coverage report --include='tinymongo/*' --fail-under=100
@@ -338,14 +347,6 @@ jobs:
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - python-version: '3.14'
-            artifact-name: tinymongo-dist-py314
-          - python-version: '3.14t'
-            artifact-name: tinymongo-dist-py314t
 
     steps:
       - uses: actions/checkout@v4
@@ -353,7 +354,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.14'
           check-latest: true
 
       - name: Install package tools
@@ -371,22 +372,190 @@ jobs:
 
       - name: Smoke-test installed package
         working-directory: ${{ runner.temp }}
-        run: |
-          python - <<'PY'
-          import sys
-          import sysconfig
-          import tinymongo
-
-          if sysconfig.get_config_var("Py_GIL_DISABLED"):
-              assert sys._is_gil_enabled() is False
-          PY
+        run: python -c "import tinymongo; print(tinymongo.__file__)"
 
       - name: Upload distributions
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact-name }}
+          name: tinymongo-dist
           path: dist/*
           if-no-files-found: error
+
+  platform-wheel:
+    name: platform-wheel (${{ matrix.profile }})
+    needs: package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: '3.14'
+            profile: linux-x64-current
+            extras: all
+            smoke-extras: bson,duckdb,parquet,remote-sql,serialization
+            all-backends: true
+            free-threaded: false
+            source-test-args: ''
+          - os: ubuntu-latest
+            python-version: '3.14t'
+            profile: linux-x64-free-threaded
+            extras: free-threaded
+            smoke-extras: bson,remote-sql,serialization
+            all-backends: false
+            free-threaded: true
+            source-test-args: ''
+          - os: windows-latest
+            python-version: '3.9'
+            profile: windows-x64-minimum
+            extras: ''
+            smoke-extras: ''
+            all-backends: false
+            free-threaded: false
+            source-test-args: ''
+          - os: windows-latest
+            python-version: '3.14'
+            profile: windows-x64-current
+            extras: all
+            smoke-extras: bson,duckdb,parquet,remote-sql,serialization
+            all-backends: true
+            free-threaded: false
+            # TODO(#81): remove after Parquet encodes portable physical names.
+            source-test-args: >-
+              --deselect=tests/test_durable_indexes.py::test_catalog_identity_cannot_collide_across_collection_and_index_names[parquet]
+          - os: macos-15-intel
+            python-version: '3.9'
+            profile: macos-x64-minimum
+            extras: ''
+            smoke-extras: ''
+            all-backends: false
+            free-threaded: false
+            source-test-args: ''
+          - os: macos-latest
+            python-version: '3.14'
+            profile: macos-arm64-current
+            extras: all
+            smoke-extras: bson,duckdb,parquet,remote-sql,serialization
+            all-backends: true
+            free-threaded: false
+            source-test-args: ''
+    env:
+      TINYMONGO_WHEEL_EXTRAS: ${{ matrix.extras }}
+      TINYMONGO_INTEGRATION_BACKEND: sqlite
+      TINYMONGO_INTEGRATION_PROCS: '4'
+      TINYMONGO_INTEGRATION_WRITES_PER_PROC: '10'
+      TINYMONGO_INTEGRATION_SINGLE_PROCS: '4'
+      TINYMONGO_INTEGRATION_SINGLE_WRITES_PER_PROC: '5'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          check-latest: true
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Download the universal wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tinymongo-dist
+          path: dist
+
+      - name: Upgrade the package installer
+        run: python -m pip install --upgrade pip
+
+      - name: Install the built wheel
+        run: >-
+          python -c "import os, pathlib, subprocess, sys;
+          wheel = next(pathlib.Path('dist').glob('*.whl'));
+          extras = os.environ['TINYMONGO_WHEEL_EXTRAS'];
+          requirement = ('tinymongo[' + extras + '] @ ' +
+          wheel.resolve().as_uri()) if extras else str(wheel);
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install',
+          '--force-reinstall', requirement])"
+
+      - name: Install platform test runner
+        run: python -m pip install pytest
+
+      - name: Verify installed dependency consistency
+        run: python -m pip check
+
+      - name: Force GIL-disabled wheel validation
+        if: matrix.free-threaded
+        run: echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
+
+      - name: Verify the wheel preserves free-threaded execution
+        if: matrix.free-threaded
+        run: >-
+          python -c "import sys, sysconfig;
+          assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1;
+          assert sys._is_gil_enabled() is False;
+          import psycopg, pymongo, pymysql, tinymongo;
+          assert psycopg.pq.__impl__ == 'python';
+          assert sys._is_gil_enabled() is False"
+
+      - name: Smoke-test the installed wheel outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: >-
+          python -I "${{ github.workspace }}/scripts/verify_installed_package.py"
+          --require-installed-wheel --extras "${{ matrix.smoke-extras }}"
+
+      - name: Verify the installed console entry point
+        run: tinymongo --help
+
+      - name: Run focused portable suite with every local backend
+        if: matrix.all-backends
+        run: >-
+          python -m pytest -o addopts='' -q
+          tests/test_async_api.py
+          tests/test_bson_registry_hardening.py
+          tests/test_cli.py
+          tests/test_cli_replacement_safety.py
+          tests/test_client_configuration.py
+          tests/test_client_read_fidelity.py
+          tests/test_common_api.py
+          tests/test_durable_indexes.py
+          tests/test_multi_write.py
+          tests/test_projection_memory.py
+          tests/test_sqlite_bulk_updates.py
+          tests/test_sqlite_complex_read_candidates.py
+          tests/test_sqlite_optimistic_inserts.py
+          tests/test_sqlite_read_optimizations.py
+          tests/test_storage_backends.py
+          tests/test_thread_safety.py
+          tests/test_typed_physical_ids.py
+          ${{ matrix.source-test-args }}
+
+      - name: Run focused portable core suite
+        if: ${{ !matrix.all-backends }}
+        run: >-
+          python -m pytest -o addopts='' -q
+          tests/test_async_api.py
+          tests/test_bson_registry_hardening.py
+          tests/test_cli.py
+          tests/test_cli_replacement_safety.py
+          tests/test_client_configuration.py
+          tests/test_common_api.py
+          tests/test_durable_indexes.py
+          tests/test_multi_write.py
+          tests/test_projection_memory.py
+          tests/test_sqlite_bulk_updates.py
+          tests/test_sqlite_complex_read_candidates.py
+          tests/test_sqlite_optimistic_inserts.py
+          tests/test_sqlite_read_optimizations.py
+          tests/test_storage_backends.py
+          tests/test_thread_safety.py
+          -k "not duckdb and not parquet"
+          ${{ matrix.source-test-args }}
+
+      - name: Run reduced cross-process SQLite locking smoke
+        run: >-
+          python -m pytest -o addopts='' -q -m integration
+          tests/integration/test_concurrent_writes.py
 
   pymongo-floor:
     runs-on: ubuntu-latest

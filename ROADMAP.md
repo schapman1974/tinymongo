@@ -410,6 +410,10 @@ Exit criteria:
 
 - [x] Add required Python 3.14 unit, 100%-coverage, live MongoDB, remote SQL,
   and built-package CI lanes.
+- [x] Validate the universal wheel on Linux x64, Windows x64, macOS Intel, and
+  macOS Apple silicon, including core-only and optional local-backend profiles.
+- [x] Add blocking focused platform checks plus weekly/manual full Windows and
+  macOS suites with cross-process SQLite stress.
 - [x] Add beta-level CPython 3.14t coverage with the GIL disabled for core,
   concurrency, BSON/PyMongo, live MongoDB, pure-Psycopg PostgreSQL,
   MariaDB/MySQL, and package installation.
@@ -430,8 +434,17 @@ Exit criteria:
     indexes across durable catalogs and supported backends. Keep unsupported
     combinations fail-closed until their full semantics can be enforced.
 - [ ] [#81: MongoDB document and key validation](https://github.com/schapman1974/tinymongo/issues/81)
+  - [ ] Encode and catalog local database and Parquet collection filenames so
+    logical names stay beneath the storage root and remain portable and
+    case-distinct on Windows and macOS filesystems.
+  - [ ] Distinguish Windows drive-relative paths such as `C:folder` from
+    PyMongo-style network targets.
 - [ ] [#83: Remaining common BSON types](https://github.com/schapman1974/tinymongo/issues/83)
 - [ ] [#93: Backend concurrency and compatibility stress tests](https://github.com/schapman1974/tinymongo/issues/93)
+  - [ ] Canonicalize process-local lock identities and replace the private
+    `RLock._is_owned()` dependency with owned lock state.
+  - [ ] Verify failed lock acquisition and exceptional SQLite/DuckDB operations
+    release locks and native file handles before replacement or cleanup.
 - [x] [#94: BSON comparison and sort order](https://github.com/schapman1974/tinymongo/issues/94)
 
 Exit criteria:
