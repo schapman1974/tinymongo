@@ -223,8 +223,9 @@ with the follow-up audit of his
   18.90 seconds to 3.94 seconds and removed a 5.35x first-to-last slowdown.
 
 The normalized unique-token ledger remains a possible later optimization for
-bulk inserts into collections with user-created unique indexes. TM-040's
-measured no-index application path no longer needs that larger migration.
+bulk inserts and updates that actually change entries in user-created unique
+indexes. TM-040's measured no-index application path and TM-043's unchanged-key
+update path no longer need that larger migration.
 
 #### SQLite candidate-selective reads and updates
 
@@ -245,9 +246,16 @@ measured no-index application path no longer needs that larger migration.
 - [x] Reuse declared non-unique indexes for top-level bool/int/float/string
   equality to restrict `update_one()` and `update_many()` to scalar plus
   array/object candidates, then apply the exact shared BSON matcher in natural
-  row order. NaN, oversized integers, rich BSON predicates, dotted fields, and
-  collections with user-created unique indexes deliberately retain the
-  conservative full scan.
+  row order. NaN, oversized integers, rich BSON predicates, and dotted fields
+  deliberately retain the conservative candidate scan.
+- [x] **TM-043:** Let modifier updates use those same targeted candidates when
+  user-created unique indexes exist. Compare every changed document's exact
+  before/after unique token sets, including compound, sparse, partial, and
+  multikey membership; skip the complete post-image scan when all sets are
+  unchanged, while retaining atomic full validation whenever an entry really
+  changes. A local 40,000-document point-update check measured about 4.7 ms
+  with a unique index versus 4.2 ms without one, removing the earlier
+  collection-size-dependent penalty.
 - [x] Extend the SQLite/raw SQLite/MongoDB comparison benchmark with durable
   `_id` point updates. In the controlled 10,000-document local comparison, the
   TinyMongo point-update average fell from 98.653 ms to 4.330 ms (22.8x), and
@@ -430,9 +438,11 @@ Exit criteria:
   - [x] Retain MongoEngine's and Beanie's native ObjectId primary-key behavior;
     document `generate_id()` as an explicit string-ID choice rather than a
     required workaround.
-  - [ ] Implement integrity-preserving compound, sparse, and partial unique
-    indexes across durable catalogs and supported backends. Keep unsupported
-    combinations fail-closed until their full semantics can be enforced.
+  - [x] Implement integrity-preserving ascending compound, sparse, and partial
+    unique indexes across durable catalogs and supported backends. Preserve
+    ordered keys and membership options across restarts, use native constraints
+    where available, and keep remote multikey values and other unsupported
+    unique combinations fail-closed.
 - [ ] [#81: MongoDB document and key validation](https://github.com/schapman1974/tinymongo/issues/81)
   - [ ] Encode and catalog local database and Parquet collection filenames so
     logical names stay beneath the storage root and remain portable and

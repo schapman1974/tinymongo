@@ -123,6 +123,12 @@ def _copy_indexes(source, target):
         options = {"name": metadata["name"]}
         if metadata.get("unique"):
             options["unique"] = True
+        if metadata.get("sparse"):
+            options["sparse"] = True
+        if metadata.get("partialFilterExpression") is not None:
+            options["partialFilterExpression"] = copy.deepcopy(
+                metadata["partialFilterExpression"]
+            )
         target.create_index(copy.deepcopy(metadata["key"]), **options)
 
 

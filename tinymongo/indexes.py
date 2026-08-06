@@ -4,8 +4,10 @@ import json
 import math
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
+from itertools import product
 from typing import Mapping, Optional
 
+from .bson_codec import clone as bson_clone
 from .bson_codec import dumps as bson_json_dumps
 from .errors import DuplicateKeyError, TinyMongoNotSupportedError
 from .bson_types import (
@@ -20,14 +22,20 @@ from .warning_context import emit_warning
 _Decimal128 = decimal128_type()
 
 
-INDEX_METADATA_VERSION = 1
+INDEX_METADATA_VERSION = 2
 INDEX_CATALOG_TABLE = "__tinymongo_indexes"
 MISSING = object()
-_ALLOWED_OPTIONS = {"name", "unique"}
+_ALLOWED_OPTIONS = {
+    "name",
+    "partialFilterExpression",
+    "sparse",
+    "unique",
+}
 _MODEL_ALLOWED_OPTIONS = {
     "background",
     "expireAfterSeconds",
     "name",
+    "partialFilterExpression",
     "sparse",
     "unique",
 }
@@ -50,27 +58,38 @@ def _validate_field(field):
         _unsupported("Index field components cannot start with '$'")
 
 
-def _parse_key(key):
+def _parse_keys(key):
     if is_bson_string(key):
-        return key, 1
+        return ((key, 1),)
 
-    pair = None
     if isinstance(key, (list, tuple)) and len(key) == 2 and is_bson_string(key[0]):
-        pair = key
+        pairs = (key,)
     elif isinstance(key, (list, tuple)):
-        if len(key) != 1:
-            _unsupported("Only single-field indexes are supported")
-        candidate = key[0]
-        if isinstance(candidate, (list, tuple)) and len(candidate) == 2:
-            pair = candidate
+        pairs = tuple(key)
+    elif isinstance(key, Mapping):
+        pairs = tuple(key.items())
+    else:
+        pairs = ()
 
-    if pair is None:
-        _unsupported("Index keys must be a field string or one (field, direction) pair")
+    if not pairs:
+        _unsupported(
+            "Index keys must be a field string or one or more (field, direction) pairs"
+        )
 
-    field, direction = pair
-    if not is_bson_string(field):
-        _unsupported("Index fields must be non-empty strings")
-    return field, direction
+    normalized = []
+    seen = set()
+    for pair in pairs:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            _unsupported("Index keys must contain (field, direction) pairs")
+        field, direction = pair
+        _validate_field(field)
+        if field in seen:
+            _unsupported("Compound index fields must be unique")
+        if direction != 1 or isinstance(direction, bool):
+            _unsupported("Only ascending index direction 1 is supported")
+        normalized.append((field, direction))
+        seen.add(field)
+    return tuple(normalized)
 
 
 def _validate_index_name(name, field=None):
@@ -84,35 +103,150 @@ def _default_index_name(keys):
     return "_".join("{0}_{1}".format(field, direction) for field, direction in keys)
 
 
-@dataclass(frozen=True)
+def _validate_partial_filter(expression):
+    """Validate MongoDB's supported partial-index predicate subset."""
+    if not isinstance(expression, Mapping) or not expression:
+        _unsupported("partialFilterExpression must be a non-empty mapping")
+
+    field_operators = {"$eq", "$exists", "$gt", "$gte", "$in", "$lt", "$lte", "$type"}
+    for field, condition in expression.items():
+        if field in ("$and", "$or"):
+            if not isinstance(condition, (list, tuple)) or not condition:
+                _unsupported(
+                    "{0} in partialFilterExpression requires a non-empty array".format(
+                        field
+                    )
+                )
+            for child in condition:
+                _validate_partial_filter(child)
+            continue
+        if not is_bson_string(field) or field.startswith("$"):
+            _unsupported(
+                "Unsupported partialFilterExpression operator: {0}".format(field)
+            )
+        _validate_field(field)
+        if not isinstance(condition, Mapping):
+            continue
+        operators = [key for key in condition if str(key).startswith("$")]
+        if not operators:
+            continue
+        unknown = [
+            operator for operator in operators if operator not in field_operators
+        ]
+        if unknown:
+            _unsupported(
+                "Unsupported partialFilterExpression operator(s): {0}".format(
+                    ", ".join(sorted(unknown))
+                )
+            )
+        if len(operators) != len(condition):
+            _unsupported(
+                "partialFilterExpression cannot mix operators and literal fields"
+            )
+        if "$exists" in condition and condition["$exists"] is not True:
+            _unsupported("partialFilterExpression supports only $exists: true")
+        if "$in" in condition and not isinstance(condition["$in"], (list, tuple)):
+            _unsupported("$in in partialFilterExpression requires an array")
+
+
+@dataclass(frozen=True, init=False, eq=False)
 class IndexSpec:
     """A normalized index definition supported by TinyMongo."""
 
-    field: str
-    direction: int = 1
+    keys: tuple
     unique: bool = False
     name: Optional[str] = None
+    sparse: bool = False
+    partial_filter: Optional[Mapping] = None
+    metadata_version: int = INDEX_METADATA_VERSION
+    __hash__ = None  # type: ignore[assignment]
 
-    def __post_init__(self):
-        _validate_field(self.field)
-        if self.direction != 1 or isinstance(self.direction, bool):
-            _unsupported("Only ascending index direction 1 is supported")
-        if not isinstance(self.unique, bool):
+    def __init__(
+        self,
+        field=None,
+        direction=1,
+        unique=False,
+        name=None,
+        *,
+        keys=None,
+        sparse=False,
+        partial_filter=None,
+        metadata_version=INDEX_METADATA_VERSION,
+    ):
+        if keys is not None:
+            if field is not None:
+                raise TypeError("IndexSpec accepts either field or keys, not both")
+            normalized_keys = _parse_keys(keys)
+        else:
+            if field is None:
+                raise TypeError("IndexSpec requires field or keys")
+            normalized_keys = _parse_keys((field, direction))
+
+        if not isinstance(unique, bool):
             _unsupported("The unique index option must be a boolean")
+        if not isinstance(sparse, bool):
+            _unsupported("The sparse index option must be a boolean")
+        if partial_filter is not None and not isinstance(partial_filter, Mapping):
+            _unsupported("partialFilterExpression must be a mapping")
+        if sparse and partial_filter is not None:
+            _unsupported(
+                "The sparse and partialFilterExpression options cannot be combined"
+            )
+        if partial_filter is not None:
+            _validate_partial_filter(partial_filter)
+            from .table_backends import validate_filter_operators
 
-        name = self.name
+            validate_filter_operators(partial_filter)
+        if metadata_version not in (1, INDEX_METADATA_VERSION):
+            raise ValueError("Unsupported index metadata version")
+
         if name is None:
-            name = "{0}_1".format(self.field)
-        _validate_index_name(name, self.field)
+            name = _default_index_name(normalized_keys)
+        first_field = normalized_keys[0][0] if len(normalized_keys) == 1 else None
+        _validate_index_name(name, first_field)
+
+        object.__setattr__(self, "keys", normalized_keys)
+        object.__setattr__(self, "unique", unique)
         object.__setattr__(self, "name", name)
+        object.__setattr__(self, "sparse", sparse)
+        object.__setattr__(
+            self,
+            "partial_filter",
+            None if partial_filter is None else bson_clone(dict(partial_filter)),
+        )
+        object.__setattr__(self, "metadata_version", metadata_version)
+
+    @property
+    def field(self):
+        """Return the leading field for legacy single-index consumers."""
+        return self.keys[0][0]
+
+    @property
+    def direction(self):
+        """Return the leading direction for legacy single-index consumers."""
+        return self.keys[0][1]
+
+    @property
+    def fields(self):
+        """Return indexed fields in compound-key order."""
+        return tuple(field for field, _direction in self.keys)
+
+    def __eq__(self, other):
+        if not isinstance(other, IndexSpec):
+            return NotImplemented
+        return index_spec_signature(self) == index_spec_signature(other)
 
     def to_metadata(self):
         """Return a JSON-safe durable representation of this index."""
         return {
             "v": INDEX_METADATA_VERSION,
             "name": self.name,
-            "key": [[self.field, self.direction]],
+            "key": [list(pair) for pair in self.keys],
             "unique": self.unique,
+            "sparse": self.sparse,
+            "partialFilterExpression": (
+                None if self.partial_filter is None else bson_clone(self.partial_filter)
+            ),
         }
 
     @classmethod
@@ -120,15 +254,21 @@ class IndexSpec:
         """Restore and validate an index from durable metadata."""
         if not isinstance(metadata, Mapping):
             raise ValueError("Index metadata must be a mapping")
-        if metadata.get("v") != INDEX_METADATA_VERSION:
+        version = metadata.get("v")
+        if version not in (1, INDEX_METADATA_VERSION):
             raise ValueError("Unsupported index metadata version")
         required = {"v", "name", "key", "unique"}
+        if version == INDEX_METADATA_VERSION:
+            required.update({"sparse", "partialFilterExpression"})
         if set(metadata) != required:
             raise ValueError("Index metadata has missing or unknown fields")
         return parse_index_spec(
             metadata["key"],
             name=metadata["name"],
             unique=metadata["unique"],
+            sparse=metadata.get("sparse", False),
+            partialFilterExpression=metadata.get("partialFilterExpression"),
+            _metadata_version=version,
         )
 
 
@@ -136,21 +276,32 @@ def index_spec_signature(spec):
     """Return the key-and-options identity used to detect equivalent indexes."""
     if not isinstance(spec, IndexSpec):
         raise TypeError("Index signatures require an IndexSpec")
-    return (spec.field, spec.direction, spec.unique)
+    partial = (
+        None
+        if spec.partial_filter is None
+        else bson_json_dumps(
+            spec.partial_filter,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    return (spec.keys, spec.unique, spec.sparse, partial)
 
 
 def parse_index_spec(key, **options):
-    """Normalize a supported single-field ascending index definition."""
+    """Normalize a supported ascending index definition."""
+    metadata_version = options.pop("_metadata_version", INDEX_METADATA_VERSION)
     unknown = sorted(set(options) - _ALLOWED_OPTIONS)
     if unknown:
         _unsupported("Unsupported index option(s): {0}".format(", ".join(unknown)))
 
-    field, direction = _parse_key(key)
     return IndexSpec(
-        field=field,
-        direction=direction,
+        keys=_parse_keys(key),
         unique=options.get("unique", False),
         name=options.get("name"),
+        sparse=options.get("sparse", False),
+        partial_filter=options.get("partialFilterExpression"),
+        metadata_version=metadata_version,
     )
 
 
@@ -158,11 +309,9 @@ def parse_index_spec(key, **options):
 class IndexModelPlan:
     """One normalized outcome from a PyMongo-style index declaration.
 
-    ``spec`` is the effective index TinyMongo can create. Compound indexes use
-    their ascending leading-field prefix, matching MongoDB's leftmost-prefix
-    behavior as closely as a single-field backend can. It is ``None`` when no
-    useful safe fallback exists, such as a text index. ``degraded_features``
-    records every requested feature that is not honored.
+    ``spec`` is the effective index TinyMongo can create. It is ``None`` when
+    no useful safe fallback exists, such as a text index.
+    ``degraded_features`` records every requested feature that is not honored.
     """
 
     name: str
@@ -271,6 +420,14 @@ def _validate_model_options(options):
         if option in options and not isinstance(options[option], bool):
             _unsupported("The {0} index option must be a boolean".format(option))
 
+    partial_filter = options.get("partialFilterExpression")
+    if partial_filter is not None and not isinstance(partial_filter, Mapping):
+        _unsupported("partialFilterExpression must be a mapping")
+    if options.get("sparse", False) and partial_filter is not None:
+        _unsupported(
+            "The sparse and partialFilterExpression options cannot be combined"
+        )
+
     if "expireAfterSeconds" in options:
         seconds = options["expireAfterSeconds"]
         if (
@@ -285,10 +442,8 @@ def _validate_model_options(options):
 def _degraded_feature_message(feature):
     messages = {
         "background": "background creation is ignored",
-        "compound": "compound indexing is reduced to its ascending leading field",
         "descending": "descending direction is treated as ascending",
         "hashed": "hashed indexing is replaced by ascending equality indexing",
-        "sparse": "sparse membership is not honored",
         "text": "text indexing is ignored because $text queries are not supported",
         "ttl": "TTL expiration is not performed",
     }
@@ -331,8 +486,17 @@ def plan_index_model(model):
     if isinstance(model, IndexSpec):
         return IndexModelPlan(
             name=model.name,
-            requested_keys=((model.field, model.direction),),
-            requested_options=(("name", model.name), ("unique", model.unique)),
+            requested_keys=model.keys,
+            requested_options=tuple(
+                (key, value)
+                for key, value in (
+                    ("name", model.name),
+                    ("unique", model.unique),
+                    ("sparse", model.sparse),
+                    ("partialFilterExpression", model.partial_filter),
+                )
+                if value not in (False, None)
+            ),
             spec=model,
         )
 
@@ -351,22 +515,18 @@ def plan_index_model(model):
 
     unique = options.get("unique", False)
     features = []
-    if len(keys) > 1:
-        features.append("compound")
     if any(direction == -1 for _, direction in keys):
         features.append("descending")
     if any(direction == "hashed" for _, direction in keys):
         features.append("hashed")
     if any(direction == "text" for _, direction in keys):
         features.append("text")
-    if options.get("sparse", False):
-        features.append("sparse")
     if "expireAfterSeconds" in options:
         features.append("ttl")
     if options.get("background", False):
         features.append("background")
 
-    unsafe_unique_features = {"compound", "hashed", "sparse", "text", "ttl"}
+    unsafe_unique_features = {"hashed", "text", "ttl"}
     unsafe = [item for item in features if item in unsafe_unique_features]
     if unique and unsafe:
         _unsupported(
@@ -377,10 +537,11 @@ def plan_index_model(model):
     spec = None
     if "text" not in features:
         spec = IndexSpec(
-            field=keys[0][0],
-            direction=1,
+            keys=tuple((field, 1) for field, _direction in keys),
             unique=unique,
             name=name,
+            sparse=options.get("sparse", False),
+            partial_filter=options.get("partialFilterExpression"),
         )
     degraded = tuple(features)
     warning = _plan_warning(name, degraded) if degraded else None
@@ -529,6 +690,70 @@ def index_tokens(document, field):
     return tuple(tokens)
 
 
+def document_matches_index(document, spec):
+    """Return whether ``document`` contributes entries to ``spec``.
+
+    Sparse compound indexes include a document when at least one indexed field
+    exists. Partial indexes instead use their complete filter expression. The
+    two options are rejected together when the spec is normalized.
+    """
+    if not isinstance(document, Mapping):
+        raise TypeError("Indexed documents must be mappings")
+    if not isinstance(spec, IndexSpec):
+        raise TypeError("Index membership requires an IndexSpec")
+
+    if spec.partial_filter is not None:
+        # Import lazily because table_backends imports this module while it is
+        # defining the shared MongoDB matcher.
+        from .table_backends import matches_filter
+
+        return matches_filter(document, spec.partial_filter)
+    if spec.sparse:
+        return any(
+            _nested_value(document, field) is not MISSING for field in spec.fields
+        )
+    return True
+
+
+def index_entry_tokens(document, spec):
+    """Return exact BSON-aware entries contributed by one index spec.
+
+    Single-field indexes retain their established token representation. A
+    compound index creates the ordered Cartesian product of its component
+    values, matching MongoDB when at most one indexed field is an array. More
+    than one array would be a parallel-array compound index, which MongoDB also
+    refuses rather than silently weakening.
+    """
+    if not isinstance(spec, IndexSpec):
+        raise TypeError("Index entries require an IndexSpec")
+    if not document_matches_index(document, spec):
+        return ()
+    if len(spec.keys) == 1:
+        return index_tokens(document, spec.field)
+
+    components = []
+    array_fields = []
+    for field in spec.fields:
+        value = _nested_value(document, field)
+        if isinstance(value, list):
+            array_fields.append(field)
+        components.append(index_tokens(document, field))
+    if len(array_fields) > 1:
+        _unsupported(
+            "Compound index {0!r} cannot index parallel array fields: {1}".format(
+                spec.name,
+                ", ".join(array_fields),
+            )
+        )
+
+    return tuple(
+        "compound:{0}".format(
+            json.dumps(list(values), ensure_ascii=False, separators=(",", ":"))
+        )
+        for values in product(*components)
+    )
+
+
 def validate_unique_documents(documents, indexes):
     """Raise when post-image documents conflict on a unique index."""
     docs = list(documents)
@@ -544,7 +769,7 @@ def validate_unique_documents(documents, indexes):
             if not isinstance(document, Mapping):
                 raise TypeError("Indexed documents must be mappings")
             identity = document.get("_id", "position {0}".format(position))
-            for token in index_tokens(document, spec.field):
+            for token in index_entry_tokens(document, spec):
                 if token in owners:
                     raise DuplicateKeyError(
                         "duplicate key for unique index {0}: documents {1!r} and "
@@ -562,7 +787,9 @@ __all__ = [
     "MISSING",
     "TinyMongoUnsupportedWarning",
     "degraded_index_reuse_warning",
+    "document_matches_index",
     "emit_index_plan_warnings",
+    "index_entry_tokens",
     "index_catalog_id",
     "index_spec_signature",
     "index_tokens",

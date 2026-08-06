@@ -394,6 +394,57 @@ def test_legacy_equivalent_index_catalog_keeps_named_retry_idempotent(tmp_path):
     assert users.create_index("email", name="second") == "second"
 
 
+def test_legacy_degraded_compound_catalog_is_promoted_on_batch_retry(tmp_path):
+    address = str(tmp_path / "legacy-compound")
+    client = tinymongo.TinyMongoClient(address)
+    users = client.app.users
+    legacy = users._index_document(IndexSpec("account", name="account_email"))
+    legacy["spec"] = {
+        "v": 1,
+        "name": "account_email",
+        "key": [["account", 1]],
+        "unique": False,
+    }
+    users.parent.tinydb.table(INDEX_CATALOG_TABLE).insert(legacy)
+    client.close()
+
+    client = tinymongo.TinyMongoClient(address)
+    try:
+        users = client.app.users
+        assert _indexes_by_name(users)["account_email"]["key"] == [("account", 1)]
+
+        assert users.create_indexes(
+            [
+                {
+                    "key": [("account", 1), ("email", 1)],
+                    "name": "account_email",
+                }
+            ]
+        ) == ["account_email"]
+
+        assert _indexes_by_name(users)["account_email"]["key"] == [
+            ("account", 1),
+            ("email", 1),
+        ]
+        catalog = users.parent.tinydb.table(INDEX_CATALOG_TABLE)
+        promoted = next(
+            document
+            for document in catalog.all()
+            if document["collection"] == "users"
+            and document["spec"]["name"] == "account_email"
+        )
+        assert promoted["spec"] == {
+            "v": 2,
+            "name": "account_email",
+            "key": [["account", 1], ["email", 1]],
+            "unique": False,
+            "sparse": False,
+            "partialFilterExpression": None,
+        }
+    finally:
+        client.close()
+
+
 def test_degraded_batch_reuses_equivalent_indexes_and_preserves_unique_options(
     durable_index_backend,
 ):
@@ -524,13 +575,11 @@ def test_unsupported_index_shapes_types_and_options_leave_no_metadata(
     client = durable_index_backend.open()
     users = client.app.users
     unsupported = [
-        ([("first", 1), ("last", 1)], {}),
         ([("email", -1)], {}),
         (123, {}),
         (object(), {}),
         ("email", {"unique": 1}),
         ("email", {"name": ""}),
-        ("email", {"sparse": True}),
         ("email", {"background": True}),
     ]
 

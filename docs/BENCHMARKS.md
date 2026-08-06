@@ -38,6 +38,22 @@ cover the ordinary no-unique-index path; collections with user-created unique
 indexes deliberately retain complete Python validation until an exact
 multikey-token ledger is justified.
 
+### Unique-index modifier updates (TM-043)
+
+Unique indexes previously forced every SQLite modifier update through a full
+collection decode, even for an exact `_id` filter and an update to an unrelated
+field. The targeted path now compares the selected documents' before/after
+unique token sets and performs full post-image validation only if an index
+entry changes. A local 40,000-document smoke benchmark measured median point
+updates of about 4.22 ms without a secondary index, 4.48 ms with a non-unique
+index, and 4.68 ms with a unique index. Absolute timings vary by host, but the
+former roughly 44x unique-index penalty was absent.
+
+This optimization applies to modifier updates whose unique entries remain the
+same. An update that changes a unique key or changes sparse/partial membership
+still deliberately validates the full post-image so multikey overlap and
+cross-document conflicts remain atomic.
+
 ### SQLite, raw SQLite, and MongoDB comparison
 
 The focused comparison uses the same 10,000 JSON-shaped documents and performs:

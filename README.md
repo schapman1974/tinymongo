@@ -543,6 +543,17 @@ Collections expose durable indexes and unique constraints:
 
 ```python
 collection.create_index("email", unique=True, name="login_email")
+collection.create_index(
+    [("tenant_id", 1), ("email", 1)],
+    unique=True,
+    name="tenant_email",
+)
+collection.create_index("nickname", sparse=True)
+collection.create_index(
+    "email",
+    unique=True,
+    partialFilterExpression={"active": True},
+)
 collection.find({"email": "person@example.com"})
 collection.list_indexes()
 collection.drop_index("login_email")
@@ -556,24 +567,35 @@ namespace exists. Duplicate `_id` and unique-index violations raise
 `DuplicateKeyError` with MongoDB-compatible code `11000`.
 
 Plural `create_indexes()` accepts duck-typed PyMongo `IndexModel` batches
-without importing PyMongo in TinyMongo's core. Unique indexes are enforced.
-Performance-only declarations degrade safely and emit
-`TinyMongoUnsupportedWarning`: descending and hashed declarations use
-ascending equality indexes, and compound declarations use their ascending
-leading-field prefix. Sparse membership is not honored and TTL expiration is
-not performed; both are reported explicitly. A semantically unsafe unique
-declaration is rejected before any batch entry is created.
+without importing PyMongo in TinyMongo's core. Ascending compound, sparse, and
+partial indexes retain their complete definitions in durable catalogs and can
+enforce uniqueness. Sparse indexes omit documents whose indexed fields are all
+missing but include explicit `null`; partial indexes include only documents
+matching their filter. Supported partial filters use literals, `$eq`,
+`$exists: true`, `$gt`, `$gte`, `$in`, `$lt`, `$lte`, `$type`, `$and`, and
+`$or`. Sparse and partial options cannot be combined on one index.
+
+Performance-only declarations still degrade safely and emit
+`TinyMongoUnsupportedWarning`: descending and hashed keys use ascending
+equality indexes, `background` is ignored, text indexes are skipped because
+`$text` queries are unsupported, and TTL indexes do not expire documents. A
+unique hashed, text, or TTL declaration is rejected before any batch entry is
+created because weakening it would compromise integrity.
 
 Unique indexes support JSON scalar values, Decimal128, UUID/Binary, regex, and
-flat arrays on embedded backends; missing and `null` share one unique key.
-Object values, ObjectId, datetime, nested arrays, non-finite numbers, and array
-traversal inside a dotted index path are not supported for unique indexes yet.
+flat arrays on embedded backends. Ordinary indexes treat missing and `null` as
+one unique key, while sparse and partial membership follows the rules above.
+Embedded compound unique indexes support one flat array field and reject
+parallel arrays. Object values, ObjectId, datetime, nested arrays, non-finite
+numbers, and array traversal inside a dotted index path are not supported for
+unique indexes yet.
 Remote SQL stores a versioned canonical token digest beside each unique-indexed
 value and protects it with a native constraint. This preserves exact int/float
 numeric identity across processes, including very large integers and doubles,
-while keeping booleans distinct from numbers. Remote SQL still rejects array,
-Decimal128, UUID/Binary, and regex values under unique indexes because those
-tokens cannot yet guarantee MongoDB multikey or BSON identity.
+while keeping booleans distinct from numbers. Remote SQL still rejects all
+array/multikey, Decimal128, UUID/Binary, and regex values under unique indexes
+because those tokens cannot yet guarantee cross-process MongoDB multikey or
+BSON identity.
 
 SQL, DuckDB, and Parquet storage uses typed physical `_id` keys for new rows.
 Existing databases with older stringified keys remain readable and mutable.
@@ -975,9 +997,9 @@ await beanie.init_beanie(
 
 The compatibility layer supplies Beanie's `buildInfo` discovery command,
 collection-listing hints, and PyMongo-shaped update and delete reply documents.
-Single-field indexes continue to work. Compound, sparse, and partial unique
-indexes remain a tracked integrity feature and fail loudly instead of being
-silently weakened.
+Single-field, ascending compound, sparse, and partial unique indexes work
+through the same durable index layer. Unsupported key types and unique-value
+combinations retain the fail-closed behavior described above.
 
 The tested subset covers document creation, repeated saves, queries, updates,
 deletes, counts, and collection drops. Aggregation beyond the documented core

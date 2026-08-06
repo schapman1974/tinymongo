@@ -68,19 +68,22 @@ def test_existing_index_spec_passes_through_unchanged():
 
 def test_index_signature_uses_keys_and_unique_options_but_not_name():
     assert index_spec_signature(IndexSpec("email", name="first")) == (
-        "email",
-        1,
+        (("email", 1),),
         False,
+        False,
+        None,
     )
     assert index_spec_signature(IndexSpec("email", name="second")) == (
-        "email",
-        1,
+        (("email", 1),),
         False,
+        False,
+        None,
     )
     assert index_spec_signature(IndexSpec("email", name="unique", unique=True)) == (
-        "email",
-        1,
+        (("email", 1),),
         True,
+        False,
+        None,
     )
 
     with pytest.raises(TypeError, match="IndexSpec"):
@@ -122,7 +125,6 @@ def test_degraded_reuse_warning_rejects_invalid_or_inequivalent_inputs():
     [
         ({"key": {"created": -1}}, "descending", "treated as ascending"),
         ({"key": {"token": "hashed"}}, "hashed", "ascending equality"),
-        ({"key": {"email": 1}, "sparse": True}, "sparse", "not honored"),
         (
             {"key": {"created": 1}, "expireAfterSeconds": 0},
             "ttl",
@@ -146,6 +148,37 @@ def test_single_field_performance_declarations_create_a_degraded_index(
     assert message in plan.warning
 
 
+def test_sparse_model_preserves_membership_semantics_without_degradation():
+    plan = plan_index_model({"key": {"email": 1}, "sparse": True})
+
+    assert plan.spec == IndexSpec("email", sparse=True)
+    assert plan.degraded_features == ()
+    assert plan.outcome == "create"
+    assert plan.warning is None
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        (
+            {"key": {"email": 1}, "partialFilterExpression": "active"},
+            "must be a mapping",
+        ),
+        (
+            {
+                "key": {"email": 1},
+                "sparse": True,
+                "partialFilterExpression": {"active": True},
+            },
+            "cannot be combined",
+        ),
+    ],
+)
+def test_model_rejects_invalid_partial_index_option_combinations(document, message):
+    with pytest.raises(TinyMongoNotSupportedError, match=message):
+        plan_index_model(document)
+
+
 def test_false_performance_flags_require_no_degradation():
     plan = plan_index_model({"key": {"email": 1}, "sparse": False, "background": False})
 
@@ -165,7 +198,7 @@ def test_nonunique_text_index_is_accepted_as_a_warned_noop():
     assert plan.to_metadata()["effective_spec"] is None
 
 
-def test_nonunique_compound_model_degrades_to_an_ascending_leading_field():
+def test_nonunique_compound_model_preserves_keys_and_sparse_membership():
     plan = plan_index_model(
         DuckIndexModel(
             {
@@ -179,19 +212,19 @@ def test_nonunique_compound_model_degrades_to_an_ascending_leading_field():
     )
 
     assert plan.name == "account_recent"
-    assert plan.spec == IndexSpec(field="account_id", name="account_recent")
+    assert plan.spec == IndexSpec(
+        keys=(("account_id", 1), ("created", 1)),
+        name="account_recent",
+        sparse=True,
+    )
     assert plan.outcome == "create_degraded"
     assert plan.degraded_features == (
-        "compound",
         "descending",
-        "sparse",
         "ttl",
         "background",
     )
     assert "created with reduced behavior" in plan.warning
-    assert "ascending leading field" in plan.warning
     assert "descending direction" in plan.warning
-    assert "sparse membership" in plan.warning
     assert "TTL expiration" in plan.warning
     assert "background creation" in plan.warning
 
@@ -202,10 +235,12 @@ def test_nonunique_compound_model_degrades_to_an_ascending_leading_field():
     ]
     assert metadata["outcome"] == "create_degraded"
     assert metadata["effective_spec"] == {
-        "v": 1,
+        "v": 2,
         "name": "account_recent",
-        "key": [["account_id", 1]],
+        "key": [["account_id", 1], ["created", 1]],
         "unique": False,
+        "sparse": True,
+        "partialFilterExpression": None,
     }
     assert json.loads(json.dumps(metadata)) == metadata
 
@@ -216,26 +251,26 @@ def test_compound_default_name_matches_pymongo_shape():
     assert plan.name == "account_1_created_-1"
 
 
-def test_degraded_effective_spec_is_included_in_metadata():
+def test_sparse_effective_spec_is_included_in_metadata():
     plan = plan_index_model(
         {"key": {"email": 1}, "name": "maybe_email", "sparse": True}
     )
 
     assert plan.to_metadata()["effective_spec"] == {
-        "v": 1,
+        "v": 2,
         "name": "maybe_email",
         "key": [["email", 1]],
         "unique": False,
+        "sparse": True,
+        "partialFilterExpression": None,
     }
 
 
 @pytest.mark.parametrize(
     ("document", "feature"),
     [
-        ({"key": {"first": 1, "last": 1}, "unique": True}, "compound"),
         ({"key": {"email": "hashed"}, "unique": True}, "hashed"),
         ({"key": {"content": "text"}, "unique": True}, "text"),
-        ({"key": {"email": 1}, "unique": True, "sparse": True}, "sparse"),
         (
             {"key": {"created": 1}, "unique": True, "expireAfterSeconds": 60},
             "ttl",
@@ -248,6 +283,28 @@ def test_unique_semantic_combinations_are_rejected(document, feature):
         match="cannot be degraded.*{0}".format(feature),
     ):
         plan_index_model(document)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"key": {"first": 1, "last": 1}, "unique": True},
+        {"key": {"email": 1}, "unique": True, "sparse": True},
+        {
+            "key": {"email": 1},
+            "unique": True,
+            "partialFilterExpression": {"active": True},
+        },
+    ],
+)
+def test_unique_compound_sparse_and_partial_models_preserve_semantics(document):
+    plan = plan_index_model(document)
+
+    assert plan.spec.unique is True
+    assert plan.spec.keys == tuple(document["key"].items())
+    assert plan.spec.sparse is document.get("sparse", False)
+    assert plan.spec.partial_filter == document.get("partialFilterExpression")
+    assert plan.degraded_features == ()
 
 
 def test_unique_descending_and_background_flags_preserve_uniqueness():

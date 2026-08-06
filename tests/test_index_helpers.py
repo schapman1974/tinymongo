@@ -8,7 +8,9 @@ from tinymongo.errors import DuplicateKeyError, TinyMongoNotSupportedError
 from tinymongo.indexes import (
     INDEX_METADATA_VERSION,
     IndexSpec,
+    document_matches_index,
     index_catalog_id,
+    index_entry_tokens,
     index_tokens,
     parse_index_spec,
     validate_unique_documents,
@@ -45,17 +47,72 @@ def test_parse_accepts_one_ascending_pair(key):
 
 
 def test_parse_normalizes_supported_options():
-    spec = parse_index_spec("email", unique=True, name="login_email")
+    spec = parse_index_spec(
+        [("tenant", 1), ("email", 1)],
+        unique=True,
+        name="tenant_login_email",
+        sparse=True,
+    )
 
+    assert spec.keys == (("tenant", 1), ("email", 1))
     assert spec.unique is True
-    assert spec.name == "login_email"
+    assert spec.sparse is True
+    assert spec.name == "tenant_login_email"
+
+
+def test_parse_accepts_an_ordered_mapping_for_compound_keys():
+    spec = parse_index_spec({"tenant": 1, "email": 1})
+
+    assert spec.keys == (("tenant", 1), ("email", 1))
+    assert spec.direction == 1
+    assert spec.fields == ("tenant", "email")
+
+
+def test_parse_normalizes_partial_filter_expression():
+    expression = {"active": True, "score": {"$gte": 10}}
+
+    spec = parse_index_spec("email", partialFilterExpression=expression)
+
+    assert spec.partial_filter == expression
+
+
+def test_partial_filter_accepts_nested_literal_documents():
+    expression = {"profile": {"status": "active"}}
+
+    assert (
+        parse_index_spec("email", partialFilterExpression=expression).partial_filter
+        == expression
+    )
+
+
+@pytest.mark.parametrize("operator", ["$and", "$or"])
+@pytest.mark.parametrize("children", [[], "not-an-array"])
+def test_partial_filter_logical_operators_require_nonempty_arrays(operator, children):
+    with pytest.raises(TinyMongoNotSupportedError, match="non-empty array"):
+        parse_index_spec("email", partialFilterExpression={operator: children})
+
+
+def test_index_spec_requires_exactly_one_key_input():
+    with pytest.raises(TypeError, match="either field or keys"):
+        IndexSpec("email", keys=[("tenant", 1), ("email", 1)])
+
+    with pytest.raises(TypeError, match="requires field or keys"):
+        IndexSpec()
+
+
+def test_index_spec_rejects_unknown_metadata_versions():
+    with pytest.raises(ValueError, match="Unsupported index metadata version"):
+        IndexSpec("email", metadata_version=99)
+
+
+def test_index_spec_comparison_with_an_unrelated_type_is_false():
+    assert (IndexSpec("email") == "email") is False
 
 
 @pytest.mark.parametrize(
     "key",
     [
         [],
-        [("first", 1), ("last", 1)],
         ("email", -1),
         ("email", "text"),
         ("email", "hashed"),
@@ -74,8 +131,6 @@ def test_parse_rejects_unsupported_keys(key):
     "option",
     [
         {"expireAfterSeconds": 10},
-        {"sparse": True},
-        {"partialFilterExpression": {"active": True}},
         {"collation": {"locale": "en"}},
         {"wildcardProjection": {"field": 1}},
         {"background": True},
@@ -119,8 +174,26 @@ def test_metadata_is_json_safe_and_round_trips():
         "name": "profile_login",
         "key": [["profile.email", 1]],
         "unique": True,
+        "sparse": False,
+        "partialFilterExpression": None,
     }
     assert IndexSpec.from_metadata(encoded) == spec
+
+
+def test_legacy_metadata_round_trips_with_default_v2_options():
+    legacy = {
+        "v": 1,
+        "name": "email_1",
+        "key": [["email", 1]],
+        "unique": False,
+    }
+
+    restored = IndexSpec.from_metadata(legacy)
+
+    assert restored == IndexSpec("email")
+    assert restored.metadata_version == 1
+    assert restored.sparse is False
+    assert restored.partial_filter is None
 
 
 @pytest.mark.parametrize(
@@ -324,3 +397,14 @@ def test_unique_validation_rejects_invalid_inputs():
         )
     with pytest.raises(TypeError, match="mappings"):
         index_tokens("not-a-document", "x")
+
+
+def test_index_membership_rejects_invalid_inputs():
+    spec = IndexSpec("email", sparse=True)
+
+    with pytest.raises(TypeError, match="documents must be mappings"):
+        document_matches_index("not-a-document", spec)
+    with pytest.raises(TypeError, match="requires an IndexSpec"):
+        document_matches_index({"email": "a@example.com"}, "email")
+    with pytest.raises(TypeError, match="require an IndexSpec"):
+        index_entry_tokens({"email": "a@example.com"}, "email")

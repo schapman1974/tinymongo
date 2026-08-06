@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Ascending compound, sparse, and partial indexes now preserve their complete
+  definitions across durable backends and enforce matching unique-key
+  membership. Embedded compound indexes support one flat multikey field,
+  parallel arrays fail atomically, and remote SQL keeps unsupported multikey
+  unique values fail-closed.
 - Beanie 2.1 can initialize through the async client without application
   shims. TinyMongo now answers the discovery-safe `ping` and `buildInfo`
   database commands, accepts Beanie's `authorizedCollections` and `nameOnly`
@@ -30,10 +35,14 @@
   indexes, Decimal128 IDs, and non-enumerable legacy IDs retain the conservative
   full-scan fallback for released legacy-store formats.
 - SQLite `update_one()` and `update_many()` now select exact `_id` rows through
-  the primary key and declared non-unique index candidates for top-level
+  the primary key and declared index candidates for top-level
   bool/int/float/string equality inside the existing atomic transaction. Exact
-  BSON post-filtering and natural first-match order are preserved, while
-  unique-index and uncertain legacy cases retain the complete validation scan.
+  BSON post-filtering and natural first-match order are preserved.
+- **TM-043:** SQLite modifier updates with unique indexes now compare exact
+  before/after token sets for only the selected documents. Updates that leave
+  compound, sparse, partial, and multikey entries unchanged avoid a complete
+  collection decode; actual entry changes retain atomic full post-image
+  validation.
 
 ### Fixed
 - **TM-037:** Direct, non-`_id` `Timestamp(0, 0)` values now receive a
