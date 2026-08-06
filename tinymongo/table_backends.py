@@ -3975,11 +3975,10 @@ class SQLiteTableBackend(TableBackend):
         """Return changed IDs and result counts from one SQLite transaction.
 
         The generic table-backend implementation delegates every changed
-        document to :meth:`replace_one`.  For SQLite that turns an update of
-        ``m`` rows into ``m`` complete collection scans and ``m`` commits,
-        because each replacement must revalidate the durable unique indexes.
-        Read the collection once instead, build and validate its complete
-        post-image once, then write all changed rows as a single transaction.
+        document to :meth:`replace_one`.  SQLite instead selects the update
+        candidates once and writes the complete batch in one transaction.
+        Unique-index entries are compared before and after each replacement;
+        a complete post-image is needed only when one of those entries changes.
 
         The physical row key is retained from SQLite rather than recomputed
         from the logical ``_id``.  That keeps updates compatible with legacy
@@ -4005,7 +4004,7 @@ class SQLiteTableBackend(TableBackend):
         try:
             # Creating a companion array-candidate index commits SQLite schema
             # work, so reconcile it before opening the update transaction.
-            if query_index_spec is not None and not unique_specs:
+            if query_index_spec is not None:
                 self._ensure_type_index_on_connection(
                     conn,
                     collection,
@@ -4016,21 +4015,12 @@ class SQLiteTableBackend(TableBackend):
             # validated post-image and the committed rows in the same atomic
             # read-check-write unit.
             conn.execute("BEGIN IMMEDIATE")
-            if unique_specs:
-                rows = conn.execute(
-                    "SELECT rowid, _id, data FROM {0} ORDER BY rowid".format(table)
-                ).fetchall()
-                originals = [
-                    (natural_order, row_id, _json_loads(data))
-                    for natural_order, row_id, data in rows
-                ]
-            else:
-                originals = self._update_candidate_rows_on_connection(
-                    conn,
-                    collection,
-                    filter_doc,
-                    query_index_spec=query_index_spec,
-                )
+            originals = self._update_candidate_rows_on_connection(
+                conn,
+                collection,
+                filter_doc,
+                query_index_spec=query_index_spec,
+            )
 
             matches = [
                 (row_id, document)
@@ -4061,12 +4051,37 @@ class SQLiteTableBackend(TableBackend):
                 conn.rollback()
                 return [], 0, 0
 
-            if unique_specs:
-                post_image = [
-                    replacement_by_row_id.get(row_id, document)
-                    for _natural_order, row_id, document in originals
-                ]
-                validate_unique_documents(post_image, specs)
+            changed_unique_specs = [
+                spec
+                for spec in unique_specs
+                if any(
+                    frozenset(index_entry_tokens(original, spec))
+                    != frozenset(index_entry_tokens(updated, spec))
+                    for _row_id, original, updated in replacements
+                )
+            ]
+            if changed_unique_specs:
+                row_count = conn.execute(
+                    "SELECT COUNT(*) FROM {0}".format(table)
+                ).fetchone()[0]
+                if len(originals) == row_count:
+                    post_image = [
+                        replacement_by_row_id.get(row_id, document)
+                        for _natural_order, row_id, document in originals
+                    ]
+                else:
+                    rows = conn.execute(
+                        "SELECT _id, data FROM {0} ORDER BY rowid".format(table)
+                    ).fetchall()
+                    post_image = [
+                        (
+                            replacement_by_row_id[row_id]
+                            if row_id in replacement_by_row_id
+                            else _json_loads(data)
+                        )
+                        for row_id, data in rows
+                    ]
+                validate_unique_documents(post_image, changed_unique_specs)
 
             if replacements:
                 conn.executemany(
