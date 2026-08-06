@@ -1,0 +1,65 @@
+name: Full platform compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  full-suite:
+    name: full-suite (${{ matrix.profile }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python-version: '3.14'
+            profile: windows-x64
+            # TODO(#81): remove after Parquet encodes portable physical names.
+            pytest-args: >-
+              --deselect=tests/test_durable_indexes.py::test_catalog_identity_cannot_collide_across_collection_and_index_names[parquet]
+          - os: macos-latest
+            python-version: '3.14'
+            profile: macos-arm64
+            pytest-args: ''
+    env:
+      TINYMONGO_INTEGRATION_BACKEND: sqlite
+      TINYMONGO_INTEGRATION_PROCS: '8'
+      TINYMONGO_INTEGRATION_WRITES_PER_PROC: '25'
+      TINYMONGO_INTEGRATION_SINGLE_PROCS: '6'
+      TINYMONGO_INTEGRATION_SINGLE_WRITES_PER_PROC: '10'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          check-latest: true
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-dev.txt
+
+      - name: Install the complete development profile
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip install ".[all]"
+
+      - name: Verify installed dependency consistency
+        run: python -m pip check
+
+      - name: Run the complete default suite
+        run: python -m pytest ${{ matrix.pytest-args }}
+
+      - name: Run cross-process SQLite locking stress
+        run: >-
+          python -m pytest -o addopts='' -q -m integration
+          tests/integration/test_concurrent_writes.py

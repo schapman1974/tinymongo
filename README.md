@@ -11,9 +11,10 @@ Parquet, PostgreSQL, and MariaDB/MySQL backends.
 
 # Status
 
-TinyMongo supports Python 3.9 and newer and is tested in GitHub Actions on
-Python 3.9, 3.11, 3.13, and 3.14. CPython 3.14's free-threaded build is
-supported at the beta level for the backends described below.
+TinyMongo supports Python 3.9 and newer. GitHub Actions tests every standard
+CPython release from 3.9 through 3.14 on Linux, then installs the built wheel on
+Windows x64, macOS Intel, and macOS Apple silicon. CPython 3.14's free-threaded
+build is supported at the beta level for the backends described below.
 
 # Installation
 
@@ -42,7 +43,11 @@ may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
   file-replacement mechanisms; see the backend-specific documentation.
 - **Async API:** async clients keep storage and lock waits off the event loop
   while sharing the synchronous implementation's behavior.
-- **Tests & CI:** a GitHub Actions workflow is included at `.github/workflows/ci.yml` to run unit tests and linters across Python versions. See `requirements-dev.txt` for dev dependencies.
+- **Tests & CI:** `.github/workflows/ci.yml` runs unit tests, linters, live-service
+  contracts, packaging checks, and portable wheel smoke tests. Current Windows,
+  macOS, and Linux lanes exercise TinyDB, SQLite, DuckDB, and Parquet; minimum
+  Python lanes verify the core TinyDB and SQLite installation. See
+  `requirements-dev.txt` for development dependencies.
 
 
 # PyMongo-style import

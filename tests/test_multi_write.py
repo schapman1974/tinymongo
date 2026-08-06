@@ -1,21 +1,16 @@
 import os
 import multiprocessing as mp
 import shutil
+import time
 
 import tinymongo as tm
 
 
 def writer_process(db_dir, proc_id, count, start_value=0):
-    client = tm.TinyMongoClient(db_dir)
-    db = client.multiDB
-    coll = db.multiCollection
-
-    items = []
-    for i in range(count):
-        items.append({"count": start_value + proc_id * count + i})
-
-    # insert many
-    coll.insert_many(items)
+    with tm.TinyMongoClient(db_dir) as client:
+        coll = client.multiDB.multiCollection
+        items = [{"count": start_value + proc_id * count + i} for i in range(count)]
+        coll.insert_many(items)
 
 
 def test_multi_writer_stress(tmp_path):
@@ -36,13 +31,21 @@ def test_multi_writer_stress(tmp_path):
         p.start()
         procs.append(p)
 
-    for p in procs:
-        p.join()
+    deadline = time.monotonic() + 60
+    for process in procs:
+        process.join(timeout=max(0, deadline - time.monotonic()))
+
+    timed_out = [process for process in procs if process.is_alive()]
+    for process in timed_out:
+        process.terminate()
+        process.join(timeout=5)
+
+    assert timed_out == []
+    assert [process.exitcode for process in procs] == [0] * num_procs
 
     # validate
-    client = tm.TinyMongoClient(db_dir)
-    coll = client.multiDB.multiCollection
-    all_docs = list(coll.find())
+    with tm.TinyMongoClient(db_dir) as client:
+        all_docs = list(client.multiDB.multiCollection.find())
     assert len(all_docs) == num_procs * per_proc
 
     # check uniqueness
