@@ -12,7 +12,7 @@ import threading
 from collections.abc import Mapping
 from contextlib import contextmanager
 from decimal import Decimal
-from functools import wraps
+from functools import lru_cache, wraps
 from urllib.parse import parse_qs, unquote, urlparse
 from typing import Optional
 
@@ -44,7 +44,9 @@ from .errors import (
 from .indexes import (
     INDEX_CATALOG_TABLE,
     IndexSpec,
+    document_matches_index,
     index_catalog_id,
+    index_entry_tokens,
     index_spec_signature,
     index_tokens,
     parse_index_spec,
@@ -690,6 +692,33 @@ def _sqlite_unique_token(data, field):
     )
 
 
+@lru_cache(maxsize=256)
+def _sqlite_index_spec(spec_json):
+    """Decode one catalog spec once per process for SQLite index UDFs."""
+    return IndexSpec.from_metadata(bson_json_loads(spec_json))
+
+
+def _sqlite_index_token(data, spec_json):
+    """Return the exact token set or SQL NULL for an advanced unique index.
+
+    The serialized tuple mirrors the established single-field SQLite
+    constraint. Python validation, held under TinyMongo's write lock, still
+    enforces overlapping multikey entries; the native value closes races for
+    identical token sets without rejecting otherwise valid flat arrays.
+    """
+    spec = _sqlite_index_spec(spec_json)
+    tokens = index_entry_tokens(_json_loads(data), spec)
+    if not tokens:
+        return None
+    return json.dumps(tokens, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sqlite_index_member(data, spec_json):
+    """Return whether a document belongs to a partial SQLite index."""
+    spec = _sqlite_index_spec(spec_json)
+    return int(document_matches_index(_json_loads(data), spec))
+
+
 def _simple_scalar_equality(filter_doc):
     """Return one SQL-safe equality pair, or ``None`` for richer filters."""
     if not isinstance(filter_doc, Mapping) or len(filter_doc) != 1:
@@ -756,36 +785,39 @@ def _reject_remote_unique_values(documents, specs):
         if not spec.unique:
             continue
         for document in documents:
-            value = _get_nested(document, spec.field)
-            if isinstance(value, (list, tuple)):
-                raise TinyMongoNotSupportedError(
-                    "Remote SQL unique index {0!r} does not support array values; "
-                    "cross-process multikey uniqueness cannot be guaranteed".format(
-                        spec.name
+            if not document_matches_index(document, spec):
+                continue
+            for field in spec.fields:
+                value = _get_nested(document, field)
+                if isinstance(value, (list, tuple)):
+                    raise TinyMongoNotSupportedError(
+                        "Remote SQL unique index {0!r} does not support array "
+                        "values; cross-process multikey uniqueness cannot be "
+                        "guaranteed".format(spec.name)
                     )
-                )
-            if _DECIMAL128 is not None and isinstance(value, _DECIMAL128):
-                raise TinyMongoNotSupportedError(
-                    "Remote SQL unique index {0!r} does not support Decimal128 "
-                    "values; TinyMongo cannot yet derive the same safe native "
-                    "token from Decimal128 BID data".format(spec.name)
-                )
-            identity = bson_identity_key(value)
-            if identity is not None and identity[0] in ("binary", "regex"):
-                raise TinyMongoNotSupportedError(
-                    "Remote SQL unique index {0!r} does not support UUID, "
-                    "Binary, or regular-expression values; its native token "
-                    "constraint cannot guarantee cross-process BSON identity".format(
-                        spec.name
+                if _DECIMAL128 is not None and isinstance(value, _DECIMAL128):
+                    raise TinyMongoNotSupportedError(
+                        "Remote SQL unique index {0!r} does not support Decimal128 "
+                        "values; TinyMongo cannot yet derive the same safe native "
+                        "token from Decimal128 BID data".format(spec.name)
                     )
-                )
+                identity = bson_identity_key(value)
+                if identity is not None and identity[0] in ("binary", "regex"):
+                    raise TinyMongoNotSupportedError(
+                        "Remote SQL unique index {0!r} does not support UUID, "
+                        "Binary, or regular-expression values; its native token "
+                        "constraint cannot guarantee cross-process BSON "
+                        "identity".format(spec.name)
+                    )
 
 
 def _remote_unique_token(document, spec):
     """Return one fixed-width exact BSON token for a remote unique index."""
 
     _reject_remote_unique_values([document], [spec])
-    tokens = index_tokens(document, spec.field)
+    tokens = index_entry_tokens(document, spec)
+    if not tokens:
+        return None
     if len(tokens) != 1:
         # Arrays are rejected above. Keep this guard explicit so a future
         # multikey expansion cannot silently weaken the one-column native
@@ -2068,7 +2100,9 @@ class TableBackend(object):
     def drop_index(self, collection, name_or_field):
         indexes = self._ephemeral_indexes.get(collection, {})
         for name, spec in list(indexes.items()):
-            if name_or_field in (name, spec.field):
+            if name_or_field == name or (
+                len(spec.keys) == 1 and name_or_field == spec.field
+            ):
                 indexes.pop(name, None)
                 return None
         raise OperationFailure(
@@ -2081,9 +2115,13 @@ class TableBackend(object):
         for spec in sorted(
             self.get_index_specs(collection), key=lambda item: item.name
         ):
-            metadata = {"name": spec.name, "key": [(spec.field, spec.direction)]}
+            metadata = {"name": spec.name, "key": list(spec.keys)}
             if spec.unique:
                 metadata["unique"] = True
+            if spec.sparse:
+                metadata["sparse"] = True
+            if spec.partial_filter is not None:
+                metadata["partialFilterExpression"] = copy.deepcopy(spec.partial_filter)
             indexes.append(metadata)
         return indexes
 
@@ -2123,6 +2161,18 @@ class SQLiteTableBackend(TableBackend):
             "tinymongo_unique_token",
             2,
             _sqlite_unique_token,
+            deterministic=True,
+        )
+        conn.create_function(
+            "tinymongo_index_token",
+            2,
+            _sqlite_index_token,
+            deterministic=True,
+        )
+        conn.create_function(
+            "tinymongo_index_member",
+            2,
+            _sqlite_index_member,
             deterministic=True,
         )
         conn.execute("PRAGMA busy_timeout=30000")
@@ -2193,6 +2243,7 @@ class SQLiteTableBackend(TableBackend):
             "collection_name TEXT NOT NULL, index_name TEXT NOT NULL, "
             "field_name TEXT NOT NULL, unique_flag INTEGER NOT NULL, "
             "token_version INTEGER NOT NULL DEFAULT {1}, "
+            "spec_json TEXT, "
             "PRIMARY KEY (collection_name, index_name))".format(
                 _quote_identifier(self.index_catalog_table),
                 _SQLITE_UNIQUE_TOKEN_VERSION,
@@ -2211,6 +2262,13 @@ class SQLiteTableBackend(TableBackend):
             conn.execute(
                 "ALTER TABLE {0} ADD COLUMN token_version INTEGER NOT NULL "
                 "DEFAULT 1".format(_quote_identifier(self.index_catalog_table))
+            )
+            migrated = True
+        if "spec_json" not in columns:
+            conn.execute(
+                "ALTER TABLE {0} ADD COLUMN spec_json TEXT".format(
+                    _quote_identifier(self.index_catalog_table)
+                )
             )
             migrated = True
 
@@ -2288,7 +2346,7 @@ class SQLiteTableBackend(TableBackend):
                 )
             ).fetchall()
         }
-        if "token_version" not in columns:
+        if "token_version" not in columns or "spec_json" not in columns:
             return "stale"
 
         stale = conn.execute(
@@ -2312,14 +2370,24 @@ class SQLiteTableBackend(TableBackend):
             with self._write_lock():
                 self._ensure_index_catalog(conn)
         rows = conn.execute(
-            "SELECT index_name, field_name, unique_flag FROM {0} "
+            "SELECT index_name, field_name, unique_flag, spec_json FROM {0} "
             "WHERE collection_name = ? ORDER BY index_name".format(
                 _quote_identifier(self.index_catalog_table)
             ),
             (collection,),
         ).fetchall()
         return [
-            IndexSpec(field=row[1], name=row[0], unique=bool(row[2])) for row in rows
+            (
+                IndexSpec.from_metadata(bson_json_loads(row[3]))
+                if row[3]
+                else IndexSpec(
+                    field=row[1],
+                    name=row[0],
+                    unique=bool(row[2]),
+                    metadata_version=1,
+                )
+            )
+            for row in rows
         ]
 
     def _get_query_index_specs_on_connection(self, conn, collection):
@@ -3215,6 +3283,38 @@ class SQLiteTableBackend(TableBackend):
     def _type_index_name(self, collection, spec):
         return self._physical_index_name(collection, spec) + "_types"
 
+    @staticmethod
+    def _sqlite_index_expressions(spec):
+        """Return ordered native JSON expressions for one declared index."""
+        return [
+            "json_extract(data, {0})".format(_sql_literal(_json_path(field)))
+            for field, _direction in spec.keys
+        ]
+
+    @staticmethod
+    def _sqlite_index_where(spec):
+        """Return exact native membership SQL for sparse or partial indexes."""
+        if spec.partial_filter is not None:
+            metadata = _sql_literal(bson_json_dumps(spec.to_metadata()))
+            return " WHERE tinymongo_index_member(data, {0}) = 1".format(metadata)
+        if spec.sparse:
+            members = [
+                "json_type(data, {0}) IS NOT NULL".format(
+                    _sql_literal(_json_path(field))
+                )
+                for field in spec.fields
+            ]
+            return " WHERE " + " OR ".join(members)
+        return ""
+
+    def _sqlite_constraint_expression(self, spec):
+        """Return the native expression enforcing one unique definition."""
+        if len(spec.keys) == 1 and not spec.sparse and spec.partial_filter is None:
+            return "tinymongo_unique_token(data, {0})".format(_sql_literal(spec.field))
+        return "tinymongo_index_token(data, {0})".format(
+            _sql_literal(bson_json_dumps(spec.to_metadata()))
+        )
+
     def _ensure_type_index_on_connection(self, conn, collection, spec):
         """Reconcile native scalar and array-candidate indexes for one spec."""
 
@@ -3227,7 +3327,6 @@ class SQLiteTableBackend(TableBackend):
             with self._sqlite_state_lock:
                 if key in self._ready_type_indexes:
                     return
-                path = _sql_literal(_json_path(spec.field))
                 table = _quote_identifier(collection)
                 physical_name = self._physical_index_name(collection, spec)
                 physical_exists = conn.execute(
@@ -3243,40 +3342,52 @@ class SQLiteTableBackend(TableBackend):
                     ]
                     validate_unique_documents(documents, [spec])
 
-                scalar_expression = "json_extract(data, {0})".format(path)
-                constraint_expression = scalar_expression
-                if spec.unique:
-                    constraint_expression = "tinymongo_unique_token(data, {0})".format(
-                        _sql_literal(spec.field)
-                    )
+                expressions = self._sqlite_index_expressions(spec)
+                lookup_expression = ", ".join(expressions)
+                constraint_expression = (
+                    self._sqlite_constraint_expression(spec)
+                    if spec.unique
+                    else lookup_expression
+                )
+                membership_where = self._sqlite_index_where(spec)
                 conn.execute(
                     "CREATE {unique}INDEX IF NOT EXISTS {name} ON {table} "
-                    "({expression})".format(
+                    "({expression}){where}".format(
                         unique="UNIQUE " if spec.unique else "",
                         name=_quote_identifier(physical_name),
                         table=table,
                         expression=constraint_expression,
+                        where=membership_where,
                     )
                 )
                 if spec.unique:
                     conn.execute(
                         "CREATE INDEX IF NOT EXISTS {name} ON {table} "
-                        "({expression})".format(
+                        "({expression}){where}".format(
                             name=_quote_identifier(physical_name + "_lookup"),
                             table=table,
-                            expression=scalar_expression,
+                            expression=lookup_expression,
+                            where=membership_where,
                         )
                     )
                 if "." not in spec.field:
-                    type_expression = "json_type(data, {0})".format(path)
+                    type_expression = "json_type(data, {0})".format(
+                        _sql_literal(_json_path(spec.field))
+                    )
+                    type_where = " WHERE {0} IN ('array', 'object')".format(
+                        type_expression
+                    )
+                    if membership_where:
+                        type_where += " AND ({0})".format(membership_where[7:])
                     conn.execute(
-                        "CREATE INDEX IF NOT EXISTS {name} ON {table} ({expression}) "
-                        "WHERE {expression} IN ('array', 'object')".format(
+                        "CREATE INDEX IF NOT EXISTS {name} ON {table} "
+                        "({expression}){where}".format(
                             name=_quote_identifier(
                                 self._type_index_name(collection, spec)
                             ),
                             table=table,
                             expression=type_expression,
+                            where=type_where,
                         )
                     )
                 conn.commit()
@@ -3475,7 +3586,13 @@ class SQLiteTableBackend(TableBackend):
 
         conjuncts = _positive_filter_conjuncts(filter_doc)
         specs = self._get_query_index_specs_on_connection(conn, collection)
-        by_field = {spec.field: spec for spec in specs}
+        by_field = {}
+        for spec in sorted(
+            specs,
+            key=lambda item: (item.partial_filter is not None, item.sparse),
+        ):
+            if spec.partial_filter is None:
+                by_field.setdefault(spec.field, spec)
         anchor = None
         for field, expected in conjuncts:
             if isinstance(field, str) and field != "_id" and "." not in field:
@@ -3588,7 +3705,7 @@ class SQLiteTableBackend(TableBackend):
                     for candidate in self._get_query_index_specs_on_connection(
                         conn, collection
                     )
-                    if candidate.field == field
+                    if candidate.field == field and candidate.partial_filter is None
                 ),
                 None,
             )
@@ -3876,7 +3993,11 @@ class SQLiteTableBackend(TableBackend):
         query_index_spec = None
         if equality is not None and "." not in equality[0]:
             query_index_spec = next(
-                (spec for spec in specs if spec.field == equality[0]),
+                (
+                    spec
+                    for spec in specs
+                    if spec.field == equality[0] and spec.partial_filter is None
+                ),
                 None,
             )
         table = _quote_identifier(collection)
@@ -4043,48 +4164,62 @@ class SQLiteTableBackend(TableBackend):
         if spec.unique:
             validate_unique_documents(self.find(collection, {}), [spec])
         name = self._physical_index_name(collection, spec)
-        path = _sql_literal(_json_path(spec.field))
-        expression = "json_extract(data, {0})".format(path)
-        if spec.unique:
-            expression = "tinymongo_unique_token(data, {0})".format(
-                _sql_literal(spec.field)
-            )
+        expressions = self._sqlite_index_expressions(spec)
+        lookup_expression = ", ".join(expressions)
+        expression = (
+            self._sqlite_constraint_expression(spec)
+            if spec.unique
+            else lookup_expression
+        )
+        membership_where = self._sqlite_index_where(spec)
         conn = self._connect()
         try:
             try:
                 self._ensure_index_catalog(conn)
                 conn.execute(
-                    "CREATE {0}INDEX IF NOT EXISTS {1} ON {2} ({3})".format(
-                        "UNIQUE " if spec.unique else "",
-                        _quote_identifier(name),
-                        _quote_identifier(collection),
-                        expression,
+                    "CREATE {unique}INDEX IF NOT EXISTS {name} ON {table} "
+                    "({expression}){where}".format(
+                        unique="UNIQUE " if spec.unique else "",
+                        name=_quote_identifier(name),
+                        table=_quote_identifier(collection),
+                        expression=expression,
+                        where=membership_where,
                     )
                 )
                 if spec.unique:
                     conn.execute(
-                        "CREATE INDEX IF NOT EXISTS {0} ON {1} "
-                        "(json_extract(data, {2}))".format(
-                            _quote_identifier(name + "_lookup"),
-                            _quote_identifier(collection),
-                            path,
+                        "CREATE INDEX IF NOT EXISTS {name} ON {table} "
+                        "({expression}){where}".format(
+                            name=_quote_identifier(name + "_lookup"),
+                            table=_quote_identifier(collection),
+                            expression=lookup_expression,
+                            where=membership_where,
                         )
                     )
                 if "." not in spec.field:
-                    type_expression = "json_type(data, {0})".format(path)
+                    type_expression = "json_type(data, {0})".format(
+                        _sql_literal(_json_path(spec.field))
+                    )
+                    type_where = " WHERE {0} IN ('array', 'object')".format(
+                        type_expression
+                    )
+                    if membership_where:
+                        type_where += " AND ({0})".format(membership_where[7:])
                     conn.execute(
-                        "CREATE INDEX IF NOT EXISTS {name} ON {table} ({expression}) "
-                        "WHERE {expression} IN ('array', 'object')".format(
+                        "CREATE INDEX IF NOT EXISTS {name} ON {table} "
+                        "({expression}){where}".format(
                             name=_quote_identifier(
                                 self._type_index_name(collection, spec)
                             ),
                             table=_quote_identifier(collection),
                             expression=type_expression,
+                            where=type_where,
                         )
                     )
                 conn.execute(
                     "INSERT INTO {0} (collection_name, index_name, field_name, "
-                    "unique_flag, token_version) VALUES (?, ?, ?, ?, ?)".format(
+                    "unique_flag, token_version, spec_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)".format(
                         _quote_identifier(self.index_catalog_table)
                     ),
                     (
@@ -4093,6 +4228,7 @@ class SQLiteTableBackend(TableBackend):
                         spec.field,
                         int(spec.unique),
                         _SQLITE_UNIQUE_TOKEN_VERSION,
+                        bson_json_dumps(spec.to_metadata()),
                     ),
                 )
                 conn.commit()
@@ -4111,7 +4247,8 @@ class SQLiteTableBackend(TableBackend):
             (
                 item
                 for item in self.get_index_specs(collection)
-                if name_or_field in (item.name, item.field)
+                if name_or_field == item.name
+                or (len(item.keys) == 1 and name_or_field == item.field)
             ),
             None,
         )
@@ -4190,7 +4327,13 @@ class DuckDBTableBackend(TableBackend):
             "CREATE TABLE IF NOT EXISTS {0} ("
             "collection_name VARCHAR NOT NULL, index_name VARCHAR NOT NULL, "
             "field_name VARCHAR NOT NULL, unique_flag BOOLEAN NOT NULL, "
+            "spec_json VARCHAR, "
             "PRIMARY KEY (collection_name, index_name))".format(
+                _quote_identifier(self.index_catalog_table)
+            )
+        )
+        conn.execute(
+            "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS spec_json VARCHAR".format(
                 _quote_identifier(self.index_catalog_table)
             )
         )
@@ -4200,14 +4343,23 @@ class DuckDBTableBackend(TableBackend):
         try:
             self._ensure_index_catalog(conn)
             rows = conn.execute(
-                "SELECT index_name, field_name, unique_flag FROM {0} "
+                "SELECT index_name, field_name, unique_flag, spec_json FROM {0} "
                 "WHERE collection_name = ? ORDER BY index_name".format(
                     _quote_identifier(self.index_catalog_table)
                 ),
                 (collection,),
             ).fetchall()
             return [
-                IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
+                (
+                    IndexSpec.from_metadata(bson_json_loads(row[3]))
+                    if row[3]
+                    else IndexSpec(
+                        field=row[1],
+                        name=row[0],
+                        unique=bool(row[2]),
+                        metadata_version=1,
+                    )
+                )
                 for row in rows
             ]
         finally:
@@ -4430,10 +4582,17 @@ class DuckDBTableBackend(TableBackend):
         try:
             self._ensure_index_catalog(conn)
             conn.execute(
-                "INSERT INTO {0} VALUES (?, ?, ?, ?)".format(
+                "INSERT INTO {0} (collection_name, index_name, field_name, "
+                "unique_flag, spec_json) VALUES (?, ?, ?, ?, ?)".format(
                     _quote_identifier(self.index_catalog_table)
                 ),
-                (collection, spec.name, spec.field, spec.unique),
+                (
+                    collection,
+                    spec.name,
+                    spec.field,
+                    spec.unique,
+                    bson_json_dumps(spec.to_metadata()),
+                ),
             )
         finally:
             conn.close()
@@ -4445,7 +4604,8 @@ class DuckDBTableBackend(TableBackend):
             (
                 item
                 for item in self.get_index_specs(collection)
-                if name_or_field in (item.name, item.field)
+                if name_or_field == item.name
+                or (len(item.keys) == 1 and name_or_field == item.field)
             ),
             None,
         )
@@ -4750,7 +4910,8 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
                 (
                     item
                     for item in self.get_index_specs(collection)
-                    if name_or_field in (item.name, item.field)
+                    if name_or_field == item.name
+                    or (len(item.keys) == 1 and name_or_field == item.field)
                 ),
                 None,
             )
@@ -4881,11 +5042,13 @@ class RemoteSQLTableBackend(TableBackend):
             "field_name VARCHAR(512) NOT NULL, "
             "unique_flag BOOLEAN NOT NULL, "
             "token_version INTEGER NOT NULL DEFAULT 0, "
+            "spec_json TEXT NULL, "
             "PRIMARY KEY (database_name, collection_name, index_name))".format(
                 self._quote(self.index_catalog_table)
             ),
         )
         self._ensure_index_catalog_token_version(conn)
+        self._ensure_index_catalog_spec_json(conn)
         self._commit(conn)
 
     def _ensure_index_catalog_token_version(self, conn):
@@ -4908,7 +5071,7 @@ class RemoteSQLTableBackend(TableBackend):
     def _index_specs_on_connection(self, conn, collection):
         cursor = self._execute(
             conn,
-            "SELECT index_name, field_name, unique_flag FROM {0} "
+            "SELECT index_name, field_name, unique_flag, spec_json FROM {0} "
             "WHERE database_name = {1} AND collection_name = {1} "
             "ORDER BY index_name".format(
                 self._quote(self.index_catalog_table), self.placeholder
@@ -4917,7 +5080,16 @@ class RemoteSQLTableBackend(TableBackend):
         )
         try:
             return [
-                IndexSpec(field=row[1], name=row[0], unique=bool(row[2]))
+                (
+                    IndexSpec.from_metadata(bson_json_loads(row[3]))
+                    if row[3]
+                    else IndexSpec(
+                        field=row[1],
+                        name=row[0],
+                        unique=bool(row[2]),
+                        metadata_version=1,
+                    )
+                )
                 for row in cursor.fetchall()
             ]
         finally:
@@ -5038,7 +5210,8 @@ class RemoteSQLTableBackend(TableBackend):
                     for stored_id, document in stored_documents
                 ],
             )
-        self._set_unique_token_not_null(conn, collection, spec)
+        if not spec.sparse and spec.partial_filter is None:
+            self._set_unique_token_not_null(conn, collection, spec)
 
     def _migrate_legacy_unique_indexes(self, conn, collection):
         # The overwhelmingly common path must not take a table/advisory lock.
@@ -5173,6 +5346,27 @@ class RemoteSQLTableBackend(TableBackend):
             conn,
             "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS data_ordered {1} NULL".format(
                 table, self.ordered_data_type
+            ),
+        )
+
+    def _ensure_index_catalog_spec_json(self, conn):
+        cursor = self._execute(
+            conn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = {0} "
+            "AND column_name = 'spec_json' LIMIT 1".format(self.placeholder),
+            (self.index_catalog_table,),
+        )
+        try:
+            exists = cursor.fetchone() is not None
+        finally:
+            self._close_cursor(cursor)
+        if exists:
+            return
+        self._execute(
+            conn,
+            "ALTER TABLE {0} ADD COLUMN IF NOT EXISTS spec_json TEXT NULL".format(
+                self._quote(self.index_catalog_table)
             ),
         )
 
@@ -5486,8 +5680,8 @@ class RemoteSQLTableBackend(TableBackend):
                         conn,
                         "INSERT INTO {0} "
                         "(database_name, collection_name, index_name, field_name, "
-                        "unique_flag, token_version) "
-                        "VALUES ({1}, {1}, {1}, {1}, {1}, {1})".format(
+                        "unique_flag, token_version, spec_json) "
+                        "VALUES ({1}, {1}, {1}, {1}, {1}, {1}, {1})".format(
                             self._quote(self.index_catalog_table), self.placeholder
                         ),
                         (
@@ -5497,6 +5691,7 @@ class RemoteSQLTableBackend(TableBackend):
                             spec.field,
                             spec.unique,
                             _REMOTE_UNIQUE_TOKEN_VERSION if spec.unique else 0,
+                            bson_json_dumps(spec.to_metadata()),
                         ),
                     )
                     self._commit(conn)
@@ -5524,7 +5719,8 @@ class RemoteSQLTableBackend(TableBackend):
             (
                 item
                 for item in self.get_index_specs(collection)
-                if name_or_field in (item.name, item.field)
+                if name_or_field == item.name
+                or (len(item.keys) == 1 and name_or_field == item.field)
             ),
             None,
         )
@@ -5665,10 +5861,14 @@ class PostgresTableBackend(RemoteSQLTableBackend):
         if spec.unique:
             expression = self._quote(self._unique_token_column(collection, spec))
         else:
-            path = ", ".join(_sql_literal(part) for part in spec.field.split("."))
-            expression = (
-                "(COALESCE(jsonb_extract_path(data, {0}), 'null'::jsonb))".format(path)
-            )
+            expressions = []
+            for field, _direction in spec.keys:
+                path = ", ".join(_sql_literal(part) for part in field.split("."))
+                expressions.append(
+                    "(COALESCE(jsonb_extract_path(data, {0}), "
+                    "'null'::jsonb))".format(path)
+                )
+            expression = ", ".join(expressions)
         self._execute(
             conn,
             "CREATE {0}INDEX {1} ON {2} ({3})".format(
@@ -5854,8 +6054,31 @@ class MySQLTableBackend(RemoteSQLTableBackend):
             if code != 1060 and "duplicate column" not in str(exc).lower():
                 raise
 
+    def _ensure_index_catalog_spec_json(self, conn):
+        if self._mysql_column_exists(conn, self.index_catalog_table, "spec_json"):
+            return
+        try:
+            self._execute(
+                conn,
+                "ALTER TABLE {0} ADD COLUMN spec_json LONGTEXT NULL".format(
+                    self._quote(self.index_catalog_table)
+                ),
+            )
+        except Exception as exc:
+            code = exc.args[0] if getattr(exc, "args", ()) else None
+            if code != 1060 and "duplicate column" not in str(exc).lower():
+                raise
+
     def _generated_index_column(self, collection, spec):
         return self._physical_index_name(collection, spec).replace("_idx_", "_key_")
+
+    def _generated_index_columns(self, collection, spec):
+        """Return one deterministic generated column per compound key part."""
+        base = self._generated_index_column(collection, spec)
+        return tuple(
+            base if position == 0 else "{0}_{1}".format(base, position)
+            for position, _pair in enumerate(spec.keys)
+        )
 
     def _add_unique_token_column(self, conn, collection, spec):
         table_name = self._table_name(collection)
@@ -5937,41 +6160,44 @@ class MySQLTableBackend(RemoteSQLTableBackend):
                 ),
             )
             return
-        json_path = "$" + "".join(
-            "." + json.dumps(part, ensure_ascii=False) for part in spec.field.split(".")
-        )
-        value = "JSON_EXTRACT(data, {0})".format(_sql_literal(json_path))
-        value_type = "JSON_TYPE({0})".format(value)
-        token_expression = (
-            "CASE "
-            "WHEN {value} IS NULL OR {value_type} = 'NULL' THEN 'null:' "
-            "WHEN {value_type} = 'BOOLEAN' "
-            "THEN CONCAT('bool:', JSON_UNQUOTE({value})) "
-            "WHEN {value_type} IN ('INTEGER', 'DOUBLE', 'DECIMAL') "
-            "THEN CONCAT('number:', CAST(CAST(JSON_UNQUOTE({value}) "
-            "AS DECIMAL(65, 30)) AS CHAR)) "
-            "WHEN {value_type} = 'STRING' "
-            "THEN CONCAT('string:', CAST({value} AS CHAR)) "
-            "ELSE CONCAT('json:', CAST({value} AS CHAR)) END"
-        ).format(value=value, value_type=value_type)
-        expression = "SHA2({0}, 256)".format(token_expression)
-        # The typed scalar token mirrors Python uniqueness checks. Arrays remain
-        # whole JSON values here, so native race protection is scalar-only.
         table = self._quote(self._table_name(collection))
-        column = self._quote(self._generated_index_column(collection, spec))
-        self._execute(
-            conn,
-            "ALTER TABLE {0} ADD COLUMN {1} CHAR(64) "
-            "CHARACTER SET ascii COLLATE ascii_bin "
-            "GENERATED ALWAYS AS ({2}) STORED".format(table, column, expression),
-        )
+        generated_columns = self._generated_index_columns(collection, spec)
+        for (field, _direction), generated in zip(spec.keys, generated_columns):
+            json_path = "$" + "".join(
+                "." + json.dumps(part, ensure_ascii=False) for part in field.split(".")
+            )
+            value = "JSON_EXTRACT(data, {0})".format(_sql_literal(json_path))
+            value_type = "JSON_TYPE({0})".format(value)
+            token_expression = (
+                "CASE "
+                "WHEN {value} IS NULL OR {value_type} = 'NULL' THEN 'null:' "
+                "WHEN {value_type} = 'BOOLEAN' "
+                "THEN CONCAT('bool:', JSON_UNQUOTE({value})) "
+                "WHEN {value_type} IN ('INTEGER', 'DOUBLE', 'DECIMAL') "
+                "THEN CONCAT('number:', CAST(CAST(JSON_UNQUOTE({value}) "
+                "AS DECIMAL(65, 30)) AS CHAR)) "
+                "WHEN {value_type} = 'STRING' "
+                "THEN CONCAT('string:', CAST({value} AS CHAR)) "
+                "ELSE CONCAT('json:', CAST({value} AS CHAR)) END"
+            ).format(value=value, value_type=value_type)
+            expression = "SHA2({0}, 256)".format(token_expression)
+            self._execute(
+                conn,
+                "ALTER TABLE {0} ADD COLUMN {1} CHAR(64) "
+                "CHARACTER SET ascii COLLATE ascii_bin "
+                "GENERATED ALWAYS AS ({2}) STORED".format(
+                    table,
+                    self._quote(generated),
+                    expression,
+                ),
+            )
         self._execute(
             conn,
             "CREATE {0}INDEX {1} ON {2} ({3})".format(
                 "UNIQUE " if spec.unique else "",
                 self._quote(self._physical_index_name(collection, spec)),
                 table,
-                column,
+                ", ".join(self._quote(column) for column in generated_columns),
             ),
         )
 
@@ -5987,23 +6213,35 @@ class MySQLTableBackend(RemoteSQLTableBackend):
         if spec.unique:
             self._drop_unique_token_column(conn, collection, spec)
             return
-        generated = self._generated_index_column(collection, spec)
-        if self._mysql_column_exists(conn, table_name, generated):
+        generated = [
+            column
+            for column in self._generated_index_columns(collection, spec)
+            if self._mysql_column_exists(conn, table_name, column)
+        ]
+        if generated:
             self._execute(
                 conn,
-                "ALTER TABLE {0} DROP COLUMN {1}".format(table, self._quote(generated)),
+                "ALTER TABLE {0} {1}".format(
+                    table,
+                    ", ".join(
+                        "DROP COLUMN {0}".format(self._quote(column))
+                        for column in generated
+                    ),
+                ),
             )
 
     def _drop_legacy_native_index(self, conn, collection, spec):
         table_name = self._table_name(collection)
         physical_name = self._physical_index_name(collection, spec)
         table = self._quote(table_name)
-        generated = self._generated_index_column(collection, spec)
         clauses = []
         if self._mysql_index_exists(conn, table_name, physical_name):
             clauses.append("DROP INDEX {0}".format(self._quote(physical_name)))
-        if self._mysql_column_exists(conn, table_name, generated):
-            clauses.append("DROP COLUMN {0}".format(self._quote(generated)))
+        clauses.extend(
+            "DROP COLUMN {0}".format(self._quote(generated))
+            for generated in self._generated_index_columns(collection, spec)
+            if self._mysql_column_exists(conn, table_name, generated)
+        )
         if clauses:
             self._execute(conn, "ALTER TABLE {0} {1}".format(table, ", ".join(clauses)))
 

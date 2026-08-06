@@ -73,6 +73,7 @@ from .indexes import (
     degraded_index_reuse_warning,
     emit_index_plan_warnings,
     index_catalog_id,
+    index_entry_tokens,
     index_spec_signature,
     index_tokens,
     parse_index_spec,
@@ -244,23 +245,24 @@ def _duplicate_write_error(
     operation=_MISSING,
 ):
     """Describe one duplicate insert using PyMongo's bulk error shape."""
-    field = "_id" if spec is None else spec.field
     index_name = "_id_" if spec is None else spec.name
-    value = _get_nested(document, field)
-    if value is _MISSING:
-        value = None
+    keys = (("_id", 1),) if spec is None else spec.keys
+    values = {}
+    for field, _direction in keys:
+        value = _get_nested(document, field)
+        values[field] = None if value is _MISSING else value
+    pattern = dict(keys)
     message = (
-        "E11000 duplicate key error collection: {0} index: {1} "
-        "dup key: {{ {2}: {3!r} }}"
-    ).format(collection.full_name, index_name, field, value)
+        "E11000 duplicate key error collection: {0} index: {1} " "dup key: {2!r}"
+    ).format(collection.full_name, index_name, values)
     if error is not None and str(error):
         message = "{0}: {1}".format(message, error)
     return {
         "index": index,
         "code": 11000,
         "errmsg": message,
-        "keyPattern": {field: 1 if spec is None else spec.direction},
-        "keyValue": {field: value},
+        "keyPattern": pattern,
+        "keyValue": values,
         "op": document if operation is _MISSING else operation,
     }
 
@@ -297,7 +299,14 @@ def _unique_insert_state(existing_documents, specs):
         owners = {}
         existing_error = None
         for document in existing_documents:
-            for token in index_tokens(document, spec.field):
+            tokens = (
+                index_tokens(document, spec.field)
+                if len(spec.keys) == 1
+                and not spec.sparse
+                and spec.partial_filter is None
+                else index_entry_tokens(document, spec)
+            )
+            for token in tokens:
                 if token in owners and existing_error is None:
                     # A valid index cannot normally begin in this state.  If a
                     # legacy or custom backend does, preserve the exact error
@@ -361,7 +370,13 @@ def _plan_insert_many(
         else:
             candidate_tokens = []
             for spec, owners, existing_error in unique_states:
-                tokens = index_tokens(document, spec.field)
+                tokens = (
+                    index_tokens(document, spec.field)
+                    if len(spec.keys) == 1
+                    and not spec.sparse
+                    and spec.partial_filter is None
+                    else index_entry_tokens(document, spec)
+                )
                 candidate_tokens.append((owners, tokens))
                 owner = next(
                     (owners[token] for token in tokens if token in owners), None
@@ -2347,7 +2362,9 @@ class TinyMongoCollection(object):
 
     def _find_index_spec(self, name_or_field):
         for spec in self._index_specs.values():
-            if name_or_field in (spec.name, spec.field):
+            if name_or_field == spec.name or (
+                len(spec.keys) == 1 and name_or_field == spec.field
+            ):
                 return spec
         return None
 
@@ -2398,13 +2415,13 @@ class TinyMongoCollection(object):
 
     @_engine_write_locked
     def create_index(self, key, *args, **kwargs):
-        """Create a durable single-field ascending equality index."""
+        """Create a durable ascending equality index."""
         if args:
             raise TinyMongoNotSupportedError(
-                "Only single-field ascending equality indexes are supported"
+                "Positional create_index options are not supported"
             )
         spec = parse_index_spec(key, **kwargs)
-        if spec.field == "_id":
+        if len(spec.keys) == 1 and spec.field == "_id":
             if "unique" in kwargs:
                 raise OperationFailure(
                     "The unique option is not valid for the built-in _id index",
@@ -2452,9 +2469,9 @@ class TinyMongoCollection(object):
 
     def _create_indexes_locked(self, batch):
         """Plan and create a validated batch while holding its storage lock."""
-        effective = {
-            index_spec_signature(spec): spec for spec in self._current_index_specs()
-        }
+        current_specs = tuple(self._current_index_specs())
+        effective = {index_spec_signature(spec): spec for spec in current_specs}
+        by_name = {spec.name: spec for spec in current_specs}
         resolved_entries = []
         names = []
         for entry in batch:
@@ -2463,6 +2480,23 @@ class TinyMongoCollection(object):
                 names.append(entry.name)
                 continue
             signature = index_spec_signature(entry.spec)
+            named = by_name.get(entry.spec.name)
+            if (
+                named is not None
+                and named.metadata_version == 1
+                and not named.unique
+                and not entry.spec.unique
+                and entry.spec.partial_filter is None
+                and (len(entry.spec.keys) > 1 or entry.spec.sparse)
+                and named.keys == (entry.spec.keys[0],)
+            ):
+                # Older TinyMongo releases persisted degraded compound and
+                # sparse declarations as ordinary leading-field indexes. A
+                # matching retry from the original IndexModel is enough to
+                # promote that legacy metadata and native index safely.
+                self.drop_index(named.name)
+                effective.pop(index_spec_signature(named), None)
+                by_name.pop(named.name, None)
             existing = effective.get(signature)
             if (
                 existing is not None
@@ -2480,8 +2514,13 @@ class TinyMongoCollection(object):
             options = {"name": entry.spec.name}
             if entry.spec.unique:
                 options["unique"] = True
-            name = self.create_index([(entry.spec.field, ASCENDING)], **options)
+            if entry.spec.sparse:
+                options["sparse"] = True
+            if entry.spec.partial_filter is not None:
+                options["partialFilterExpression"] = entry.spec.partial_filter
+            name = self.create_index(list(entry.spec.keys), **options)
             effective[signature] = replace(entry.spec, name=name)
+            by_name[name] = effective[signature]
             resolved_entries.append(entry)
             names.append(name)
         emit_index_plan_warnings(
@@ -2539,9 +2578,15 @@ class TinyMongoCollection(object):
             self._refresh_table()
             indexes = [{"name": "_id_", "key": [("_id", 1)]}]
             for spec in sorted(self._index_specs.values(), key=lambda item: item.name):
-                metadata = {"name": spec.name, "key": [(spec.field, spec.direction)]}
+                metadata = {"name": spec.name, "key": list(spec.keys)}
                 if spec.unique:
                     metadata["unique"] = True
+                if spec.sparse:
+                    metadata["sparse"] = True
+                if spec.partial_filter is not None:
+                    metadata["partialFilterExpression"] = copy.deepcopy(
+                        spec.partial_filter
+                    )
                 indexes.append(metadata)
             return indexes
         finally:

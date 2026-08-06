@@ -430,9 +430,11 @@ Exit criteria:
   - [x] Retain MongoEngine's and Beanie's native ObjectId primary-key behavior;
     document `generate_id()` as an explicit string-ID choice rather than a
     required workaround.
-  - [ ] Implement integrity-preserving compound, sparse, and partial unique
-    indexes across durable catalogs and supported backends. Keep unsupported
-    combinations fail-closed until their full semantics can be enforced.
+  - [x] Implement integrity-preserving ascending compound, sparse, and partial
+    unique indexes across durable catalogs and supported backends. Preserve
+    ordered keys and membership options across restarts, use native constraints
+    where available, and keep remote multikey values and other unsupported
+    unique combinations fail-closed.
 - [ ] [#81: MongoDB document and key validation](https://github.com/schapman1974/tinymongo/issues/81)
   - [ ] Encode and catalog local database and Parquet collection filenames so
     logical names stay beneath the storage root and remain portable and

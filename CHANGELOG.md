@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Ascending compound, sparse, and partial indexes now preserve their complete
+  definitions across durable backends and enforce matching unique-key
+  membership. Embedded compound indexes support one flat multikey field,
+  parallel arrays fail atomically, and remote SQL keeps unsupported multikey
+  unique values fail-closed.
 - Beanie 2.1 can initialize through the async client without application
   shims. TinyMongo now answers the discovery-safe `ping` and `buildInfo`
   database commands, accepts Beanie's `authorizedCollections` and `nameOnly`

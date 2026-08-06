@@ -36,6 +36,7 @@ from tinymongo.table_backends import (
     _join_uri,
     _reject_remote_unique_values,
     _remote_unique_token,
+    _sqlite_index_token,
     _REMOTE_UNIQUE_TOKEN_VERSION,
     _SQLITE_UNIQUE_TOKEN_VERSION,
     matches_filter,
@@ -142,6 +143,7 @@ class FakeRemoteCursor:
                         "field_name",
                         "unique_flag",
                         "token_version",
+                        "spec_json",
                     },
                 )
             elif "TINYMONGO_COLLECTIONS" in table.upper():
@@ -190,11 +192,18 @@ class FakeRemoteCursor:
             }
             self.store.index_ddl.append(normalized)
         elif upper.startswith("INSERT") and "TINYMONGO_INDEXES" in upper:
-            database, collection, name, field, unique, token_version = params
+            if len(params) == 7:
+                database, collection, name, field, unique, token_version, spec_json = (
+                    params
+                )
+            else:
+                database, collection, name, field, unique, token_version = params
+                spec_json = None
             self.store.indexes[(database, collection, name)] = (
                 field,
                 bool(unique),
                 token_version,
+                spec_json,
             )
         elif upper.startswith("INSERT") and "TINYMONGO_COLLECTIONS" in upper:
             self.store.metadata.add(tuple(params))
@@ -202,6 +211,8 @@ class FakeRemoteCursor:
             table = params[0]
             if "COLUMN_NAME = 'TOKEN_VERSION'" in upper:
                 column = "token_version"
+            elif "COLUMN_NAME = 'SPEC_JSON'" in upper:
+                column = "spec_json"
             else:
                 column = params[1] if len(params) > 1 else "data_ordered"
             self.rows = [(1,)] if column in self.store.columns.get(table, set()) else []
@@ -229,7 +240,16 @@ class FakeRemoteCursor:
                 )
             else:
                 self.rows = sorted(
-                    (name, value[0], value[1])
+                    (
+                        (
+                            name,
+                            value[0],
+                            value[1],
+                            value[3] if len(value) > 3 else None,
+                        )
+                        if "SPEC_JSON" in upper
+                        else (name, value[0], value[1])
+                    )
                     for (index_database, index_collection, name), value in (
                         self.store.indexes.items()
                     )
@@ -313,7 +333,12 @@ class FakeRemoteCursor:
             token_version, database, collection, name = params
             key = (database, collection, name)
             value = self.store.indexes[key]
-            self.store.indexes[key] = (value[0], value[1], token_version)
+            self.store.indexes[key] = (
+                value[0],
+                value[1],
+                token_version,
+                value[3] if len(value) > 3 else None,
+            )
         elif upper.startswith("UPDATE"):
             table = self._table_after(normalized, "UPDATE")
             if len(params) >= 3:
@@ -442,6 +467,7 @@ class FakeRemoteCursor:
                 other_table == table
                 and other_column == column
                 and other_id != doc_id
+                and token is not None
                 and other_token == token
             ):
                 raise RuntimeError("duplicate key")
@@ -1004,6 +1030,75 @@ def test_sqlite_public_index_lookup_unions_scalar_and_array_matches(
         conn.close()
     assert any(backend._physical_index_name("people", spec) in row[-1] for row in plan)
     client.close()
+
+
+def test_sqlite_sparse_unique_index_allows_missing_values_and_filters_type_index(
+    tmp_path,
+):
+    path = str(tmp_path / "sparse-index.sqlite")
+    backend = SQLiteTableBackend(path)
+    spec = parse_index_spec("tag", unique=True, sparse=True, name="sparse_tag")
+    assert (
+        _sqlite_index_token(
+            _json_dumps({"_id": "missing"}),
+            _json_dumps(spec.to_metadata()),
+        )
+        is None
+    )
+    backend.create_index("items", spec)
+
+    backend.insert_many(
+        "items",
+        [
+            {"_id": 1},
+            {"_id": 2},
+            {"_id": 3, "tag": "alpha"},
+            {"_id": 4, "tag": ["beta", "gamma"]},
+        ],
+    )
+
+    assert backend.find("items", {"tag": "beta"}) == [
+        {"_id": 4, "tag": ["beta", "gamma"]}
+    ]
+    conn = sqlite3.connect(path)
+    try:
+        type_index_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (backend._type_index_name("items", spec),),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "IN ('array', 'object')" in type_index_sql
+    assert "IS NOT NULL" in type_index_sql
+
+
+def test_sqlite_complex_planner_does_not_use_partial_index_for_broader_query(
+    tmp_path,
+):
+    backend = SQLiteTableBackend(str(tmp_path / "partial-planner.sqlite"))
+    backend.insert_many(
+        "items",
+        [
+            {"_id": 1, "category": "news", "active": True, "score": 2},
+            {"_id": 2, "category": "news", "active": False, "score": 4},
+        ],
+    )
+    backend.create_index(
+        "items",
+        parse_index_spec(
+            "category",
+            name="active_category",
+            partialFilterExpression={"active": True},
+        ),
+    )
+    query = {"category": "news", "score": {"$mod": [2, 0]}}
+
+    conn = backend._connect()
+    try:
+        assert backend._sqlite_complex_candidate_query(conn, "items", query) is None
+    finally:
+        conn.close()
+    assert [document["_id"] for document in backend.find("items", query)] == [1, 2]
 
 
 def test_sqlite_maps_native_replace_and_index_integrity_errors(tmp_path, monkeypatch):
@@ -1671,6 +1766,30 @@ def test_mysql_uses_materialized_unique_token_and_rejects_multikey_unique(
         backend.create_index("numbers", parse_index_spec("value", unique=True))
 
 
+def test_mysql_materializes_every_compound_index_component(monkeypatch):
+    store = FakeRemoteStore()
+    backend = _mysql_backend(monkeypatch, store)
+    spec = parse_index_spec(
+        [("tenant", 1), ("email", 1)],
+        name="tenant_email",
+    )
+
+    backend.create_index("users", spec)
+
+    table = backend._table_name("users")
+    columns = backend._generated_index_columns("users", spec)
+    assert len(columns) == 2
+    assert set(columns).issubset(store.columns[table])
+    assert any(
+        sql.startswith("CREATE INDEX")
+        and all("`{0}`".format(column) in sql for column in columns)
+        for sql in store.index_ddl
+    )
+
+    backend.drop_index("users", "tenant_email")
+    assert not set(columns).intersection(store.columns[table])
+
+
 @pytest.mark.parametrize(
     ("left", "right", "same_token"),
     [
@@ -1699,11 +1818,49 @@ def test_remote_unique_tokens_preserve_exact_bson_numeric_identity(
 def test_remote_unique_token_rejects_future_multitoken_expansion(monkeypatch):
     spec = parse_index_spec("value", unique=True)
     monkeypatch.setattr(
-        "tinymongo.table_backends.index_tokens", lambda _document, _field: ["a", "b"]
+        "tinymongo.table_backends.index_entry_tokens",
+        lambda _document, _spec: ["a", "b"],
     )
 
     with pytest.raises(TinyMongoNotSupportedError, match="exactly one scalar token"):
         _remote_unique_token({"value": "scalar"}, spec)
+
+
+@pytest.mark.parametrize(
+    ("spec", "document"),
+    [
+        (parse_index_spec("value", unique=True, sparse=True), {"_id": 1}),
+        (
+            parse_index_spec(
+                "value",
+                unique=True,
+                partialFilterExpression={"active": True},
+            ),
+            {"_id": 1, "active": False, "value": ["unsafe-if-indexed"]},
+        ),
+    ],
+)
+def test_remote_unique_tokens_omit_documents_outside_index_membership(spec, document):
+    assert _remote_unique_token(document, spec) is None
+
+
+def test_remote_sparse_unique_index_leaves_token_nullable(monkeypatch):
+    store = FakeRemoteStore()
+    backend = _postgres_backend(monkeypatch, store)
+    backend.insert_many("items", [{"_id": 1}, {"_id": 2}])
+
+    backend.create_index(
+        "items",
+        parse_index_spec("value", unique=True, sparse=True, name="sparse_value"),
+    )
+
+    assert backend.list_indexes("items")[-1] == {
+        "name": "sparse_value",
+        "key": [("value", 1)],
+        "unique": True,
+        "sparse": True,
+    }
+    assert not any("SET NOT NULL" in sql for sql in store.index_ddl)
 
 
 def test_remote_base_schema_hooks_and_migration_errors(monkeypatch):
@@ -1895,6 +2052,7 @@ def test_mysql_token_schema_defensive_branches(monkeypatch):
 
     monkeypatch.setattr(backend, "_execute", duplicate_column)
     backend._ensure_index_catalog_token_version(conn)
+    backend._ensure_index_catalog_spec_json(conn)
     backend._add_unique_token_column(conn, "items", spec)
 
     def bad_column(*_args):
@@ -1903,6 +2061,8 @@ def test_mysql_token_schema_defensive_branches(monkeypatch):
     monkeypatch.setattr(backend, "_execute", bad_column)
     with pytest.raises(RuntimeError, match="bad alter"):
         backend._ensure_index_catalog_token_version(conn)
+    with pytest.raises(RuntimeError, match="bad alter"):
+        backend._ensure_index_catalog_spec_json(conn)
     with pytest.raises(RuntimeError, match="bad alter"):
         backend._add_unique_token_column(conn, "items", spec)
 

@@ -308,7 +308,7 @@ def test_cli_export_import_preserves_embedded_document_field_order(tmp_path):
     restored_client.close()
 
 
-def test_copy_indexes_preserves_names_keys_and_uniqueness():
+def test_copy_indexes_preserves_names_keys_and_supported_options():
     class Source:
         def list_indexes(self):
             return [
@@ -317,8 +317,13 @@ def test_copy_indexes_preserves_names_keys_and_uniqueness():
                     "name": "email_unique",
                     "key": [("email", 1)],
                     "unique": True,
+                    "sparse": True,
                 },
-                {"name": "created_desc", "key": [("created", -1)]},
+                {
+                    "name": "created_desc",
+                    "key": [("created", -1)],
+                    "partialFilterExpression": {"archived": False},
+                },
             ]
 
     class Target:
@@ -334,9 +339,15 @@ def test_copy_indexes_preserves_names_keys_and_uniqueness():
     assert target.created == [
         (
             [("email", 1)],
-            {"name": "email_unique", "unique": True},
+            {"name": "email_unique", "unique": True, "sparse": True},
         ),
-        ([("created", -1)], {"name": "created_desc"}),
+        (
+            [("created", -1)],
+            {
+                "name": "created_desc",
+                "partialFilterExpression": {"archived": False},
+            },
+        ),
     ]
 
 

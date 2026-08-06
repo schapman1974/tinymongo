@@ -254,8 +254,8 @@ def test_unsupported_features_fail_loudly(tmp_path):
     with pytest.raises(TinyMongoNotSupportedError, match=r"\$lookup"):
         collection.aggregate([{"$lookup": {}}])
 
-    with pytest.raises(TinyMongoNotSupportedError, match="single-field"):
-        collection.create_index([("email", 1), ("name", 1)])
+    with pytest.raises(TinyMongoNotSupportedError, match="ascending"):
+        collection.create_index([("email", -1)])
     with pytest.raises(TinyMongoNotSupportedError, match="concerns"):
         collection.with_options(type("Concern", (), {"document": {"w": 2}})())
 

@@ -310,15 +310,11 @@ def test_create_indexes_accepts_the_real_mixed_batch_and_enforces_unique(
     else:
         with pytest.warns(TinyMongoUnsupportedWarning) as captured:
             created = collection.create_indexes(models)
-        assert len(captured) == 5
+        assert len(captured) == 4
         warning_messages = [str(item.message) for item in captured]
         assert any("newest_show" in message for message in warning_messages)
         assert any("published_show_priority" in message for message in warning_messages)
-        assert any(
-            "existing index 'is_published'" in message for message in warning_messages
-        )
         assert any("api_key_lookup" in message for message in warning_messages)
-        assert any("optional_slug" in message for message in warning_messages)
         assert any("expire_geo_lookup" in message for message in warning_messages)
     collection.insert_one({"_id": 1, "email": "mike@example.com"})
     duplicate = observe(
@@ -332,9 +328,8 @@ def test_create_indexes_accepts_the_real_mixed_batch_and_enforces_unique(
         "optional_slug",
         "email_unique",
         "expire_geo_lookup",
+        "published_show_priority",
     }
-    if contract_target.name == "mongodb":
-        expected_created.add("published_show_priority")
     assert set(created) == expected_created
     assert duplicate.error == "duplicate_key"
 
