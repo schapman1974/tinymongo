@@ -39,10 +39,10 @@ def _exercise_sync(root, backend):
         assert collection.find_one({"_id": 7})["group"] == "g1"
 
 
-async def _exercise_async(root):
+async def _exercise_async(root, backend):
     async with tm.AsyncTinyMongoClient(
-        root / "async sqlite",
-        backend="sqlite",
+        root / "async {0}".format(backend),
+        backend=backend,
     ) as client:
         collection = client.platform.records
         await collection.insert_many(
@@ -102,11 +102,13 @@ def main(argv=None):
         root = Path(temp_dir)
         _exercise_sync(root, "tinydb")
         _exercise_sync(root, "sqlite")
+        _exercise_sync(root, "sqlite-sharded")
         if "duckdb" in extras:
             _exercise_sync(root, "duckdb")
         if "parquet" in extras:
             _exercise_sync(root, "parquet")
-        asyncio.run(_exercise_async(root))
+        asyncio.run(_exercise_async(root, "sqlite"))
+        asyncio.run(_exercise_async(root, "sqlite-sharded"))
 
     print(
         "TinyMongo {0} passed on Python {1} ({2}, {3}); imported from {4}".format(

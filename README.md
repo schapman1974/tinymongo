@@ -208,7 +208,8 @@ You can select another backend with the `backend` argument:
 `foldername` is also supplied, the two values must agree. Unknown constructor
 keywords raise `TypeError` instead of being silently ignored. The other
 supported backend configuration keywords are `threads`, `storage_uri`,
-`duckdb_config`, and `dsn`.
+`sqlite_shards`, `duckdb_config`, and `dsn`. `sqlite_shards` applies only to
+new `sqlite-sharded` databases; the persisted count must match when reopening.
 
 The PyMongo-shaped `MongoClient` and `AsyncMongoClient` accept the installed
 PyMongo version's recognized connection kwargs for drop-in use and ignore their
@@ -241,6 +242,7 @@ Available backends:
 - `memory`: Process-local storage that creates no database or lock files. Each unnamed client is isolated; a `memory://NAME` URI explicitly shares a named namespace within one process.
 - `tinydb` or `json`: TinyDB-compatible JSON storage. This is the default and writes `.json` files.
 - `sqlite`: Table-native SQLite storage using one SQL table per collection. This writes `.sqlite` files.
+- `sqlite-sharded`: Experimental table-native SQLite storage that stripes one logical database across multiple WAL-enabled SQLite files for concurrent writers.
 - `duckdb`: Table-native DuckDB storage using one DuckDB table per collection. This writes `.duckdb` files.
 - `parquet` or `parquetv2`: DuckDB-managed Parquet dataset storage using one Parquet file per collection inside a `.parquet` directory.
 - `postgres` or `postgresql`: Remote PostgreSQL storage using one SQL table per database collection.
@@ -296,6 +298,7 @@ from multiple threads.
 | `memory` | None | Isolated tests and temporary data | Creates no files. Named `memory://NAME` namespaces can be shared only within one process. |
 | `tinydb` / `json` | TinyDB | Default local JSON files | Human-readable and simplest to inspect. |
 | `sqlite` | Python standard library | Embedded transactional storage | Uses `_id` primary keys and JSON document payloads in collection tables. |
+| `sqlite-sharded` | Python standard library | Experimental concurrent embedded writes | Routes stable `_id` values across independent WAL-enabled SQLite files; no daemon or custom SQLite build is required. |
 | `duckdb` | `duckdb` | SQL-backed local analytics workflows | Uses real DuckDB collection tables and SQL JSON predicates where supported. |
 | `parquet` / `parquetv2` | `duckdb`, `pyarrow` | Columnar local or object-storage workflows | Stores collection Parquet files that DuckDB reads and writes. |
 | `postgres` / `postgresql` | `tinymongo[postgres]` | Remote transactional storage | Stores documents in PostgreSQL tables with JSONB payloads. |
@@ -936,6 +939,13 @@ store-wide advisory lock. Parquet uses one lock per logical database directory.
 Lock acquisition waits for up to 30 seconds before timing out. SQLite uses WAL
 mode, so reads can continue while another process holds the write lock, but its
 writes remain serialized.
+
+The opt-in [`sqlite-sharded` backend](https://github.com/schapman1974/tinymongo/blob/master/docs/SHARDED_SQLITE.md) removes that
+single-file write bottleneck by routing documents across independent SQLite
+files. It remains experimental: exact `_id` operations are targeted and can
+write concurrently across shards; exact-ID reads reuse bounded query-only
+connections and a generation-validated manifest catalog, while broad queries
+fan out and secondary unique indexes require cross-shard coordination.
 
 Operations whose semantics TinyMongo cannot honor raise
 `TinyMongoNotSupportedError`. This includes sessions, transactions, change

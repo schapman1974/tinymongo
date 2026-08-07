@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- An opt-in experimental `sqlite-sharded` backend now routes stable BSON `_id`
+  values across independent SQLite WAL files. It supports concurrent writers on
+  different shards without a daemon, fans collection and index metadata across
+  the shard set, enforces secondary uniqueness globally, and retains the
+  synchronous and asynchronous TinyMongo APIs.
 - Ascending compound, sparse, and partial indexes now preserve their complete
   definitions across durable backends and enforce matching unique-key
   membership. Embedded compound indexes support one flat multikey field,
@@ -19,6 +24,10 @@
   during duplicate preflight.
 
 ### Changed
+- The shared storage benchmark now accepts a one-process baseline and uses the
+  selected worker count for every phase, including point reads. Documentation
+  separates that baseline from four-process contention results and does not
+  publish partial metrics when a backend run fails.
 - SQLite bulk inserts now use BSON-aware identity sets and one-pass unique-index
   token maps instead of quadratic duplicate planning and repeated backend
   preflights.
@@ -28,6 +37,15 @@
   declared scalar indexes use bounded reads plus a companion candidate index
   for array and object values. One-time migration, WAL, and collection setup is
   cached without losing recovery from external collection drops.
+- Sharded SQLite exact-ID reads now reuse bounded query-only connections,
+  validate a generation-keyed manifest cache instead of repeating catalog
+  joins, and canonicalize, route, and query the primary key once. Legacy ID
+  representations remain a miss-only fallback, and inherited raw-fork handles
+  fail closed before touching SQLite.
+- Sharded SQLite unfiltered scans now attach up to ten read-only shard files to
+  one pooled connection and execute an ordered `UNION ALL`, moving fan-in into
+  SQLite and decoding every payload only once. Filtered and larger-shard-count
+  scans retain the established scatter path.
 - **TM-040:** Repeated SQLite `insert_many()` batches without user-created
   unique indexes now probe only incoming `_id` candidates through the native
   primary key instead of rereading and BSON-decoding the entire collection.

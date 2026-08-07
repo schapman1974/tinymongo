@@ -29,6 +29,7 @@ SUPPORTED_BACKEND_NAMES = (
     "parquet",
     "parquetv2",
     "sqlite",
+    "sqlite-sharded",
     "duckdb",
     "postgres",
     "postgresql",
@@ -392,7 +393,7 @@ def get_storage_class(name):
         from .parquet_storage import ParquetStorage
 
         return ParquetStorage
-    if backend == "sqlite":
+    if backend in ("sqlite", "sqlite-sharded"):
         return SQLiteStorage
     if backend == "duckdb":
         return DuckDBStorage
@@ -415,6 +416,8 @@ def storage_extension(name):
         return ".parquet"
     if backend == "sqlite":
         return ".sqlite"
+    if backend == "sqlite-sharded":
+        return ".sqlite-sharded"
     if backend == "duckdb":
         return ".duckdb"
     if backend in ("postgres", "postgresql", "mysql", "mariadb"):
@@ -430,6 +433,7 @@ def storage_extension(name):
 def is_table_backend(name):
     return str(name or "tinydb").lower() in (
         "sqlite",
+        "sqlite-sharded",
         "duckdb",
         "parquet",
         "parquetv2",
@@ -455,6 +459,10 @@ def get_table_backend(name):
         from .table_backends import SQLiteTableBackend
 
         return SQLiteTableBackend
+    if backend == "sqlite-sharded":
+        from .sharded_sqlite import ShardedSQLiteTableBackend
+
+        return ShardedSQLiteTableBackend
     if backend == "duckdb":
         from .table_backends import DuckDBTableBackend
 

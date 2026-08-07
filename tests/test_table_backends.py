@@ -726,6 +726,57 @@ def test_sqlite_backend_duplicate_bypass_drop_and_indexes(tmp_path):
     assert backend.drop_collection("users") is False
 
 
+@pytest.mark.parametrize(
+    "operation",
+    ("drop_collection", "create_index", "drop_index"),
+)
+def test_sqlite_schema_mutations_reuse_catalog_transaction(
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    backend = SQLiteTableBackend(str(tmp_path / (operation + ".sqlite")))
+    backend.insert_many("items", [{"_id": 1, "value": "one"}])
+    spec = parse_index_spec("value", name="value_lookup")
+
+    conn = backend._connect()
+    try:
+        backend._ensure_index_catalog(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    if operation == "drop_index":
+        backend.create_index("items", spec)
+
+    original_ensure_index_catalog = backend._ensure_index_catalog
+    transaction_states = []
+
+    def ensure_index_catalog_in_transaction(conn):
+        original_ensure_index_catalog(conn)
+        assert not conn.in_transaction
+        conn.execute("BEGIN IMMEDIATE")
+        transaction_states.append(conn.in_transaction)
+
+    monkeypatch.setattr(
+        backend,
+        "_ensure_index_catalog",
+        ensure_index_catalog_in_transaction,
+    )
+
+    if operation == "drop_collection":
+        assert backend.drop_collection("items") is True
+        assert "items" not in backend.list_collections()
+    elif operation == "create_index":
+        assert backend.create_index("items", spec) == spec.name
+        assert backend.get_index_specs("items") == [spec]
+    else:
+        backend.drop_index("items", spec.name)
+        assert backend.get_index_specs("items") == []
+
+    assert transaction_states == [True]
+
+
 def test_sqlite_unique_index_uses_durable_native_ddl(tmp_path):
     path = str(tmp_path / "db.sqlite")
     backend = SQLiteTableBackend(path)
@@ -1105,8 +1156,13 @@ def test_sqlite_maps_native_replace_and_index_integrity_errors(tmp_path, monkeyp
     backend = SQLiteTableBackend(str(tmp_path / "db.sqlite"))
 
     class FailingConnection:
+        in_transaction = False
+
         def execute(self, *args, **kwargs):
             raise sqlite3.IntegrityError("native unique conflict")
+
+        def rollback(self):
+            pass
 
         def close(self):
             pass

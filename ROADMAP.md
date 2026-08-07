@@ -261,6 +261,37 @@ update path no longer need that larger migration.
   TinyMongo point-update average fell from 98.653 ms to 4.330 ms (22.8x), and
   the indexed 1,000-document update fell from 0.228 seconds to 0.144 seconds.
 
+#### Experimental sharded SQLite concurrency
+
+- [x] Add a separate opt-in `sqlite-sharded` backend without changing the
+  stable SQLite format. Persist a SQLite manifest and route canonical BSON
+  `_id` values deterministically across isolated shard directories.
+- [x] Require and verify standard WAL mode on the manifest and every shard,
+  retain `synchronous=FULL`, and start no daemon, worker process, or background
+  thread.
+- [x] Route exact `_id` reads and writes to one shard; scatter and globally
+  merge broad reads while retaining insertion order and correct public
+  sort/skip/limit behavior.
+- [x] Fan collection and index metadata across shards, including compound,
+  sparse, partial, and cross-shard unique-index enforcement.
+- [x] Run the shared synchronous and asynchronous MongoDB contract suite against
+  the experimental backend, plus deterministic WAL, routing, reopen, and
+  cleanup tests. Add deterministic conditional-write and `find_one_and_*`
+  atomicity tests so removing the global lock cannot introduce lost updates.
+- [x] Publish a reproducible concurrent `insert_one()` baseline and add the
+  sharded cross-process smoke to Linux, Windows, macOS, and free-threaded CI.
+- [x] Add a strict exact-ID point-read path that hashes and routes once, leases
+  bounded query-only shard connections, and replaces repeated manifest catalog
+  joins with a cross-process generation-validated cache. Preserve collection
+  drop/recreate detection, legacy typed IDs, WAL checkpoint progress, client
+  read options, and fail-closed raw-fork behavior.
+- [ ] Add checkpoint-aware online backup and resharding tools, then continue
+  crash-recovery hardening before promoting the backend from experimental
+  status.
+- [ ] Replace full-collection secondary-unique preflights with a durable
+  cross-shard unique-token ledger so point inserts and updates remain targeted
+  instead of becoming O(N) as a collection grows.
+
 - [x] **Remote SQL numeric uniqueness:** Persist versioned, fixed-width digests
   of canonical BSON scalar tokens for PostgreSQL and MariaDB/MySQL unique
   indexes. Native constraints now enforce exact cross-process equality for
@@ -599,6 +630,8 @@ Exit criteria:
 
 ## Scope boundary
 
-This roadmap does not promise replication, sharding, sessions, transactions,
-or change streams. These remain explicitly unsupported unless they are
+This roadmap does not promise replication, server-side MongoDB sharding,
+sessions, transactions, or change streams. The approved experimental
+`sqlite-sharded` backend is an embedded storage layout, not a distributed
+MongoDB-compatible cluster; other additions remain unsupported unless they are
 separately designed and approved.

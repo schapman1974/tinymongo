@@ -525,6 +525,12 @@ jobs:
           tests/test_sqlite_complex_read_candidates.py
           tests/test_sqlite_optimistic_inserts.py
           tests/test_sqlite_read_optimizations.py
+          tests/test_sharded_sqlite_backend.py
+          tests/test_sharded_sqlite_concurrency.py
+          tests/test_sharded_sqlite_coverage_init.py
+          tests/test_sharded_sqlite_coverage_mutations.py
+          tests/test_sharded_sqlite_operation_atomicity.py
+          tests/test_sharded_sqlite_point_read_optimizations.py
           tests/test_storage_backends.py
           tests/test_thread_safety.py
           tests/test_typed_physical_ids.py
@@ -553,6 +559,13 @@ jobs:
           ${{ matrix.source-test-args }}
 
       - name: Run reduced cross-process SQLite locking smoke
+        run: >-
+          python -m pytest -o addopts='' -q -m integration
+          tests/integration/test_concurrent_writes.py
+
+      - name: Run reduced cross-process Sharded SQLite locking smoke
+        env:
+          TINYMONGO_INTEGRATION_BACKEND: sqlite-sharded
         run: >-
           python -m pytest -o addopts='' -q -m integration
           tests/integration/test_concurrent_writes.py
