@@ -584,7 +584,7 @@ class ShardedSQLiteTableBackend(TableBackend):
             )
         return value
 
-    def _manifest_connect(self, *, check_same_thread=True):
+    def _manifest_connect(self, *, check_same_thread=True, uri=False):
         if hasattr(self, "_owner_pid") and _PROCESS_ID() != self._owner_pid:
             raise ConfigurationError(
                 "Sharded SQLite handles cannot be reused after os.fork(); "
@@ -598,10 +598,14 @@ class ShardedSQLiteTableBackend(TableBackend):
             raise StorageCorruptionError(
                 "Sharded SQLite manifest disappeared while the backend was open"
             )
+        database = self._manifest_path
+        if uri:
+            database = Path(os.path.abspath(database)).as_uri()
         conn = sqlite3.connect(
-            self._manifest_path,
+            database,
             timeout=30,
             check_same_thread=check_same_thread,
+            uri=uri,
         )
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA synchronous=FULL")
@@ -1412,7 +1416,11 @@ class ShardedSQLiteTableBackend(TableBackend):
         """Open a query-only connection spanning the manifest and all shards."""
 
         file_identities = self._attached_shard_file_identities()
-        conn = self._manifest_connect(check_same_thread=False)
+        # ``uri=True`` sets SQLITE_OPEN_URI on the owning connection.  SQLite
+        # then recognizes the read-only ``file:...?mode=ro`` names supplied to
+        # ATTACH even when its platform build does not enable URI filenames by
+        # default (notably the Python.org macOS and Windows runtimes).
+        conn = self._manifest_connect(check_same_thread=False, uri=True)
         try:
             conn.isolation_level = None
             for index, shard in enumerate(self._shards):

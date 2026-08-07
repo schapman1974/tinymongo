@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import tinymongo
+import tinymongo.sharded_sqlite as sharded_sqlite
 
 from tinymongo.errors import (
     BulkWriteError,
@@ -275,6 +276,182 @@ def test_unfiltered_scans_use_read_only_attached_union_and_reuse_connections(
         with engine._attached_read_connection() as conn:
             with pytest.raises(sqlite3.OperationalError, match="readonly"):
                 conn.execute('DELETE FROM shard0."items"')
+    finally:
+        client.close()
+
+
+def test_attached_union_explicitly_enables_portable_sqlite_uri_handling(
+    tmp_path,
+    monkeypatch,
+):
+    client = _open_client(tmp_path / "attached-uri")
+    collection = client.app.items
+    collection.insert_one({"_id": "portable"})
+    engine = client.app.engine
+    calls = []
+    original = engine._manifest_connect
+
+    def record_manifest_connect(**options):
+        calls.append(options)
+        return original(**options)
+
+    monkeypatch.setattr(engine, "_manifest_connect", record_manifest_connect)
+    try:
+        assert list(collection.find({})) == [{"_id": "portable"}]
+        assert calls == [{"check_same_thread": False, "uri": True}]
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("failure", ["wal", "identity"])
+def test_attached_reader_rejects_invalid_shard_metadata_and_closes(
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    client = _open_client(tmp_path / ("attached-" + failure))
+    engine = client.app.engine
+
+    class Result:
+        def __init__(self, row=None, rows=None):
+            self.row = row
+            self.rows = [] if rows is None else rows
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection:
+        isolation_level = ""
+
+        def __init__(self):
+            self.closed = False
+
+        def execute(self, statement, _parameters=()):
+            if statement.startswith("PRAGMA shard") and statement.endswith(
+                ".journal_mode"
+            ):
+                return Result(row=None if failure == "wal" else ("wal",))
+            if statement.startswith("SELECT format_version"):
+                return Result(rows=[])
+            return Result()
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    monkeypatch.setattr(
+        engine,
+        "_manifest_connect",
+        lambda **_options: connection,
+    )
+    expected = "requires WAL" if failure == "wal" else "identity mismatch"
+    error = ConfigurationError if failure == "wal" else StorageCorruptionError
+    try:
+        with pytest.raises(error, match=expected):
+            engine._open_attached_read_connection()
+        assert connection.closed is True
+    finally:
+        client.close()
+
+
+def test_attached_reader_rejects_files_changed_during_open(tmp_path, monkeypatch):
+    client = _open_client(tmp_path / "attached-file-change")
+    engine = client.app.engine
+    identities = engine._attached_shard_file_identities()
+    observed = iter((identities, identities[:-1] + ((-1, -1),)))
+    monkeypatch.setattr(
+        engine,
+        "_attached_shard_file_identities",
+        lambda: next(observed),
+    )
+    try:
+        with pytest.raises(StorageCorruptionError, match="changed while opening"):
+            engine._open_attached_read_connection()
+    finally:
+        client.close()
+
+
+def test_attached_reader_pool_retires_stale_poisoned_and_inherited_entries(
+    tmp_path,
+    monkeypatch,
+):
+    client = _open_client(tmp_path / "attached-pool-lifecycle")
+    collection = client.app.items
+    collection.insert_one({"_id": "kept"})
+    engine = client.app.engine
+    assert list(collection.find({})) == [{"_id": "kept"}]
+
+    stale = engine._attached_read_pool_idle[-1]
+    stale.file_identities = ((-1, -1),)
+    assert list(collection.find({})) == [{"_id": "kept"}]
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        stale.connection.execute("SELECT 1")
+
+    with pytest.raises(RuntimeError, match="poison"):
+        with engine._attached_read_connection():
+            raise RuntimeError("poison")
+    assert engine._attached_read_pool_idle == []
+
+    context = engine._attached_read_connection()
+    leased = context.__enter__()
+    monkeypatch.setattr(
+        engine,
+        "_attached_shard_file_identities",
+        lambda: (_ for _ in ()).throw(OSError("stat failed")),
+    )
+    context.__exit__(None, None, None)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        leased.execute("SELECT 1")
+    monkeypatch.undo()
+
+    assert list(collection.find({})) == [{"_id": "kept"}]
+    inherited = engine._attached_read_pool_idle[-1].connection
+    monkeypatch.setattr(
+        sharded_sqlite,
+        "_PROCESS_ID",
+        lambda: engine._attached_read_pool_pid + 1,
+    )
+    engine._synchronize_attached_read_pid()
+    assert engine._attached_read_pool_idle == []
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        inherited.execute("SELECT 1")
+    client.close()
+
+
+@pytest.mark.parametrize(
+    ("message", "disabled", "raises"),
+    [
+        ("too many attached databases", True, False),
+        ("no such table: shard0.items", False, False),
+        ("disk I/O error", False, True),
+    ],
+)
+def test_attached_scan_operational_error_fallbacks(
+    tmp_path,
+    monkeypatch,
+    message,
+    disabled,
+    raises,
+):
+    client = _open_client(tmp_path / ("attached-error-" + str(disabled)))
+    collection = client.app.items
+    collection.insert_one({"_id": "kept"})
+    engine = client.app.engine
+    monkeypatch.setattr(
+        engine,
+        "_find_existing_attached",
+        lambda _collection: (_ for _ in ()).throw(sqlite3.OperationalError(message)),
+    )
+    try:
+        if raises:
+            with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+                list(collection.find({}))
+        else:
+            assert list(collection.find({})) == [{"_id": "kept"}]
+            assert engine._attached_reads_disabled is disabled
     finally:
         client.close()
 
