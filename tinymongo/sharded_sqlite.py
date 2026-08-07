@@ -1508,8 +1508,7 @@ class ShardedSQLiteTableBackend(TableBackend):
         finally:
             try:
                 identities_match = (
-                    entry.file_identities
-                    == self._attached_shard_file_identities()
+                    entry.file_identities == self._attached_shard_file_identities()
                 )
             except Exception:
                 identities_match = False
@@ -1519,8 +1518,7 @@ class ShardedSQLiteTableBackend(TableBackend):
                     and self._attached_read_pool_pid == pid
                     and self._attached_read_pool_generation == generation
                     and identities_match
-                    and len(self._attached_read_pool_idle)
-                    < _ATTACHED_READ_MAX_IDLE
+                    and len(self._attached_read_pool_idle) < _ATTACHED_READ_MAX_IDLE
                 )
                 if reusable:
                     self._attached_read_pool_idle.append(entry)
@@ -1702,8 +1700,7 @@ class ShardedSQLiteTableBackend(TableBackend):
             for index in range(self.shard_count)
         ]
         sql = (
-            "SELECT _id, data FROM ({0}) "
-            "ORDER BY order_token IS NULL, order_token"
+            "SELECT _id, data FROM ({0}) " "ORDER BY order_token IS NULL, order_token"
         ).format(" UNION ALL ".join(selects))
         with self._attached_read_connection() as conn:
             rows = conn.execute(sql).fetchall()

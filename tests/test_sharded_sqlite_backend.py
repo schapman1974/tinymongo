@@ -255,8 +255,7 @@ def test_unfiltered_scans_use_read_only_attached_union_and_reuse_connections(
     client = _open_client(tmp_path / "attached-union")
     collection = client.app.items
     documents = [
-        {"_id": "attached-{0}".format(index), "value": index}
-        for index in range(40)
+        {"_id": "attached-{0}".format(index), "value": index} for index in range(40)
     ]
     collection.insert_many(documents)
     engine = client.app.engine
@@ -464,8 +463,7 @@ def test_attached_union_preserves_legacy_null_order_and_filters_still_scatter(
     client = _open_client(root)
     collection = client.app.items
     documents = [
-        {"_id": "ordered-{0}".format(index), "group": index % 2}
-        for index in range(12)
+        {"_id": "ordered-{0}".format(index), "group": index % 2} for index in range(12)
     ]
     collection.insert_many(documents)
     engine = client.app.engine
@@ -504,8 +502,7 @@ def test_attached_union_supports_concurrent_readers_and_collection_recreation(
     client = _open_client(tmp_path / "attached-concurrent")
     collection = client.app.items
     documents = [
-        {"_id": "concurrent-{0}".format(index), "value": index}
-        for index in range(100)
+        {"_id": "concurrent-{0}".format(index), "value": index} for index in range(100)
     ]
     collection.insert_many(documents)
 
@@ -522,9 +519,7 @@ def test_attached_union_supports_concurrent_readers_and_collection_recreation(
         collection.drop()
         replacement = client.app.items
         replacement.insert_one({"_id": "replacement", "value": 1})
-        assert list(replacement.find({})) == [
-            {"_id": "replacement", "value": 1}
-        ]
+        assert list(replacement.find({})) == [{"_id": "replacement", "value": 1}]
     finally:
         client.close()
 

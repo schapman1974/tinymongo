@@ -307,14 +307,10 @@ def _run_tinymongo_insert_processes(
             )
 
         start_event.set()
-        outcomes = [
-            result_queue.get(timeout=180) for _process in processes
-        ]
+        outcomes = [result_queue.get(timeout=180) for _process in processes]
         failures = [message for message in outcomes if message[1] != "ok"]
         if failures:
-            raise RuntimeError(
-                "TinyMongo insert worker failed: {0!r}".format(failures)
-            )
+            raise RuntimeError("TinyMongo insert worker failed: {0!r}".format(failures))
 
         ordered = sorted(outcomes)
         process_ids = [message[4] for message in ordered]
@@ -372,13 +368,9 @@ def _tinymongo_point_read_process_worker(
             found = collection.find_one({"_id": target})
             latencies.append(time.perf_counter() - read_started)
             if found is None or found.get("_id") != target:
-                raise AssertionError(
-                    "sharded point read missed {0}".format(target)
-                )
+                raise AssertionError("sharded point read missed {0}".format(target))
         elapsed = time.perf_counter() - started
-        result_queue.put(
-            (worker, "ok", latencies, elapsed, os.getpid())
-        )
+        result_queue.put((worker, "ok", latencies, elapsed, os.getpid()))
     except BaseException as exc:
         failure = (worker, "error", type(exc).__name__, str(exc))
         ready_queue.put(failure)
@@ -433,28 +425,18 @@ def _run_tinymongo_point_read_processes(
             )
 
         start_event.set()
-        outcomes = [
-            result_queue.get(timeout=180) for _process in processes
-        ]
+        outcomes = [result_queue.get(timeout=180) for _process in processes]
         failures = [message for message in outcomes if message[1] != "ok"]
         if failures:
-            raise RuntimeError(
-                "TinyMongo read worker failed: {0!r}".format(failures)
-            )
+            raise RuntimeError("TinyMongo read worker failed: {0!r}".format(failures))
 
         ordered = sorted(outcomes)
         process_ids = [message[4] for message in ordered]
         if len(set(process_ids)) != len(processes):
             raise AssertionError("reads did not use distinct processes")
-        latencies = [
-            latency
-            for message in ordered
-            for latency in message[2]
-        ]
+        latencies = [latency for message in ordered for latency in message[2]]
         elapsed = max(message[3] for message in ordered)
-        return elapsed, latencies, process_ids, [
-            len(batch) for batch in target_batches
-        ]
+        return elapsed, latencies, process_ids, [len(batch) for batch in target_batches]
     finally:
         start_event.set()
         for process in processes:
@@ -661,15 +643,11 @@ def _run_tinymongo_mutation_processes(
         outcomes = [result_queue.get(timeout=180) for _process in processes]
         failures = [message for message in outcomes if message[1] != "ok"]
         if failures:
-            raise RuntimeError(
-                "TinyMongo {0} failed: {1!r}".format(phase, failures)
-            )
+            raise RuntimeError("TinyMongo {0} failed: {1!r}".format(phase, failures))
         ordered = sorted(outcomes)
         process_ids = [message[4] for message in ordered]
         if len(set(process_ids)) != len(processes):
-            raise AssertionError(
-                "{0} did not use distinct processes".format(phase)
-            )
+            raise AssertionError("{0} did not use distinct processes".format(phase))
         return (
             max(message[3] for message in ordered),
             sum(message[2] for message in ordered),
@@ -783,9 +761,7 @@ def _reference_process_worker(
             if backend == "raw-sqlite":
                 result = [
                     json.loads(row[0])
-                    for row in resource.execute(
-                        "SELECT data FROM records"
-                    ).fetchall()
+                    for row in resource.execute("SELECT data FROM records").fetchall()
                 ]
             else:
                 result = list(resource[1].find({}))
@@ -903,9 +879,7 @@ def _run_reference_processes(
         outcomes = [result_queue.get(timeout=180) for _process in processes]
         failures = [message for message in outcomes if message[1] != "ok"]
         if failures:
-            raise RuntimeError(
-                "{0} {1} failed: {2!r}".format(backend, phase, failures)
-            )
+            raise RuntimeError("{0} {1} failed: {2!r}".format(backend, phase, failures))
         ordered = sorted(outcomes)
         process_ids = [message[4] for message in ordered]
         if len(set(process_ids)) != len(processes):
@@ -1200,9 +1174,7 @@ def _run_tinymongo_backend(
             all_documents = read_all_results[0]
             read_count = documents * insert_workers
         else:
-            read_seconds, all_documents = _time_call(
-                lambda: list(collection.find({}))
-            )
+            read_seconds, all_documents = _time_call(lambda: list(collection.find({})))
             _validate_initial_documents(
                 all_documents,
                 source_documents,
@@ -1339,22 +1311,18 @@ def _run_tinymongo_backend(
     )
     if backend != "memory":
         qualifier = "shard-affine " if backend == "sqlite-sharded" else ""
-        benchmark_result["insert_mode"] = (
-            "{0} spawned {1}insert_many bulks".format(
-                insert_workers,
-                qualifier,
-            )
+        benchmark_result["insert_mode"] = "{0} spawned {1}insert_many bulks".format(
+            insert_workers,
+            qualifier,
         )
         benchmark_result["insert_process_ids"] = insert_process_ids
-        benchmark_result["read_mode"] = (
-            "{0} spawned full-collection scans".format(insert_workers)
+        benchmark_result["read_mode"] = "{0} spawned full-collection scans".format(
+            insert_workers
         )
         benchmark_result["read_process_ids"] = read_all_process_ids
-        benchmark_result["point_mode"] = (
-            "{0} spawned {1}exact-ID streams".format(
-                insert_workers,
-                qualifier,
-            )
+        benchmark_result["point_mode"] = "{0} spawned {1}exact-ID streams".format(
+            insert_workers,
+            qualifier,
         )
         benchmark_result["point_process_ids"] = point_process_ids
         benchmark_result["point_batch_sizes"] = point_batch_sizes
@@ -1362,12 +1330,12 @@ def _run_tinymongo_backend(
         benchmark_result["point_reads_per_second"] = (
             queries / point_wall_seconds if point_wall_seconds else 0.0
         )
-        benchmark_result["update_mode"] = (
-            "{0} spawned disjoint-ID streams".format(insert_workers)
+        benchmark_result["update_mode"] = "{0} spawned disjoint-ID streams".format(
+            insert_workers
         )
         benchmark_result["update_process_ids"] = update_process_ids
-        benchmark_result["delete_mode"] = (
-            "{0} spawned disjoint-ID streams".format(insert_workers)
+        benchmark_result["delete_mode"] = "{0} spawned disjoint-ID streams".format(
+            insert_workers
         )
         benchmark_result["delete_process_ids"] = delete_process_ids
     if backend == "sqlite-sharded":
@@ -1430,13 +1398,11 @@ def _run_raw_sqlite(documents, queries, work_root, insert_workers):
     target_batches = [[] for _worker in range(insert_workers)]
     for target in targets:
         target_batches[_shard_index(target, insert_workers)].append(target)
-    point_wall_seconds, point_results, point_process_ids = (
-        _run_reference_processes(
-            "point",
-            "raw-sqlite",
-            database_path,
-            target_batches,
-        )
+    point_wall_seconds, point_results, point_process_ids = _run_reference_processes(
+        "point",
+        "raw-sqlite",
+        database_path,
+        target_batches,
     )
     point_latencies = [
         latency for worker_latencies in point_results for latency in worker_latencies
@@ -1510,27 +1476,25 @@ def _run_raw_sqlite(documents, queries, work_root, insert_workers):
         insert_batches=len(document_batches),
     )
     benchmark_result["insert_process_ids"] = insert_process_ids
-    benchmark_result["read_mode"] = (
-        "{0} spawned full-collection scans".format(insert_workers)
+    benchmark_result["read_mode"] = "{0} spawned full-collection scans".format(
+        insert_workers
     )
     benchmark_result["read_process_ids"] = read_process_ids
-    benchmark_result["point_mode"] = (
-        "{0} spawned exact-ID streams".format(insert_workers)
+    benchmark_result["point_mode"] = "{0} spawned exact-ID streams".format(
+        insert_workers
     )
     benchmark_result["point_process_ids"] = point_process_ids
-    benchmark_result["point_batch_sizes"] = [
-        len(batch) for batch in target_batches
-    ]
+    benchmark_result["point_batch_sizes"] = [len(batch) for batch in target_batches]
     benchmark_result["point_wall_seconds"] = point_wall_seconds
     benchmark_result["point_reads_per_second"] = (
         queries / point_wall_seconds if point_wall_seconds else 0.0
     )
-    benchmark_result["update_mode"] = (
-        "{0} spawned disjoint-ID streams".format(insert_workers)
+    benchmark_result["update_mode"] = "{0} spawned disjoint-ID streams".format(
+        insert_workers
     )
     benchmark_result["update_process_ids"] = update_process_ids
-    benchmark_result["delete_mode"] = (
-        "{0} spawned disjoint-ID streams".format(insert_workers)
+    benchmark_result["delete_mode"] = "{0} spawned disjoint-ID streams".format(
+        insert_workers
     )
     benchmark_result["delete_process_ids"] = delete_process_ids
     benchmark_result["insert_batch_sizes"] = [len(batch) for batch in document_batches]
@@ -1566,32 +1530,27 @@ def _run_mongodb(documents, queries, mongo_uri, insert_workers):
         database = client.get_database(database_name, write_concern=write_concern)
         database.create_collection("records")
         collection = database.records
-        insert_seconds, inserted_ids, insert_process_ids = (
-            _run_reference_processes(
-                "insert",
-                "mongodb",
-                None,
-                document_batches,
-                mongo_uri=mongo_uri,
-                database_name=database_name,
-            )
+        insert_seconds, inserted_ids, insert_process_ids = _run_reference_processes(
+            "insert",
+            "mongodb",
+            None,
+            document_batches,
+            mongo_uri=mongo_uri,
+            database_name=database_name,
         )
         expected_inserted_ids = [
-            [document["_id"] for document in batch]
-            for batch in document_batches
+            [document["_id"] for document in batch] for batch in document_batches
         ]
         if inserted_ids != expected_inserted_ids:
             raise AssertionError("MongoDB inserted the wrong document IDs")
 
-        read_seconds, read_all_results, read_process_ids = (
-            _run_reference_processes(
-                "read-all",
-                "mongodb",
-                None,
-                [None for _worker in range(insert_workers)],
-                mongo_uri=mongo_uri,
-                database_name=database_name,
-            )
+        read_seconds, read_all_results, read_process_ids = _run_reference_processes(
+            "read-all",
+            "mongodb",
+            None,
+            [None for _worker in range(insert_workers)],
+            mongo_uri=mongo_uri,
+            database_name=database_name,
         )
         for worker, all_documents in enumerate(read_all_results):
             _validate_initial_documents(
@@ -1606,15 +1565,13 @@ def _run_mongodb(documents, queries, mongo_uri, insert_workers):
         target_batches = [[] for _worker in range(insert_workers)]
         for target in targets:
             target_batches[_shard_index(target, insert_workers)].append(target)
-        point_wall_seconds, point_results, point_process_ids = (
-            _run_reference_processes(
-                "point",
-                "mongodb",
-                None,
-                target_batches,
-                mongo_uri=mongo_uri,
-                database_name=database_name,
-            )
+        point_wall_seconds, point_results, point_process_ids = _run_reference_processes(
+            "point",
+            "mongodb",
+            None,
+            target_batches,
+            mongo_uri=mongo_uri,
+            database_name=database_name,
         )
         point_latencies = [
             latency
@@ -1627,15 +1584,13 @@ def _run_mongodb(documents, queries, mongo_uri, insert_workers):
             "g1",
             insert_workers,
         )
-        update_seconds, update_results, update_process_ids = (
-            _run_reference_processes(
-                "update",
-                "mongodb",
-                None,
-                update_batches,
-                mongo_uri=mongo_uri,
-                database_name=database_name,
-            )
+        update_seconds, update_results, update_process_ids = _run_reference_processes(
+            "update",
+            "mongodb",
+            None,
+            update_batches,
+            mongo_uri=mongo_uri,
+            database_name=database_name,
         )
         updated_docs = sum(update_results)
         if updated_docs != expected_updates:
@@ -1646,15 +1601,13 @@ def _run_mongodb(documents, queries, mongo_uri, insert_workers):
             "g2",
             insert_workers,
         )
-        delete_seconds, delete_results, delete_process_ids = (
-            _run_reference_processes(
-                "delete",
-                "mongodb",
-                None,
-                delete_batches,
-                mongo_uri=mongo_uri,
-                database_name=database_name,
-            )
+        delete_seconds, delete_results, delete_process_ids = _run_reference_processes(
+            "delete",
+            "mongodb",
+            None,
+            delete_batches,
+            mongo_uri=mongo_uri,
+            database_name=database_name,
         )
         deleted_docs = sum(delete_results)
         if deleted_docs != expected_deletes:
@@ -1693,27 +1646,25 @@ def _run_mongodb(documents, queries, mongo_uri, insert_workers):
             insert_batches=len(document_batches),
         )
         benchmark_result["insert_process_ids"] = insert_process_ids
-        benchmark_result["read_mode"] = (
-            "{0} spawned full-collection scans".format(insert_workers)
+        benchmark_result["read_mode"] = "{0} spawned full-collection scans".format(
+            insert_workers
         )
         benchmark_result["read_process_ids"] = read_process_ids
-        benchmark_result["point_mode"] = (
-            "{0} spawned exact-ID streams".format(insert_workers)
+        benchmark_result["point_mode"] = "{0} spawned exact-ID streams".format(
+            insert_workers
         )
         benchmark_result["point_process_ids"] = point_process_ids
-        benchmark_result["point_batch_sizes"] = [
-            len(batch) for batch in target_batches
-        ]
+        benchmark_result["point_batch_sizes"] = [len(batch) for batch in target_batches]
         benchmark_result["point_wall_seconds"] = point_wall_seconds
         benchmark_result["point_reads_per_second"] = (
             queries / point_wall_seconds if point_wall_seconds else 0.0
         )
-        benchmark_result["update_mode"] = (
-            "{0} spawned disjoint-ID streams".format(insert_workers)
+        benchmark_result["update_mode"] = "{0} spawned disjoint-ID streams".format(
+            insert_workers
         )
         benchmark_result["update_process_ids"] = update_process_ids
-        benchmark_result["delete_mode"] = (
-            "{0} spawned disjoint-ID streams".format(insert_workers)
+        benchmark_result["delete_mode"] = "{0} spawned disjoint-ID streams".format(
+            insert_workers
         )
         benchmark_result["delete_process_ids"] = delete_process_ids
         benchmark_result["insert_batch_sizes"] = [
@@ -1796,9 +1747,7 @@ def _aggregate_runs(backend, runs):
         else 0.0
     )
     result["read_docs_per_second"] = (
-        result["read_count"] / result["read_seconds"]
-        if result["read_seconds"]
-        else 0.0
+        result["read_count"] / result["read_seconds"] if result["read_seconds"] else 0.0
     )
     result["update_docs_per_second"] = (
         result["updated_docs"] / result["update_seconds"]
