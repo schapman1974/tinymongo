@@ -2,9 +2,9 @@
 
 These tests describe the application-facing behavior TinyMongo intends to share
 with PyMongo and a real MongoDB server. Each contract runs through both the
-synchronous and asynchronous APIs against memory, JSON, SQLite, DuckDB, and
-Parquet during the normal unit suite. The same test item is marked `mongodb`
-for the real server reference.
+synchronous and asynchronous APIs against memory, JSON, SQLite, experimental
+Sharded SQLite, DuckDB, and Parquet during the normal unit suite. The same test
+item is marked `mongodb` for the real server reference.
 
 Run the embedded backend matrix:
 
@@ -31,8 +31,9 @@ To generate those reports locally, add
 python scripts/generate_compatibility_report.py contract-results.xml
 ```
 
-Run only the BSON comparison slice and generate its two-API, six-target report
-(memory, JSON, SQLite, DuckDB, Parquet, and the live MongoDB reference) with:
+Run only the BSON comparison slice and generate its two-API, seven-target report
+(memory, JSON, SQLite, Sharded SQLite, DuckDB, Parquet, and the live MongoDB
+reference) with:
 
 ```bash
 TINYMONGO_MONGODB_URI='mongodb://127.0.0.1:27017/?directConnection=true' \

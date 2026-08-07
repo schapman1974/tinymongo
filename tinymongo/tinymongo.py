@@ -1413,6 +1413,7 @@ _TINYMONGO_MONGO_CLIENT_OPTIONS = frozenset(
         "backend",
         "storage_uri",
         "threads",
+        "sqlite_shards",
         "duckdb_config",
         "dsn",
         "tinymongo_folder",
@@ -1627,7 +1628,17 @@ def _engine_write_locked(method):
         engine = getattr(getattr(self, "parent", None), "engine", None)
         if engine is None:
             return method(self, *args, **kwargs)
-        with engine._write_lock():
+        operation_lock = getattr(engine, "_operation_write_lock", None)
+        if callable(operation_lock):
+            lock = operation_lock(
+                self.tablename,
+                method.__name__,
+                args,
+                kwargs,
+            )
+        else:
+            lock = engine._write_lock()
+        with lock:
             return method(self, *args, **kwargs)
 
     return wrapped
@@ -1643,6 +1654,7 @@ class TinyMongoClient(object):
         *,
         tinymongo_folder=None,
         threads=None,
+        sqlite_shards=None,
         storage_uri=None,
         duckdb_config=None,
         dsn=None,
@@ -1661,6 +1673,7 @@ class TinyMongoClient(object):
             self._memory_namespace, self._shared_memory = _memory_namespace(foldername)
             self._foldername = self._memory_namespace
         self._threads = threads
+        self._sqlite_shards = sqlite_shards
         if backend_name in ("parquet", "parquetv2"):
             if storage_uri is None:
                 storage_uri = os.environ.get("TINYMONGO_STORAGE_URI")
@@ -1739,18 +1752,20 @@ class TinyMongoClient(object):
             path = self._get_db_path(key)
             if is_table_backend(self._backend):
                 engine_class = get_table_backend(self._backend)
+                engine_options = {
+                    "threads": self._threads,
+                    "duckdb_config": self._duckdb_config,
+                    "database": key,
+                    "dsn": self._dsn,
+                }
+                if str(self._backend).lower() == "sqlite-sharded":
+                    engine_options["sqlite_shards"] = self._sqlite_shards
                 database = TinyMongoDatabase(
                     key,
                     path,
                     self._storage,
                     client=self,
-                    engine=engine_class(
-                        path,
-                        threads=self._threads,
-                        duckdb_config=self._duckdb_config,
-                        database=key,
-                        dsn=self._dsn,
-                    ),
+                    engine=engine_class(path, **engine_options),
                 )
             else:
                 database = TinyMongoDatabase(
@@ -1824,7 +1839,14 @@ class TinyMongoClient(object):
             "table_native": is_table_backend(backend),
             "multiprocess_writes": backend != "memory" and not object_storage,
             "native_indexes": backend
-            in ("sqlite", "postgres", "postgresql", "mysql", "mariadb"),
+            in (
+                "sqlite",
+                "sqlite-sharded",
+                "postgres",
+                "postgresql",
+                "mysql",
+                "mariadb",
+            ),
             "projections": True,
             "bulk_writes": False,
             "aggregation": aggregation_capabilities(),
@@ -1980,6 +2002,7 @@ class MongoClient(TinyMongoClient):
         backend = kwargs.pop("backend", "tinydb")
         storage_uri = kwargs.pop("storage_uri", None)
         threads = kwargs.pop("threads", None)
+        sqlite_shards = kwargs.pop("sqlite_shards", None)
         duckdb_config = kwargs.pop("duckdb_config", None)
         dsn = kwargs.pop("dsn", None)
         explicit_folder = (
@@ -2001,6 +2024,7 @@ class MongoClient(TinyMongoClient):
             backend=backend,
             storage_uri=storage_uri,
             threads=threads,
+            sqlite_shards=sqlite_shards,
             duckdb_config=duckdb_config,
             dsn=dsn,
         )
@@ -2774,6 +2798,19 @@ class TinyMongoCollection(object):
         stored_doc = _stamp_top_level_server_timestamps(doc)
 
         if self.parent.engine is not None:
+            insert_one_with_result = getattr(
+                self.parent.engine,
+                "insert_one_with_result",
+                None,
+            )
+            if callable(insert_one_with_result):
+                eid = insert_one_with_result(
+                    self.tablename,
+                    stored_doc,
+                    bypass_document_validation=kwargs.get("bypass_document_validation")
+                    is True,
+                )
+                return InsertOneResult(eid=eid, inserted_id=_id)
             self.parent.engine.validate_unique_post_image(
                 self.tablename,
                 self.parent.engine.find(self.tablename, {}) + [stored_doc],
@@ -3785,6 +3822,22 @@ class TinyMongoCollection(object):
         if _filter is None and "filter" in kwargs:
             _filter = kwargs["filter"]
         sort = kwargs.get("sort")
+        if self.parent.engine is not None and not sort:
+            exact_id = _direct_id_equality(_filter)
+            exact_find_one = getattr(
+                self.parent.engine,
+                "find_one_exact_id",
+                None,
+            )
+            if exact_id is not _MISSING and callable(exact_find_one):
+                validate_filter_operators(_filter)
+                normalized_projection = normalize_projection(projection)
+                document = exact_find_one(self.tablename, exact_id)
+                if document is None:
+                    return None
+                if normalized_projection is not None:
+                    document = project_document(document, normalized_projection)
+                return self._materialize_read_value(document)
         cursor = self.find(
             _filter,
             projection,

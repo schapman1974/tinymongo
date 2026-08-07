@@ -720,6 +720,131 @@ def test_cli_storage_uri_options_are_passed_through(monkeypatch, tmp_path, capsy
     assert calls[3] == (str(tmp_path), "postgres", None, "postgresql://db")
 
 
+def test_cli_passes_shard_counts_and_closes_embedded_clients(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    clients = []
+
+    class EmptyCollection:
+        def find(self, _filter=None):
+            return []
+
+    class EmptyDatabase:
+        def __getitem__(self, name):
+            return EmptyCollection()
+
+    class FakeClient:
+        def __init__(self, path, **options):
+            self.path = path
+            self.options = options
+            self.closed = False
+            clients.append(self)
+
+        def __getitem__(self, name):
+            return EmptyDatabase()
+
+        def list_database_names(self):
+            return []
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(cli, "TinyMongoClient", FakeClient)
+
+    assert (
+        cli.main(
+            [
+                "export",
+                str(tmp_path / "export"),
+                "app",
+                "items",
+                "--backend",
+                "sqlite-sharded",
+                "--sqlite-shards",
+                "3",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == []
+    assert clients[0].options["sqlite_shards"] == 3
+    assert clients[0].closed is True
+
+    assert (
+        cli.main(
+            [
+                "migrate",
+                str(tmp_path / "source"),
+                str(tmp_path / "target"),
+                "--from-backend",
+                "sqlite-sharded",
+                "--to-backend",
+                "sqlite-sharded",
+                "--source-sqlite-shards",
+                "2",
+                "--target-sqlite-shards",
+                "5",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert [client.options["sqlite_shards"] for client in clients[1:]] == [2, 5]
+    assert all(client.closed for client in clients)
+
+    database_name_calls = []
+
+    def database_names(
+        path,
+        backend,
+        storage_uri=None,
+        dsn=None,
+        sqlite_shards=None,
+    ):
+        database_name_calls.append((path, backend, sqlite_shards))
+        return []
+
+    monkeypatch.setattr(cli, "_db_names", database_names)
+
+    assert (
+        cli.main(
+            [
+                "inspect",
+                str(tmp_path / "inspect"),
+                "--backend",
+                "sqlite-sharded",
+                "--sqlite-shards",
+                "4",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["databases"] == []
+    assert clients[-1].options["sqlite_shards"] == 4
+    assert clients[-1].closed is True
+
+    assert (
+        cli.main(
+            [
+                "list-dbs",
+                str(tmp_path / "list"),
+                "--backend",
+                "sqlite-sharded",
+                "--sqlite-shards",
+                "6",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == ""
+    assert database_name_calls == [
+        (str(tmp_path / "inspect"), "sqlite-sharded", 4),
+        (str(tmp_path / "list"), "sqlite-sharded", 6),
+    ]
+
+
 def test_cli_storage_uri_inspect_and_db_names(monkeypatch, tmp_path, capsys):
     clients = []
 
@@ -842,12 +967,6 @@ def test_cli_migrate_reports_environment_only_remote_configuration(
             "postgres",
             None,
             "postgresql://env-db",
-        ),
-        (
-            str(tmp_path / "unused-source"),
-            "parquet",
-            "s3://source/root",
-            None,
         ),
     ]
 

@@ -63,3 +63,10 @@ jobs:
         run: >-
           python -m pytest -o addopts='' -q -m integration
           tests/integration/test_concurrent_writes.py
+
+      - name: Run cross-process Sharded SQLite locking stress
+        env:
+          TINYMONGO_INTEGRATION_BACKEND: sqlite-sharded
+        run: >-
+          python -m pytest -o addopts='' -q -m integration
+          tests/integration/test_concurrent_writes.py

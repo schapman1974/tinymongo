@@ -15,7 +15,7 @@ different machines render byte-for-byte identically.
 
 ## Generate the full report
 
-Run the sync/async matrix against the five embedded backends and real MongoDB:
+Run the sync/async matrix against the six embedded backends and real MongoDB:
 
 ```bash
 TINYMONGO_MONGODB_URI=mongodb://127.0.0.1:27017/?directConnection=true \
@@ -49,8 +49,8 @@ Without output options, the default filenames are
 ## Generate the BSON comparison report
 
 Issue #94 has a focused contract slice for recursive, type-bracketed BSON
-range comparison and sorting. Run it through both APIs and all six configured
-targets—the five embedded backends plus live MongoDB—and generate its reports
+range comparison and sorting. Run it through both APIs and all seven configured
+targets—the six embedded backends plus live MongoDB—and generate its reports
 with:
 
 ```bash
@@ -89,7 +89,8 @@ incomplete.
 The defaults are:
 
 - APIs: `sync`, `async`
-- backends: `memory`, `json`, `sqlite`, `duckdb`, `parquet`, `mongodb`
+- backends: `memory`, `json`, `sqlite`, `sqlite-sharded`, `duckdb`, `parquet`,
+  `mongodb`
 - reference backend: `mongodb`
 
 Use `--apis`, `--backends`, and `--reference-backend` only when the expected

@@ -15,7 +15,15 @@ from typing import Optional
 
 SCHEMA_VERSION = 2
 DEFAULT_APIS = ("sync", "async")
-DEFAULT_BACKENDS = ("memory", "json", "sqlite", "duckdb", "parquet", "mongodb")
+DEFAULT_BACKENDS = (
+    "memory",
+    "json",
+    "sqlite",
+    "sqlite-sharded",
+    "duckdb",
+    "parquet",
+    "mongodb",
+)
 DEFAULT_TARGETS = tuple(
     "{0}-{1}".format(api, backend)
     for api, backend in product(DEFAULT_APIS, DEFAULT_BACKENDS)

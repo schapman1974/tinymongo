@@ -14,7 +14,15 @@ from .support import ContractTarget
 
 
 APIS = ("sync", "async")
-BACKENDS = ("memory", "json", "sqlite", "duckdb", "parquet", "mongodb")
+BACKENDS = (
+    "memory",
+    "json",
+    "sqlite",
+    "sqlite-sharded",
+    "duckdb",
+    "parquet",
+    "mongodb",
+)
 TARGETS = [
     pytest.param(
         (api, backend),

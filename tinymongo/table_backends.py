@@ -2155,8 +2155,12 @@ class SQLiteTableBackend(TableBackend):
         digest = hashlib.sha256(identity.encode("utf8")).hexdigest()[:32]
         return "__tm_idx_{0}".format(digest)
 
-    def _read_connect(self):
-        conn = sqlite3.connect(self.path, timeout=30)
+    def _read_connect(self, *, check_same_thread=True):
+        conn = sqlite3.connect(
+            self.path,
+            timeout=30,
+            check_same_thread=check_same_thread,
+        )
         conn.create_function(
             "tinymongo_unique_token",
             2,
@@ -2503,6 +2507,10 @@ class SQLiteTableBackend(TableBackend):
         conn = self._connect()
         try:
             self._ensure_index_catalog(conn)
+            # Keep physical DDL removal and catalog deletion atomic; closing
+            # this connection rolls the transaction back if any step raises.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "DROP TABLE IF EXISTS {0}".format(_quote_identifier(collection))
             )
@@ -4191,6 +4199,12 @@ class SQLiteTableBackend(TableBackend):
         try:
             try:
                 self._ensure_index_catalog(conn)
+                # Python's sqlite3 does not implicitly begin a transaction for
+                # DDL. Keep native expression indexes and their TinyMongo
+                # catalog row atomic so a failed create cannot leave an
+                # invisible unique constraint behind.
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     "CREATE {unique}INDEX IF NOT EXISTS {name} ON {table} "
                     "({expression}){where}".format(
@@ -4251,7 +4265,11 @@ class SQLiteTableBackend(TableBackend):
                     self._ready_type_indexes.add((collection, spec.name))
                     self._query_index_cache.pop(collection, None)
             except sqlite3.IntegrityError as exc:
+                conn.rollback()
                 raise DuplicateKeyError(str(exc))
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             conn.close()
         return spec.name
@@ -4276,6 +4294,10 @@ class SQLiteTableBackend(TableBackend):
         conn = self._connect()
         try:
             self._ensure_index_catalog(conn)
+            # Keep physical index DDL and catalog deletion atomic; closing
+            # this connection rolls the transaction back if any step raises.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "DROP INDEX IF EXISTS {0}".format(_quote_identifier(physical_name))
             )

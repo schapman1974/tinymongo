@@ -6,6 +6,7 @@ import argparse
 import copy
 import os
 import sys
+from contextlib import contextmanager
 from uuid import uuid4
 
 from .bson_codec import dumps as bson_json_dumps
@@ -20,6 +21,7 @@ SUPPORTED_BACKENDS = (
     "parquet",
     "parquetv2",
     "sqlite",
+    "sqlite-sharded",
     "duckdb",
     "postgres",
     "postgresql",
@@ -58,24 +60,45 @@ def _effective_dsn(backend, dsn=None):
     return next((os.environ[name] for name in names if os.environ.get(name)), None)
 
 
-def _client(path, backend, storage_uri=None, dsn=None):
-    return TinyMongoClient(
+def _client(path, backend, storage_uri=None, dsn=None, sqlite_shards=None):
+    options = {
+        "backend": backend,
+        "storage_uri": _effective_storage_uri(backend, storage_uri),
+        "dsn": _effective_dsn(backend, dsn),
+    }
+    if sqlite_shards is not None:
+        options["sqlite_shards"] = sqlite_shards
+    return TinyMongoClient(path, **options)
+
+
+@contextmanager
+def _managed_client(path, backend, storage_uri=None, dsn=None, sqlite_shards=None):
+    client = _client(
         path,
-        backend=backend,
-        storage_uri=_effective_storage_uri(backend, storage_uri),
-        dsn=_effective_dsn(backend, dsn),
+        backend,
+        storage_uri=storage_uri,
+        dsn=dsn,
+        sqlite_shards=sqlite_shards,
     )
+    try:
+        yield client
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
-def _db_names(path, backend, storage_uri=None, dsn=None):
+def _db_names(path, backend, storage_uri=None, dsn=None, sqlite_shards=None):
     effective_storage_uri = _effective_storage_uri(backend, storage_uri)
     if is_remote_sql_backend(backend) or effective_storage_uri:
-        return _client(
+        with _managed_client(
             path,
             backend,
             storage_uri=effective_storage_uri,
             dsn=_effective_dsn(backend, dsn),
-        ).list_database_names()
+            sqlite_shards=sqlite_shards,
+        ) as client:
+            return client.list_database_names()
     ext = storage_extension(backend)
     if not os.path.isdir(path):
         return []
@@ -171,45 +194,73 @@ def _replace_collection(database, collection_name, docs):
 
 def cmd_inspect(args):
     storage_uri = _effective_storage_uri(args.backend, args.storage_uri)
-    client = _client(args.path, args.backend, storage_uri=storage_uri, dsn=args.dsn)
     payload = {"path": args.path, "backend": args.backend, "databases": []}
     if storage_uri:
         payload["storage_uri"] = storage_uri
-    for db_name in _db_names(
-        args.path, args.backend, storage_uri=storage_uri, dsn=args.dsn
-    ):
-        db = client[db_name]
-        collections = []
-        for collection_name in sorted(_collection_names(db)):
-            count = db[collection_name].count()
-            collections.append({"name": collection_name, "count": count})
-        payload["databases"].append({"name": db_name, "collections": collections})
+    shard_options = {}
+    if args.sqlite_shards is not None:
+        shard_options["sqlite_shards"] = args.sqlite_shards
+    with _managed_client(
+        args.path,
+        args.backend,
+        storage_uri=storage_uri,
+        dsn=args.dsn,
+        **shard_options,
+    ) as client:
+        for db_name in _db_names(
+            args.path,
+            args.backend,
+            storage_uri=storage_uri,
+            dsn=args.dsn,
+            **shard_options,
+        ):
+            db = client[db_name]
+            collections = []
+            for collection_name in sorted(_collection_names(db)):
+                count = db[collection_name].count()
+                collections.append({"name": collection_name, "count": count})
+            payload["databases"].append({"name": db_name, "collections": collections})
     _dump_json(payload, args.output)
     return 0
 
 
 def cmd_list_dbs(args):
+    shard_options = {}
+    if args.sqlite_shards is not None:
+        shard_options["sqlite_shards"] = args.sqlite_shards
     for name in _db_names(
-        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
+        args.path,
+        args.backend,
+        storage_uri=args.storage_uri,
+        dsn=args.dsn,
+        **shard_options,
     ):
         print(name)
     return 0
 
 
 def cmd_list_collections(args):
-    client = _client(
-        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
-    )
-    for name in sorted(_collection_names(client[args.database])):
-        print(name)
+    with _managed_client(
+        args.path,
+        args.backend,
+        storage_uri=args.storage_uri,
+        dsn=args.dsn,
+        sqlite_shards=args.sqlite_shards,
+    ) as client:
+        for name in sorted(_collection_names(client[args.database])):
+            print(name)
     return 0
 
 
 def cmd_export(args):
-    client = _client(
-        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
-    )
-    docs = list(client[args.database][args.collection].find({}))
+    with _managed_client(
+        args.path,
+        args.backend,
+        storage_uri=args.storage_uri,
+        dsn=args.dsn,
+        sqlite_shards=args.sqlite_shards,
+    ) as client:
+        docs = list(client[args.database][args.collection].find({}))
     # Embedded-document field order is part of BSON equality and can also be
     # part of a document-valued _id. Never recursively sort exported data.
     _dump_json(docs, args.output, sort_keys=False)
@@ -224,15 +275,19 @@ def cmd_import(args):
         if not isinstance(doc, dict):
             raise SystemExit("import input must contain only JSON objects")
 
-    client = _client(
-        args.path, args.backend, storage_uri=args.storage_uri, dsn=args.dsn
-    )
-    database = client[args.database]
-    collection = database[args.collection]
-    if args.mode == "replace":
-        _replace_collection(database, args.collection, docs)
-    elif docs:
-        collection.insert_many(docs)
+    with _managed_client(
+        args.path,
+        args.backend,
+        storage_uri=args.storage_uri,
+        dsn=args.dsn,
+        sqlite_shards=args.sqlite_shards,
+    ) as client:
+        database = client[args.database]
+        collection = database[args.collection]
+        if args.mode == "replace":
+            _replace_collection(database, args.collection, docs)
+        elif docs:
+            collection.insert_many(docs)
     print("imported {0} documents".format(len(docs)))
     return 0
 
@@ -242,39 +297,59 @@ def cmd_migrate(args):
     target_uri = _effective_storage_uri(args.to_backend, args.target_uri)
     source_dsn = _effective_dsn(args.from_backend, args.source_dsn)
     target_dsn = _effective_dsn(args.to_backend, args.target_dsn)
-    source_client = _client(
-        args.source,
-        args.from_backend,
-        storage_uri=source_uri,
-        dsn=source_dsn,
-    )
-    target_client = _client(
-        args.target,
-        args.to_backend,
-        storage_uri=target_uri,
-        dsn=target_dsn,
-    )
-
-    database_names = (
-        [args.database]
-        if args.database
-        else _db_names(
+    source_sqlite_shards = getattr(args, "source_sqlite_shards", None)
+    target_sqlite_shards = getattr(args, "target_sqlite_shards", None)
+    migrated = []
+    with (
+        _managed_client(
             args.source,
             args.from_backend,
             storage_uri=source_uri,
             dsn=source_dsn,
-        )
-    )
-    migrated = []
-    for db_name in database_names:
-        source_db = source_client[db_name]
-        target_db = target_client[db_name]
-        for collection_name in sorted(_collection_names(source_db)):
-            docs = list(source_db[collection_name].find({}))
-            _replace_collection(target_db, collection_name, docs)
-            migrated.append(
-                {"database": db_name, "collection": collection_name, "count": len(docs)}
+            sqlite_shards=source_sqlite_shards,
+        ) as source_client,
+        _managed_client(
+            args.target,
+            args.to_backend,
+            storage_uri=target_uri,
+            dsn=target_dsn,
+            sqlite_shards=target_sqlite_shards,
+        ) as target_client,
+    ):
+        if args.database:
+            database_names = [args.database]
+        else:
+            list_database_names = getattr(
+                source_client,
+                "list_database_names",
+                None,
             )
+            if callable(list_database_names):
+                database_names = list_database_names()
+            else:  # pragma: no cover - compatibility for injected legacy clients
+                source_shard_options = {}
+                if source_sqlite_shards is not None:
+                    source_shard_options["sqlite_shards"] = source_sqlite_shards
+                database_names = _db_names(
+                    args.source,
+                    args.from_backend,
+                    storage_uri=source_uri,
+                    dsn=source_dsn,
+                    **source_shard_options,
+                )
+        for db_name in database_names:
+            source_db = source_client[db_name]
+            target_db = target_client[db_name]
+            for collection_name in sorted(_collection_names(source_db)):
+                docs = list(source_db[collection_name].find({}))
+                _replace_collection(target_db, collection_name, docs)
+                migrated.append(
+                    {
+                        "database": db_name,
+                        "collection": collection_name,
+                        "count": len(docs),
+                    }
+                )
 
     _dump_json(
         {
@@ -307,6 +382,11 @@ def build_parser():
     backend_parser.add_argument(
         "--dsn",
         help="remote SQL DSN for postgres, postgresql, mysql, or mariadb backends",
+    )
+    backend_parser.add_argument(
+        "--sqlite-shards",
+        type=int,
+        help="physical shard count when creating a sqlite-sharded database",
     )
 
     inspect = subparsers.add_parser(
@@ -361,6 +441,8 @@ def build_parser():
     migrate.add_argument("--target-uri")
     migrate.add_argument("--source-dsn")
     migrate.add_argument("--target-dsn")
+    migrate.add_argument("--source-sqlite-shards", type=int)
+    migrate.add_argument("--target-sqlite-shards", type=int)
     migrate.add_argument("--database")
     migrate.add_argument("-o", "--output", default="-")
     migrate.set_defaults(func=cmd_migrate)
