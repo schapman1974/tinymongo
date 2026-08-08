@@ -1,4 +1,6 @@
-![TinyMongo logo](https://raw.githubusercontent.com/schapman1974/tinymongo/master/artwork/tinymongo.png)
+[![TinyMongo logo](https://raw.githubusercontent.com/schapman1974/tinymongo/master/artwork/tinymongo.png)](https://tinymongo.org/)
+
+**Website:** [tinymongo.org](https://tinymongo.org/)
 
 [![CI](https://github.com/schapman1974/tinymongo/actions/workflows/ci.yml/badge.svg)](https://github.com/schapman1974/tinymongo/actions/workflows/ci.yml)
 
