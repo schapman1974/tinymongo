@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192" role="img" aria-labelledby="title desc">
+  <title id="title">TinyMongo mark</title>
+  <desc id="desc">Stacked documents and a green database leaf in a rounded digital tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d2418"/>
+      <stop offset="1" stop-color="#06100b"/>
+    </linearGradient>
+    <linearGradient id="leaf-left" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b7ffd1"/>
+      <stop offset="1" stop-color="#5de795"/>
+    </linearGradient>
+    <linearGradient id="leaf-right" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#82f5ad"/>
+      <stop offset="1" stop-color="#2fcf7b"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="184" height="184" rx="46" fill="url(#tile)" stroke="#8effb7" stroke-opacity=".38" stroke-width="4"/>
+  <path d="M22 48H170M22 96H170M22 144H170M48 22V170M96 22V170M144 22V170" stroke="#8effb7" stroke-opacity=".055" stroke-width="2"/>
+  <rect x="46" y="62" width="84" height="96" rx="12" fill="#17392a" stroke="#65cfff" stroke-opacity=".62" stroke-width="3"/>
+  <rect x="58" y="50" width="84" height="96" rx="12" fill="#0f281c" stroke="#8effb7" stroke-opacity=".58" stroke-width="3"/>
+  <path d="M100 140C78 122 70 100 77 76c4-16 14-30 25-40 1 21 2 42 1 62 0 15-1 29-3 42Z" fill="url(#leaf-left)"/>
+  <path d="M102 140c22-18 31-40 25-64-4-16-14-30-25-40v104Z" fill="url(#leaf-right)"/>
+  <path d="M102 47v93" stroke="#082017" stroke-width="4" stroke-linecap="round"/>
+  <path d="M102 140c0 10-2 18-7 28" stroke="#8effb7" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="143" cy="53" r="4" fill="#70d7ff"/>
+  <circle cx="154" cy="64" r="3" fill="#8effb7"/>
+</svg>

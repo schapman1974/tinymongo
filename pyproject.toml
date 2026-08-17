@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/schapman1974/tinymongo"
+Homepage = "https://tinymongo.org/"
 Source = "https://github.com/schapman1974/tinymongo"
 Roadmap = "https://github.com/schapman1974/tinymongo/blob/master/ROADMAP.md"
 
