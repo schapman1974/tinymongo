@@ -37,6 +37,7 @@ from .bson_types import (
 )
 from .errors import (
     DuplicateKeyError,
+    InvalidDocument,
     OperationFailure,
     StorageCorruptionError,
     TinyMongoNotSupportedError,
@@ -51,6 +52,7 @@ from .indexes import (
     index_tokens,
     parse_index_spec,
     validate_unique_documents,
+    validate_index_document,
 )
 from .parquet_storage import _acquire_rlock, _local_rlocks, portalocker
 from .projection import project_document
@@ -2092,7 +2094,7 @@ class TableBackend(object):
         existing = self._check_index_compatibility(collection, spec)
         if existing is not None:
             return existing.name
-        if spec.unique:
+        if spec.unique or len(spec.keys) > 1:
             validate_unique_documents(self.find(collection, {}), [spec])
         self._ephemeral_indexes.setdefault(collection, {})[spec.name] = spec
         return spec.name
@@ -2657,7 +2659,7 @@ class SQLiteTableBackend(TableBackend):
             # Bring any stale index catalog forward before beginning the
             # optimistic transaction because that one-time migration commits.
             specs = self._get_index_specs_on_connection(conn, collection)
-            if any(spec.unique for spec in specs):
+            if any(spec.unique or len(spec.keys) > 1 for spec in specs):
                 return None
 
             conn.execute("BEGIN IMMEDIATE")
@@ -2667,7 +2669,7 @@ class SQLiteTableBackend(TableBackend):
             specs = self._get_index_specs_on_connection(conn, collection)
             if not conn.in_transaction:
                 return None
-            if any(spec.unique for spec in specs):
+            if any(spec.unique or len(spec.keys) > 1 for spec in specs):
                 conn.rollback()
                 return None
             table = _quote_identifier(collection)
@@ -4045,6 +4047,7 @@ class SQLiteTableBackend(TableBackend):
 
             for row_id, document in matches:
                 updated = self.apply_update(document, update_doc)
+                validate_index_document(updated, specs)
                 if validate_document is not None:
                     validate_document(updated)
                 modified_count += int(
@@ -4120,13 +4123,30 @@ class SQLiteTableBackend(TableBackend):
     def replace_one(self, collection, doc_id, replacement):
         self.create_collection(collection)
         target_id = _physical_id_key(doc_id)
-        self.validate_unique_post_image(
-            collection,
-            [
-                replacement if _physical_id_key(doc.get("_id")) == target_id else doc
-                for doc in self.find(collection, {})
-            ],
-        )
+        originals = self.find(collection, {"_id": {"$eq": doc_id}})
+        if not originals:
+            return
+        specs = self.get_index_specs(collection)
+        validate_index_document(replacement, specs)
+        changed_specs = [
+            spec
+            for spec in specs
+            if spec.unique
+            and frozenset(index_entry_tokens(originals[0], spec))
+            != frozenset(index_entry_tokens(replacement, spec))
+        ]
+        if changed_specs:
+            validate_unique_documents(
+                [
+                    (
+                        replacement
+                        if _physical_id_key(doc.get("_id")) == target_id
+                        else doc
+                    )
+                    for doc in self.find(collection, {})
+                ],
+                changed_specs,
+            )
         conn = self._connect()
         try:
             try:
@@ -4184,7 +4204,7 @@ class SQLiteTableBackend(TableBackend):
             finally:
                 conn.close()
             return existing.name
-        if spec.unique:
+        if spec.unique or len(spec.keys) > 1:
             validate_unique_documents(self.find(collection, {}), [spec])
         name = self._physical_index_name(collection, spec)
         expressions = self._sqlite_index_expressions(spec)
@@ -4613,7 +4633,7 @@ class DuckDBTableBackend(TableBackend):
         existing = self._check_index_compatibility(collection, spec)
         if existing is not None:
             return existing.name
-        if spec.unique:
+        if spec.unique or len(spec.keys) > 1:
             validate_unique_documents(self.find(collection, {}), [spec])
         conn = self._connect()
         try:
@@ -4929,7 +4949,7 @@ class ParquetDuckDBBackend(DuckDBTableBackend):
             existing = self._check_index_compatibility(collection, spec)
             if existing is not None:
                 return existing.name
-            if spec.unique:
+            if spec.unique or len(spec.keys) > 1:
                 validate_unique_documents(self.find(collection, {}), [spec])
             rows = self._read_all_rows(INDEX_CATALOG_TABLE)
             document = {
@@ -5012,11 +5032,12 @@ class RemoteSQLTableBackend(TableBackend):
         try:
             cursor.execute(sql, params or ())
             return cursor
-        except Exception:
+        except Exception as exc:
             try:
                 cursor.close()
             except Exception:
                 pass
+            self._translate_encoding_error(exc)
             raise
 
     def _executemany(self, conn, sql, params):
@@ -5024,12 +5045,20 @@ class RemoteSQLTableBackend(TableBackend):
         try:
             cursor.executemany(sql, params)
             return cursor
-        except Exception:
+        except Exception as exc:
             try:
                 cursor.close()
             except Exception:
                 pass
+            self._translate_encoding_error(exc)
             raise
+
+    def _translate_encoding_error(self, exc):
+        if self.dialect == "postgres" and getattr(exc, "sqlstate", None) == "22P05":
+            raise InvalidDocument(
+                "PostgreSQL JSONB cannot represent this document's Unicode data "
+                "(including NUL characters in string values); values were not truncated"
+            ) from exc
 
     def _commit(self, conn):
         conn.commit()
@@ -5712,6 +5741,16 @@ class RemoteSQLTableBackend(TableBackend):
                 try:
                     if spec.unique:
                         self._prepare_unique_token_column(conn, collection, spec)
+                    elif len(spec.keys) > 1:
+                        validate_unique_documents(
+                            [
+                                document
+                                for _stored_id, document in self._stored_documents_on_connection(
+                                    conn, collection
+                                )
+                            ],
+                            [spec],
+                        )
                     self._create_native_index(conn, collection, spec)
                     self._execute(
                         conn,

@@ -965,3 +965,33 @@ def test_remote_sql_decimal128_unique_values_fail_closed(backend, env_name):
         existing.drop()
         protected.drop()
         client.close()
+
+
+@pytest.mark.parametrize(("backend", "env_name"), REMOTE_BACKENDS)
+def test_remote_nul_validation_and_postgres_error_translation(backend, env_name):
+    from pymongo.errors import PyMongoError
+    from tinymongo.errors import InvalidDocument
+
+    dsn, database, prefix = _remote_target(backend, env_name)
+    client = tm.TinyMongoClient(backend=backend, dsn=dsn)
+    docs = client[database][prefix + "_nul"]
+    try:
+        docs.insert_one({"_id": 1, "value": "original"})
+        with pytest.raises(InvalidDocument):
+            docs.insert_one({"_id": 2, "nested": [{"bad\x00key": "value"}]})
+        for value in ["a\x00b", {"nested": "a\x00b"}, ["a\x00b"]]:
+            if backend == "postgres":
+                with pytest.raises(InvalidDocument) as caught:
+                    docs.insert_one({"_id": 3, "value": value})
+                assert isinstance(caught.value, PyMongoError)
+                with pytest.raises(InvalidDocument):
+                    docs.update_one({"_id": 1}, {"$set": {"value": value}})
+                assert docs.find_one({"_id": 1})["value"] == "original"
+                assert docs.count_documents({}) == 1
+            else:
+                docs.insert_one({"_id": 3, "value": value})
+                assert docs.find_one({"_id": 3})["value"] == value
+                docs.delete_one({"_id": 3})
+    finally:
+        docs.drop()
+        client.close()

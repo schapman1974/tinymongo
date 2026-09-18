@@ -48,6 +48,15 @@ Fallback env vars:
 
 PostgreSQL stores document payloads in a `JSONB` column.
 
+Unlike MongoDB and the MariaDB backend, PostgreSQL JSONB cannot represent a NUL
+character (`\u0000`) in a string value, including nested values and array members.
+TinyMongo reports PostgreSQL's unsupported Unicode encoding error as
+`tinymongo.errors.InvalidDocument`, catchable as `pymongo.errors.PyMongoError`
+when PyMongo is installed. The failed transaction is rolled back; TinyMongo
+does not strip or truncate the value. Check for these values before migrating
+real MongoDB data to PostgreSQL. NUL characters in **field names** are rejected
+by every backend before writing, because BSON cannot represent those keys.
+
 ## MariaDB / MySQL
 
 ```python

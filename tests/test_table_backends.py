@@ -1168,7 +1168,7 @@ def test_sqlite_maps_native_replace_and_index_integrity_errors(tmp_path, monkeyp
             pass
 
     monkeypatch.setattr(backend, "create_collection", lambda collection: None)
-    monkeypatch.setattr(backend, "find", lambda collection, filter_doc: [])
+    monkeypatch.setattr(backend, "find", lambda collection, filter_doc: [{"_id": 1}])
     monkeypatch.setattr(backend, "validate_unique_post_image", lambda *args: None)
     monkeypatch.setattr(backend, "get_index_specs", lambda collection: [])
     monkeypatch.setattr(backend, "_connect", FailingConnection)
@@ -2351,3 +2351,24 @@ def test_table_backends_support_nor_operator(tmp_path, backend):
 
     assert matches.count() == 1
     assert matches[0]["_id"] == 2
+
+
+@pytest.mark.parametrize("backend_factory", [_postgres_backend, _mysql_backend])
+def test_remote_nonunique_compound_indexes_reject_parallel_arrays(
+    monkeypatch, backend_factory
+):
+    from tinymongo.errors import OperationFailure
+
+    backend = backend_factory(monkeypatch, FakeRemoteStore())
+    invalid = {"_id": 1, "a": ["x"], "b": ["y"]}
+    backend.insert_many("existing", [invalid])
+    spec = parse_index_spec([("a", 1), ("b", 1)])
+    with pytest.raises(OperationFailure) as caught:
+        backend.create_index("existing", spec)
+    assert caught.value.code == 171
+    assert backend.get_index_specs("existing") == []
+    backend.create_index("empty", spec)
+    with pytest.raises(OperationFailure) as caught:
+        backend.insert_many("empty", [invalid])
+    assert caught.value.code == 171
+    assert backend.find("empty", {}) == []

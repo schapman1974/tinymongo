@@ -197,3 +197,34 @@ For each difference found in the real application:
 The first application pass should prioritize whether Talk Python starts, creates
 its indexes, completes its service-layer tests, and shuts down cleanly. Broader
 backend coverage can follow after memory and SQLite have a trustworthy baseline.
+
+## Michael Kennedy's round-20 report (external evidence)
+
+Michael's [2026-08-08 eight-backend report](https://github.com/schapman1974/tinymongo/issues/79#issuecomment-5224455624)
+tested commit `6eedcea` against the real Talk Python application and MongoDB 8.2.
+These are his results, not a local rerun or evidence that the later fixes have
+passed the application's private test suite.
+
+| Backend | Documents migrated | Query shapes | Application tests |
+| --- | --- | --- | --- |
+| SQLite | 81,773 / 81,773 | 17 / 17 | 813 passed |
+| sharded SQLite | 81,761 / 81,761 | 17 / 17 | 813 passed |
+| DuckDB | 81,761 / 81,761 | 17 / 17 | 813 passed |
+| Parquet | 81,761 / 81,761 | 17 / 17 | 813 passed |
+| PostgreSQL | 81,743 / 81,761; 18 rejected | 15 / 17 | 813 passed |
+| MariaDB | 81,761 / 81,761 | 16 / 17 | 813 passed |
+| JSON | reduced: 6,156 / 6,156 | 15 / 15 | not run |
+| memory | reduced: 6,156 / 6,156 | 15 / 15 | not run |
+
+His sampled document comparisons found no mismatches, but this must not obscure
+the PostgreSQL migration refusals or incomplete query coverage. JSON and memory
+could not complete the full dataset because of TM-049. Some successful page
+responses on slower backends came from the application's stale RSS cache. Source
+counts varied because the live database continued receiving writes.
+
+His [harness correction](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5224456519)
+also explains that earlier runs accidentally sent about 30 tests to real MongoDB.
+Round 20 verified all 813 with that server unreachable. TinyMongo's own
+process-wide acceptance runner did not have that hole; the previously documented
+597-test baseline is unchanged. A new private-application run is still required
+to qualify TM-044 through TM-049 against that full workload.

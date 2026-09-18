@@ -79,6 +79,7 @@ from .indexes import (
     parse_index_spec,
     plan_index_models,
     validate_unique_documents,
+    validate_index_document,
 )
 from .projection import normalize_projection, project_document
 from .table_backends import (
@@ -344,6 +345,7 @@ def _plan_insert_many(
         # native-race retry reuse the same generated value.
         document = _stamp_top_level_server_timestamps(document)
         documents[index] = document
+        validate_index_document(document, specs)
         duplicate_error = None
         value = document["_id"]
         identity = bson_value_identity_key(value)
@@ -2463,7 +2465,7 @@ class TinyMongoCollection(object):
             existing = self._validate_index_compatibility(spec)
             if existing is not None:
                 return existing.name
-            if spec.unique:
+            if spec.unique or len(spec.keys) > 1:
                 self._validate_unique_post_image(self.table.all(), [spec])
             self.parent.tinydb.table(INDEX_CATALOG_TABLE).insert(
                 self._index_document(spec)
