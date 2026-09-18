@@ -721,6 +721,22 @@ def _sqlite_index_member(data, spec_json):
     return int(document_matches_index(_json_loads(data), spec))
 
 
+def _sqlite_bson_query_key(value):
+    """Return a scalar equality key, with millisecond-ordered date keys."""
+    identity = bson_identity_key(value)
+    if identity is None:
+        return None
+    if identity[0] == "datetime":
+        # Fixed-width positive text preserves the signed BSON millisecond order.
+        return "d:{0:020d}".format(identity[1] + 2**63)
+    return "s:" + _physical_id_key(value)
+
+
+def _sqlite_bson_query_key_from_row(data, field):
+    document = bson_json_loads(data)
+    return _sqlite_bson_query_key(document.get(field, _MISSING))
+
+
 def _simple_scalar_equality(filter_doc):
     """Return one SQL-safe equality pair, or ``None`` for richer filters."""
     if not isinstance(filter_doc, Mapping) or len(filter_doc) != 1:
@@ -2147,6 +2163,7 @@ class SQLiteTableBackend(TableBackend):
         self._sqlite_initialized = False
         self._ready_collections = set()
         self._ready_type_indexes = set()
+        self._ready_bson_query_indexes = set()
         self._query_index_cache = {}
         self._known_nonempty_collections = set()
 
@@ -2162,6 +2179,12 @@ class SQLiteTableBackend(TableBackend):
             self.path,
             timeout=30,
             check_same_thread=check_same_thread,
+        )
+        conn.create_function(
+            "tinymongo_bson_query_key_v1",
+            2,
+            _sqlite_bson_query_key_from_row,
+            deterministic=True,
         )
         conn.create_function(
             "tinymongo_unique_token",
@@ -2222,6 +2245,9 @@ class SQLiteTableBackend(TableBackend):
             self._ready_collections.discard(collection)
             self._ready_type_indexes = {
                 key for key in self._ready_type_indexes if key[0] != collection
+            }
+            self._ready_bson_query_indexes = {
+                key for key in self._ready_bson_query_indexes if key[0] != collection
             }
             self._query_index_cache.pop(collection, None)
             self._known_nonempty_collections.discard(collection)
@@ -2416,6 +2442,9 @@ class SQLiteTableBackend(TableBackend):
             # storage before trusting a new or changed catalog snapshot.
             self._ready_type_indexes = {
                 key for key in self._ready_type_indexes if key[0] != collection
+            }
+            self._ready_bson_query_indexes = {
+                key for key in self._ready_bson_query_indexes if key[0] != collection
             }
 
         specs = self._get_index_specs_on_connection(conn, collection)
@@ -3407,9 +3436,8 @@ class SQLiteTableBackend(TableBackend):
     def _sqlite_candidate_scalar(value):
         """Return one SQLite-bindable ordinary scalar, or ``None``.
 
-        Candidate planning deliberately starts with exact built-in values.
-        BSON subclasses and extended values keep the established Python scan
-        unless another positive predicate can safely bound their candidates.
+        Ordinary values use the JSON expression index. BSON subclasses and
+        extended values need a canonical BSON key or conservative fallback.
         """
 
         if type(value) is bool:
@@ -3441,7 +3469,10 @@ class SQLiteTableBackend(TableBackend):
             return ()
         if len(values) > _SQLITE_CONFLICT_QUERY_SIZE:
             return None
-        if any(self._sqlite_candidate_scalar(value) is None for value in values):
+        if any(
+            value is None or is_bson_regex(value) or bson_identity_key(value) is None
+            for value in values
+        ):
             return None
         return values
 
@@ -3507,6 +3538,188 @@ class SQLiteTableBackend(TableBackend):
         # values inside each family were de-duplicated above. UNION ALL avoids
         # SQLite's temporary de-duplication B-tree without duplicating rows.
         return " UNION ALL ".join(branches), params
+
+    @staticmethod
+    def _sqlite_bson_query_expression(field):
+        return "tinymongo_bson_query_key_v1(data, {0})".format(_sql_literal(field))
+
+    def _ensure_bson_query_index(self, conn, collection, spec):
+        key = (collection, spec.name)
+        with self._sqlite_state_lock:
+            if key in self._ready_bson_query_indexes:
+                return
+        with self._write_lock(), self._sqlite_state_lock:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS {name} ON {table} ({expression})".format(
+                    name=_quote_identifier(
+                        self._physical_index_name(collection, spec) + "_bson_v1"
+                    ),
+                    table=_quote_identifier(collection),
+                    expression=self._sqlite_bson_query_expression(spec.field),
+                )
+            )
+            conn.commit()
+            self._ready_bson_query_indexes.add(key)
+
+    @staticmethod
+    def _sqlite_array_candidate_query(collection, field):
+        kind = "json_type(data, {0})".format(_sql_literal(_json_path(field)))
+        # Retain the partial type index's exact predicate so SQLite can use it.
+        return (
+            "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} "
+            "IN ('array', 'object') AND {1} = 'array'"
+        ).format(_quote_identifier(collection), kind)
+
+    def _sqlite_bson_equality_candidates(self, conn, collection, spec, values):
+        self._ensure_bson_query_index(conn, collection, spec)
+        keys = list(dict.fromkeys(_sqlite_bson_query_key(value) for value in values))
+        sql = "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} IN ({2})".format(
+            _quote_identifier(collection),
+            self._sqlite_bson_query_expression(spec.field),
+            ", ".join("?" for _ in keys),
+        )
+        return (
+            sql
+            + " UNION ALL "
+            + self._sqlite_array_candidate_query(collection, spec.field),
+            keys,
+        )
+
+    def _sqlite_range_candidates(self, conn, collection, spec, expected):
+        if not isinstance(expected, Mapping):
+            return None
+        comparisons = {"$gt": ">", "$gte": ">=", "$lt": "<", "$lte": "<="}
+        dates, date_params, numbers, number_params = [], [], [], []
+        date_directions, number_directions = set(), set()
+        field = spec.field
+        for operator, operand in expected.items():
+            if operator not in comparisons:
+                continue
+            identity = bson_identity_key(operand)
+            if identity is not None and identity[0] == "datetime":
+                dates.append(
+                    "{0} {1} ?".format(
+                        self._sqlite_bson_query_expression(field), comparisons[operator]
+                    )
+                )
+                date_params.append(_sqlite_bson_query_key(operand))
+                date_directions.add(comparisons[operator][0])
+            else:
+                value = self._sqlite_range_candidate_operand(operand)
+                if value is not None:
+                    numbers.append("{expression} " + comparisons[operator] + " ?")
+                    number_params.append(value)
+                    number_directions.add(comparisons[operator][0])
+        table = _quote_identifier(collection)
+        if dates:
+            self._ensure_bson_query_index(conn, collection, spec)
+            expression = self._sqlite_bson_query_expression(field)
+            if ">" not in date_directions:
+                dates.append(expression + " >= 'd:'")
+            if "<" not in date_directions:
+                dates.append(expression + " < 'e:'")
+            sql = (
+                "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} UNION ALL {2}"
+            ).format(
+                table,
+                " AND ".join(dates),
+                self._sqlite_array_candidate_query(collection, field),
+            )
+            return sql, date_params
+        if numbers:
+            path = _sql_literal(_json_path(field))
+            expression = "json_extract(data, {0})".format(path)
+            kind = "json_type(data, {0})".format(path)
+            # Give SQLite just the relevant bounds: redundant broad bounds can
+            # win index selection and turn a selective range into a long scan.
+            if ">" not in number_directions:
+                numbers.append("{expression} >= " + str(-_SQLITE_SAFE_QUERY_NUMBER))
+            if "<" not in number_directions:
+                numbers.append("{expression} <= " + str(_SQLITE_SAFE_QUERY_NUMBER))
+            predicate = " AND ".join(
+                item.format(expression=expression) for item in numbers
+            )
+            branches = [
+                "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} "
+                "IN ('integer', 'real') AND {2}".format(
+                    table,
+                    kind,
+                    predicate,
+                ),
+                "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} "
+                "IN ('integer', 'real') AND {2} < {3}".format(
+                    table,
+                    kind,
+                    expression,
+                    -_SQLITE_SAFE_QUERY_NUMBER,
+                ),
+                "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} "
+                "IN ('integer', 'real') AND {2} > {3}".format(
+                    table,
+                    kind,
+                    expression,
+                    _SQLITE_SAFE_QUERY_NUMBER,
+                ),
+                "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} IN ('array', 'object')".format(
+                    table, kind
+                ),
+            ]
+            return " UNION ALL ".join(branches), number_params
+        return None
+
+    def _sqlite_candidate_anchor(self, conn, collection, filter_doc, by_field, depth=0):
+        if not isinstance(filter_doc, Mapping) or depth > 8:
+            return None
+        conjuncts = _positive_filter_conjuncts(filter_doc)
+        for field, expected in conjuncts:
+            spec = by_field.get(field)
+            if spec is None or field == "_id" or "." in field:
+                continue
+            values = self._sqlite_index_candidate_values(expected)
+            if values is not None:
+                self._ensure_type_index_on_connection(conn, collection, spec)
+                if any(
+                    self._sqlite_candidate_scalar(value) is None for value in values
+                ):
+                    return self._sqlite_bson_equality_candidates(
+                        conn, collection, spec, values
+                    )
+                return self._sqlite_index_candidate_id_query(collection, field, values)
+        for field, expected in conjuncts:
+            spec = by_field.get(field)
+            if spec is None or field == "_id" or "." in field:
+                continue
+            candidate = self._sqlite_range_candidates(conn, collection, spec, expected)
+            if candidate is not None:
+                self._ensure_type_index_on_connection(conn, collection, spec)
+                return candidate
+        for operator, children in filter_doc.items():
+            if (
+                operator not in ("$and", "$or")
+                or not isinstance(children, (list, tuple))
+                or not children
+                or len(children) > 64
+            ):
+                continue
+            branches, params = [], []
+            for child in children:
+                candidate = self._sqlite_candidate_anchor(
+                    conn, collection, child, by_field, depth + 1
+                )
+                if operator == "$and":
+                    if candidate is not None:
+                        return candidate
+                    continue
+                if candidate is None:
+                    break
+                sql, arguments = candidate
+                branches.append("SELECT candidate_rowid FROM ({0})".format(sql))
+                params.extend(arguments)
+            else:
+                if branches:
+                    # OR arms overlap; deduplicate before applying skip/limit.
+                    return " UNION ".join(branches), params
+        return None
 
     @staticmethod
     def _sqlite_range_candidate_operand(value):
@@ -3603,19 +3816,7 @@ class SQLiteTableBackend(TableBackend):
         ):
             if spec.partial_filter is None:
                 by_field.setdefault(spec.field, spec)
-        anchor = None
-        for field, expected in conjuncts:
-            if isinstance(field, str) and field != "_id" and "." not in field:
-                values = self._sqlite_index_candidate_values(expected)
-                spec = by_field.get(field)
-                if values is not None and spec is not None:
-                    self._ensure_type_index_on_connection(conn, collection, spec)
-                    anchor = self._sqlite_index_candidate_id_query(
-                        collection,
-                        field,
-                        values,
-                    )
-                    break
+        anchor = self._sqlite_candidate_anchor(conn, collection, filter_doc, by_field)
         if anchor is None:
             return None
 
@@ -4332,6 +4533,11 @@ class SQLiteTableBackend(TableBackend):
                 )
             )
             conn.execute(
+                "DROP INDEX IF EXISTS {0}".format(
+                    _quote_identifier(physical_name + "_bson_v1")
+                )
+            )
+            conn.execute(
                 "DELETE FROM {0} WHERE collection_name = ? AND index_name = ?".format(
                     _quote_identifier(self.index_catalog_table)
                 ),
@@ -4340,6 +4546,7 @@ class SQLiteTableBackend(TableBackend):
             conn.commit()
             with self._sqlite_state_lock:
                 self._ready_type_indexes.discard((collection, spec.name))
+                self._ready_bson_query_indexes.discard((collection, spec.name))
                 self._query_index_cache.pop(collection, None)
         finally:
             conn.close()

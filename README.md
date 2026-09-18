@@ -344,6 +344,23 @@ the Python API instead.
 SQLite, DuckDB, and Parquet compile supported Mongo-style filters into SQL over
 the `_id` column and JSON document payload. Unsupported filter shapes fall back
 to Python document matching so existing TinyMongo behavior remains available.
+SQLite reads can narrow candidates using declared top-level indexes for scalar
+equality and `$in` (including ObjectId, datetime, Int64, Decimal128, and Binary),
+standalone date and ordinary numeric ranges, and `$or` when every arm has a safe
+indexed candidate source. The shared BSON matcher still checks every candidate;
+arrays remain conservative candidates and overlapping `$or` arms are deduplicated
+before cursor bounds. Partial indexes, dotted fields, and unsupported predicates
+retain the fallback path when no other safe anchor exists.
+
+BSON equality and date ranges lazily build a derived native index on first use.
+That first read scans the collection, adds index storage, and holds the write
+lock while building; later writes maintain the derived index. Warm reads avoid
+that setup. Upgrade every writer before sharing such a SQLite file: older
+TinyMongo versions do not register the new index function and cannot maintain
+these indexes. Dropping the corresponding declared index also removes its
+derived index. See the [TM-042 benchmark](docs/BENCHMARKS.md#tm-042-sqlite-indexed-read-coverage)
+for cold-read and write costs.
+
 SQLite also uses its primary key and declared non-unique indexes for top-level
 bool/int/float/string equality to restrict ordinary update candidates before
 BSON decoding. Collections with user-created unique indexes retain complete

@@ -164,3 +164,59 @@ process the database snapshot, so this change makes the merge linear rather
 than making writes constant-time. Regression tests additionally count identity
 work, independent of wall-clock timing, and cover recursive BSON IDs, numeric
 identity, booleans, missing IDs, and legacy comparison fallbacks.
+
+## TM-042 SQLite indexed read coverage
+
+Run the same isolated synthetic workload against two checkouts with:
+
+```bash
+PYTHONPATH=. python tests/benchmarks/bench_sqlite_tm042.py --sizes 2000 20000 --repeats 5
+# Use this script with the baseline package to reproduce the before column:
+PYTHONPATH=/path/to/baseline python tests/benchmarks/bench_sqlite_tm042.py --sizes 2000 20000 --repeats 5
+```
+
+Local measurements on 2026-09-18 compared `59b5eaa` with the TM-042 follow-up on
+Darwin arm64, Python 3.14.5. Each size uses a fresh temporary SQLite database,
+five declared indexes, 200-byte body strings, and ObjectId/date/numeric/Decimal128/
+Binary fields. Warm values are medians of five reads after one cold read.
+These are synthetic single-process measurements; the private Talk Python
+application was not rerun. Other validation ran on the host during the baseline,
+so absolute timings are illustrative rather than a controlled latency guarantee.
+
+| Query | Before, 2,000 docs | After, 2,000 docs | Before, 20,000 docs | After, 20,000 docs |
+| --- | ---: | ---: | ---: | ---: |
+| ObjectId equality | 28.778 ms | 0.778 ms | 251.967 ms | 1.085 ms |
+| datetime equality | 32.549 ms | 0.944 ms | 296.649 ms | 0.942 ms |
+| Int64 equality with residual predicate | 54.169 ms | 0.949 ms | 284.149 ms | 1.048 ms |
+| Decimal128 equality | 42.917 ms | 0.878 ms | 426.659 ms | 0.978 ms |
+| Binary subtype 128 equality | 27.709 ms | 1.022 ms | 279.378 ms | 0.888 ms |
+| Standalone date range | 44.448 ms | 1.032 ms | 429.916 ms | 0.992 ms |
+| Standalone numeric range | 43.768 ms | 0.862 ms | 381.907 ms | 0.936 ms |
+| Two indexed `$or` arms | 38.268 ms | 1.061 ms | 336.768 ms | 0.883 ms |
+
+Equalities return one row, ranges return three, and `$or` returns two. Regression
+tests also assert that warm selective reads decode only the matching rows in
+this scalar-only corpus, and `EXPLAIN QUERY PLAN` uses native index searches.
+Arrays and ambiguous numeric representations remain conservative candidates;
+collections dominated by those values can still require substantial matching.
+
+The first BSON equality/date read lazily builds a derived native index. At
+20,000 documents those first reads took 229–539 ms depending on the field,
+versus roughly 1 ms warm. Each derived index scans the collection once, consumes
+disk space, and adds work to subsequent writes. The range and `$or` cases above
+reuse indexes built by earlier equality cases; their reported cold times are
+not independent first-build measurements. Date keys preserve UTC millisecond
+order, while scalar equality keys preserve BSON identity and numeric equality.
+
+With all five derived indexes present, an `_id` point update had a median of
+2.912 ms at 2,000 documents and 3.086 ms at 20,000, versus 2.923 and 2.628 ms on
+the baseline. This small sample does not isolate per-index maintenance cost;
+it checks that these point updates remain bounded in this workload. Initial
+migration before the first BSON/date read does not build these derived indexes.
+All clients writing an indexed file must register the new function, so upgrade
+every writer before sharing it. Dropping the declared index removes its derived
+index as well.
+
+The planner still declines unsafe anchors such as null/regex, partial indexes,
+dotted fields, incomplete `$or` plans, and queries exceeding its bounded tree or
+parameter limits. The exact BSON matcher remains the final result authority.
