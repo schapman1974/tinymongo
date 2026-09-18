@@ -269,8 +269,51 @@ large-document penalty, but is not a private application rerun.
 The new query indexes contain no application-defined function. Local
 portability regressions cover plain SQLite updates and inserts, `VACUUM`,
 `REINDEX`, backup and dump restore, and cleanup of legacy `_bson_v1` indexes.
-Clients running the original #179 read planner still need upgrading because
-they can recreate those legacy indexes. Existing explicit unique and partial
-indexes have separate function requirements, outside this query-cache change.
+Stop or upgrade every original #179 process sharing the file, including readers
+and writers: one of its reads can recreate those legacy indexes. Pre-#179
+writers can remain. Existing explicit unique and partial indexes have separate
+function requirements, outside this query-cache change.
 Dropping a declared index removes its derived index and trigger and clears its
 keys; the empty column remains for SQLite versions without `DROP COLUMN`.
+
+## TM-053 external direct SQLite retest
+
+Michael's [external #180 acceptance report](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5736577143)
+compared direct SQLite at `a54a8ec` with the stored-key implementation at
+`fac214c`. The latter merged as `e39357b` while he measured; he checked that
+the three source files were byte-identical. These are his measurements from
+serialized runs in the same session, separate from the local synthetic results
+above. His environment was Python 3.14.6, PyMongo 4.17, and macOS 26.2 arm64.
+
+| Cold first read | `a54a8ec` | `fac214c` | Ratio |
+| --- | ---: | ---: | ---: |
+| Synthetic, 0.6 MiB | 3.92 ms | 11.61 ms | 3.0x |
+| Synthetic, 3.5 MiB | 6.41 ms | 26.77 ms | 4.2x |
+| Synthetic, 25 MiB | 30.40 ms | 187.00 ms | 6.2x |
+| Synthetic, 200 MiB | 199.83 ms | 1,386.07 ms | 6.9x |
+| Real `opt_ins` date range, 75,617 documents | 380.29 ms | 760.54 ms | 2.0x |
+| Real `episodes` date range, 563 documents | 24.62 ms | 81.28 ms | 3.3x |
+
+Warm reads stayed approximately flat: the 200 MiB synthetic case took 59.69 ms
+before and 63.81 ms after, while the real `opt_ins` range took 4.38 and 4.49 ms.
+Stored keys preserve the TM-042 steady-state improvement but make their initial
+materialization more expensive. Budget this work during deployment warm-up:
+the first relevant query took about 1.4 seconds for his 200 MiB collection and
+0.76 seconds for the real `opt_ins` collection. These measurements do not imply
+that every new filter shape rebuilds the keys; queries can reuse materialized
+keys for the same declared field index.
+
+His synthetic write checks found a 1.0x before/after-index ratio at every payload
+on both pins. The real `opt_ins` insert stayed near one second; migration took
+11.1 versus 10.9 seconds, and application startup took 0.8 versus 1.1 seconds.
+The seeded application suite passed 903 tests on both pins, and the 45-shape
+query differential found no regressions. The full acceptance and the remaining
+application-side type-checker gate are recorded in
+[the external acceptance results](TALKPYTHON_ACCEPTANCE.md#michael-kennedys-180-acceptance-external-evidence).
+
+Before warming or serving a shared file, stop or upgrade all original #179
+readers and writers. Michael verified that one stale #179 read can recreate the
+legacy function-dependent index and block writers and plain SQLite maintenance
+again, even after #180 repaired the store. Pre-#179 writers do not recreate that
+index and can remain. Warm-up cannot make an active mix of #179 and #180 clients
+safe from this recurring incompatibility.

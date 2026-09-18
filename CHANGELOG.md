@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Direct SQLite upgrade guidance for PR #179 users
+
+- **Stop or upgrade every original #179 (`a54a8ec`) client, including readers,
+  before resuming traffic with #180 (`e39357b`) or later.** One indexed BSON/date
+  read by a stale client can recreate an incompatible `_bson_v1` index, breaking
+  older writers and plain SQLite `UPDATE`, `REINDEX`, and `VACUUM`. Fixed clients
+  clean it up again on database open, so a mixed deployment can repeatedly
+  break and repair access.
+- After stopping the affected clients, reopen each database with the fixed
+  version and perform a storage operation, such as
+  `client[database_name].list_collection_names()`, to remove the owned legacy
+  indexes. Constructing a client alone is insufficient. Pre-#179 writers remain
+  compatible with the repaired store; explicit unique/partial indexes keep
+  their separate SQLite function requirements. See the
+  [README upgrade steps](README.md#upgrading-sqlite-stores-from-pr-179).
+- Budget for initial key materialization before serving traffic. Michael
+  Kennedy's direct SQLite retest measured a 200 MiB synthetic collection's cold
+  read at 199.83 ms before the fix versus 1,386.07 ms after, and a real 75,617-row
+  date range at 380.29 ms versus 760.54 ms. Warm reads stayed similar (59.69 to
+  63.81 ms and 4.38 to 4.49 ms). These external measurements describe his
+  workloads, not a latency guarantee. See the
+  [benchmark comparison](docs/BENCHMARKS.md#tm-053-external-direct-sqlite-retest).
+- Add a tested [startup warm-up example](examples/sqlite_warmup.py): consume a
+  supported query for each relevant declared BSON/date index after migrations
+  and bulk loading, before traffic. Limiting results does not limit key-build
+  work; later writes still require key refresh on the next relevant read.
+- Record Michael's acceptance of TM-053 and TM-054 at `fac214c` (merged as
+  `e39357b`): 903 application tests passed, with no candidate-narrowing or
+  MongoDB differential regressions. His unrelated application type-checker
+  gate failed on both comparison pins. See the
+  [acceptance record](docs/TALKPYTHON_ACCEPTANCE.md).
+
 ### TM-053 SQLite portability and partial-index validation
 - Replace read-created BSON/date expression indexes with stored canonical key
   columns and native indexes. Native SQL triggers invalidate changed rows;
