@@ -591,9 +591,10 @@ Unique indexes support JSON scalar values, Decimal128, UUID/Binary, regex, and
 flat arrays on embedded backends. Ordinary indexes treat missing and `null` as
 one unique key, while sparse and partial membership follows the rules above.
 Embedded compound indexes, whether unique or non-unique, reject parallel arrays
-with `OperationFailure` code `171` on index creation and writes. Compound unique
-indexes support one flat array field. Object values, ObjectId, datetime, nested arrays, non-finite
-numbers, and array traversal inside a dotted index path are not supported for
+with `OperationFailure` code `171` on index creation and writes. Python lists and
+tuples both represent BSON arrays. Compound unique indexes support one flat array
+field. Object values, ObjectId, datetime, nested arrays, non-finite numbers, and
+array traversal inside a dotted index path are not supported for
 unique indexes yet.
 Remote SQL stores a versioned canonical token digest beside each unique-indexed
 value and protects it with a native constraint. This preserves exact int/float
@@ -605,7 +606,11 @@ BSON identity.
 
 Invalid partial-index predicates such as `$ne`, `$nin`, `$regex`, or
 `$exists: false`, and combining `sparse` with `partialFilterExpression`, raise
-`OperationFailure` code `67`.
+`OperationFailure` code `67`. `$nor` is also prohibited in partial indexes and
+reports code `67`. Malformed logical operands, a scalar `$in`, mixed operator and
+literal fields, and unknown top-level operators report code `2`; a non-mapping
+partial filter reports code `14`. An empty `partialFilterExpression={}` is legal
+and includes every document, so unique constraints apply to the whole collection.
 
 SQL, DuckDB, and Parquet storage uses typed physical `_id` keys for new rows.
 Existing databases with older stringified keys remain readable and mutable.

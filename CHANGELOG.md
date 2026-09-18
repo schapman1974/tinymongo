@@ -13,8 +13,18 @@
   whose unique-index token sets do not change (TM-046).
 - Reject parallel arrays for non-unique as well as unique compound indexes,
   including index creation and updates, with error code `171` (TM-044).
-- Report invalid partial-index predicates and sparse/partial combinations as
-  `OperationFailure` code `67` (TM-045).
+- Report `$ne`, `$nin`, `$regex`, `$exists: false` partial-index predicates and
+  sparse/partial combinations as `OperationFailure` code `67` (TM-045).
+
+### Round-21 index validation follow-ups
+- Treat Python tuples like lists in compound parallel-array validation and
+  unique-index token generation, rejecting parallel arrays with code `171`
+  while preserving valid single-array uniqueness.
+- Finish TM-045: malformed partial-filter operators and operands report
+  `OperationFailure` code `2`, non-mapping filters report code `14`, and empty
+  filters are accepted. Valid but prohibited `$nor` predicates report code `67`.
+- Record Michael Kennedy's external round-21 application results at `7055584`,
+  including the complete default-JSON migration and remaining performance limits.
 
 ### Added
 - An opt-in experimental `sqlite-sharded` backend now routes stable BSON `_id`
