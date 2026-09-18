@@ -231,8 +231,10 @@ update path no longer need that larger migration.
 
 - [x] **TM-044:** Reject parallel arrays in non-unique compound indexes too,
   including index builds and writes; report MongoDB error code `171`.
-- [x] **TM-045:** Match `OperationFailure` code `67` for invalid partial-index
-  predicates and sparse/partial combinations.
+- [x] **TM-045:** Match `OperationFailure` code `67` for prohibited valid partial-index
+  predicates and sparse/partial combinations. Malformed predicates, including
+  unknown operators inside nested field predicates, report code `2` before
+  checking whether otherwise valid predicates are allowed in partial indexes.
 - [x] **TM-046:** Compare unique-token sets before sharded modifier-update
   preflights, including local-shard replacement validation.
 - [x] **TM-047:** Translate PostgreSQL Unicode encoding failures into the
@@ -250,8 +252,19 @@ update path no longer need that larger migration.
   at 20,000 documents take about 1 ms; BSON/date indexes have a one-time build
   cost and ongoing write/storage overhead. Dotted fields, partial indexes,
   null/regex anchors, oversized query trees, and incomplete `$or` plans retain
-  conservative fallback. Local contracts cover sync/async APIs and MongoDB;
-  Michael's private 45-shape differential still needs a rerun.
+  conservative fallback. Local contracts cover sync/async APIs and MongoDB.
+  Michael's [retest at `a54a8ec`](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5736103996)
+  found 27 of 45 shapes narrowing, with zero narrowing bugs or MongoDB
+  divergences, and a 219x improvement on the real-store date range.
+- [x] **TM-053:** Remove the query-key Python function from read-created SQLite
+  index definitions. Store canonical keys in ordinary columns with native
+  indexes and SQL invalidation triggers, refresh only uncomputed keys before
+  relevant reads, and include concurrent invalidations as conservative
+  candidates. Clean up owned legacy query indexes on open and detected schema
+  changes. Pre-#179 writers and plain SQLite maintenance remain usable;
+  original #179 readers must upgrade to avoid recreating incompatible indexes.
+  Explicit unique/partial index function requirements are unchanged. Retain
+  empty key columns after index removal for older SQLite compatibility.
 - [x] Reuse declared top-level SQLite expression indexes as conservative
   candidate sources for complex positive `$and` reads with scalar equality or
   `$in` anchors. Push safe numeric ranges and `$mod` into SQLite, then retain

@@ -107,8 +107,74 @@ def _default_index_name(keys):
     return "_".join("{0}_{1}".format(field, direction) for field, direction in keys)
 
 
-def _validate_partial_filter(expression):
-    """Validate MongoDB's supported partial-index predicate subset."""
+# Valid field-query operators that the shared matcher does not implement. They
+# must remain unsupported partial predicates, rather than unknown-operator errors.
+_MONGODB_NATIVE_FIELD_OPERATORS = frozenset(
+    (
+        "$bitsAllClear",
+        "$bitsAllSet",
+        "$bitsAnyClear",
+        "$bitsAnySet",
+        "$geoIntersects",
+        "$geoWithin",
+        "$near",
+        "$nearSphere",
+    )
+)
+
+
+def _validate_partial_field_syntax(condition):
+    from .table_backends import (
+        _FIELD_FILTER_OPERATORS,
+        _normalize_not_operand,
+        _validate_field_filter_operators,
+    )
+
+    for operator, operand in condition.items():
+        if operator not in _FIELD_FILTER_OPERATORS | _MONGODB_NATIVE_FIELD_OPERATORS:
+            raise OperationFailure("unknown operator: {0}".format(operator), code=2)
+        if operator == "$not":
+            _validate_partial_field_syntax(_normalize_not_operand(operand))
+            continue
+        if operator == "$elemMatch":
+            _validate_partial_elem_match_syntax(operand)
+            continue
+        if operator == "$all" and isinstance(operand, (list, tuple)):
+            for item in operand:
+                if isinstance(item, Mapping) and set(item) == {"$elemMatch"}:
+                    _validate_partial_elem_match_syntax(item["$elemMatch"])
+        # Validate each operator separately so an unsupported native predicate
+        # cannot hide a later malformed operand. Regex options form one unit.
+        query = {operator: operand}
+        if operator in ("$regex", "$options"):
+            query = {
+                key: value
+                for key, value in condition.items()
+                if key in ("$regex", "$options")
+            }
+        try:
+            _validate_field_filter_operators(query)
+        except TinyMongoNotSupportedError:
+            # Native predicates remain outside the partial-index subset. Their
+            # names were checked above, including nested operator documents.
+            pass
+
+
+def _validate_partial_elem_match_syntax(operand):
+    if not isinstance(operand, Mapping):
+        raise OperationFailure("$elemMatch requires a query document", code=2)
+    if any(str(key).startswith("$") for key in operand) and not any(
+        key in ("$and", "$or", "$nor") for key in operand
+    ):
+        _validate_partial_field_syntax(operand)
+    else:
+        _validate_partial_filter(operand, _syntax_only=True)
+
+
+def _validate_partial_filter(expression, *, _syntax_only=False):
+    """Parse the complete predicate before rejecting unsupported index terms."""
+    if not _syntax_only:
+        _validate_partial_filter(expression, _syntax_only=True)
     field_operators = {"$eq", "$exists", "$gt", "$gte", "$in", "$lt", "$lte", "$type"}
     for field, condition in expression.items():
         if field in ("$and", "$or", "$nor"):
@@ -124,8 +190,8 @@ def _validate_partial_filter(expression):
                     raise OperationFailure(
                         "{0} entries must be mappings".format(field), code=2
                     )
-                _validate_partial_filter(child)
-            if field == "$nor":
+                _validate_partial_filter(child, _syntax_only=_syntax_only)
+            if field == "$nor" and not _syntax_only:
                 _cannot_create_index(
                     "Unsupported partialFilterExpression operator: $nor"
                 )
@@ -141,26 +207,25 @@ def _validate_partial_filter(expression):
         operators = [key for key in condition if str(key).startswith("$")]
         if not operators:
             continue
-        unknown = [
-            operator for operator in operators if operator not in field_operators
-        ]
-        if unknown:
-            _cannot_create_index(
-                "Unsupported partialFilterExpression operator(s): {0}".format(
-                    ", ".join(sorted(unknown))
-                )
-            )
         if len(operators) != len(condition):
             raise OperationFailure(
                 "partialFilterExpression cannot mix operators and literal fields",
                 code=2,
             )
+        if _syntax_only:
+            _validate_partial_field_syntax(condition)
+            continue
+        unsupported = [
+            operator for operator in operators if operator not in field_operators
+        ]
+        if unsupported:
+            _cannot_create_index(
+                "Unsupported partialFilterExpression operator(s): {0}".format(
+                    ", ".join(sorted(unsupported))
+                )
+            )
         if "$exists" in condition and condition["$exists"] is not True:
             _cannot_create_index("partialFilterExpression supports only $exists: true")
-        if "$in" in condition and not isinstance(condition["$in"], (list, tuple)):
-            raise OperationFailure(
-                "$in in partialFilterExpression requires an array", code=2
-            )
 
 
 @dataclass(frozen=True, init=False, eq=False)

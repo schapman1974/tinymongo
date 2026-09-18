@@ -2181,12 +2181,6 @@ class SQLiteTableBackend(TableBackend):
             check_same_thread=check_same_thread,
         )
         conn.create_function(
-            "tinymongo_bson_query_key_v1",
-            2,
-            _sqlite_bson_query_key_from_row,
-            deterministic=True,
-        )
-        conn.create_function(
             "tinymongo_unique_token",
             2,
             _sqlite_unique_token,
@@ -2228,10 +2222,27 @@ class SQLiteTableBackend(TableBackend):
                 conn = self._read_connect()
                 try:
                     conn.execute("PRAGMA journal_mode=WAL")
+                    self._remove_legacy_bson_query_indexes(conn)
                     self._migrate_legacy_blob_on_connection(conn)
                 finally:
                     conn.close()
                 self._sqlite_initialized = True
+
+    def _remove_legacy_bson_query_indexes(self, conn):
+        """Remove only the read-created indexes that require the old callback."""
+        names = [
+            name
+            for name, sql in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+                "AND instr(sql, 'tinymongo_bson_query_key_v1') > 0"
+            )
+            if re.fullmatch(r"__tm_idx_[0-9a-f]{32}_bson_v1", name)
+        ]
+        if names:
+            with self._write_lock():
+                for name in names:
+                    conn.execute("DROP INDEX IF EXISTS " + _quote_identifier(name))
+                conn.commit()
 
     @staticmethod
     def _is_missing_collection_error(exc):
@@ -2447,6 +2458,7 @@ class SQLiteTableBackend(TableBackend):
                 key for key in self._ready_bson_query_indexes if key[0] != collection
             }
 
+        self._remove_legacy_bson_query_indexes(conn)
         specs = self._get_index_specs_on_connection(conn, collection)
         with self._sqlite_state_lock:
             self._query_index_cache[collection] = (schema_version, specs)
@@ -3539,27 +3551,126 @@ class SQLiteTableBackend(TableBackend):
         # SQLite's temporary de-duplication B-tree without duplicating rows.
         return " UNION ALL ".join(branches), params
 
-    @staticmethod
-    def _sqlite_bson_query_expression(field):
-        return "tinymongo_bson_query_key_v1(data, {0})".format(_sql_literal(field))
+    def _sqlite_bson_query_storage_name(self, collection, spec):
+        # A peer can reuse a declared name for another field while a reader
+        # still holds the old plan. Never let that plan read the new field's keys.
+        field_hash = hashlib.sha256(spec.field.encode("utf8")).hexdigest()[:16]
+        return self._physical_index_name(collection, spec) + "_" + field_hash
+
+    def _sqlite_bson_query_expression(self, collection, spec):
+        return _quote_identifier(
+            self._sqlite_bson_query_storage_name(collection, spec) + "_bson_key_v2"
+        )
 
     def _ensure_bson_query_index(self, conn, collection, spec):
+        """Store portable keys; native triggers invalidate keys on any writer."""
         key = (collection, spec.name)
         with self._sqlite_state_lock:
-            if key in self._ready_bson_query_indexes:
-                return
-        with self._write_lock(), self._sqlite_state_lock:
+            ready = key in self._ready_bson_query_indexes
+        table = _quote_identifier(collection)
+        column = self._sqlite_bson_query_expression(collection, spec)
+        physical = self._sqlite_bson_query_storage_name(collection, spec)
+        index = physical + "_bson_v2"
+        trigger = physical + "_bson_invalidate_v2"
+        if not ready:
+            with self._write_lock(), self._sqlite_state_lock:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    columns = {
+                        row[1]
+                        for row in conn.execute("PRAGMA table_info(" + table + ")")
+                    }
+                    if physical + "_bson_key_v2" not in columns:
+                        conn.execute(
+                            "ALTER TABLE {0} ADD COLUMN {1} TEXT".format(table, column)
+                        )
+                    present = {
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE name IN (?, ?)",
+                            (index, trigger),
+                        )
+                    }
+                    if index not in present or trigger not in present:
+                        # A dropped/recreated index or missing trigger may have
+                        # left keys stale. Clear them before trusting this cache.
+                        conn.execute("UPDATE {0} SET {1} = NULL".format(table, column))
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS {0} ON {1} ({2})".format(
+                            _quote_identifier(index),
+                            table,
+                            column,
+                        )
+                    )
+                    conn.execute(
+                        "CREATE TRIGGER IF NOT EXISTS {0} AFTER UPDATE OF data ON {1} "
+                        "BEGIN UPDATE {1} SET {2} = NULL WHERE rowid = NEW.rowid; END".format(
+                            _quote_identifier(trigger),
+                            table,
+                            column,
+                        )
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                self._ready_bson_query_indexes.add(key)
+        self._refresh_bson_query_keys(conn, collection, spec)
+
+    def _refresh_bson_query_keys(self, conn, collection, spec):
+        table = _quote_identifier(collection)
+        column = self._sqlite_bson_query_expression(collection, spec)
+        # NULL means invalidated/uncomputed; 'u:' means a computed non-scalar.
+        # This probe is an index seek and clean warm reads need no write lock.
+        if (
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS {name} ON {table} ({expression})".format(
-                    name=_quote_identifier(
-                        self._physical_index_name(collection, spec) + "_bson_v1"
-                    ),
-                    table=_quote_identifier(collection),
-                    expression=self._sqlite_bson_query_expression(spec.field),
+                "SELECT 1 FROM {0} WHERE {1} IS NULL LIMIT 1".format(table, column)
+            ).fetchone()
+            is None
+        ):
+            return
+        with self._write_lock():
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                trigger = (
+                    self._sqlite_bson_query_storage_name(collection, spec)
+                    + "_bson_invalidate_v2"
                 )
-            )
-            conn.commit()
-            self._ready_bson_query_indexes.add(key)
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                        (trigger,),
+                    ).fetchone()
+                    is None
+                ):
+                    # A peer dropped this index after planning. Its retained
+                    # NULL column is a safe fallback; do not cache unguarded keys.
+                    conn.rollback()
+                    return
+                while True:
+                    # Bound memory even when first use warms a large corpus.
+                    rows = conn.execute(
+                        "SELECT rowid, data FROM {0} WHERE {1} IS NULL LIMIT 256".format(
+                            table, column
+                        )
+                    ).fetchall()
+                    if not rows:
+                        break
+                    conn.executemany(
+                        "UPDATE {0} SET {1} = ? WHERE rowid = ?".format(table, column),
+                        (
+                            (
+                                _sqlite_bson_query_key_from_row(data, spec.field)
+                                or "u:",
+                                rowid,
+                            )
+                            for rowid, data in rows
+                        ),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     @staticmethod
     def _sqlite_array_candidate_query(collection, field):
@@ -3570,18 +3681,31 @@ class SQLiteTableBackend(TableBackend):
             "IN ('array', 'object') AND {1} = 'array'"
         ).format(_quote_identifier(collection), kind)
 
+    def _sqlite_bson_fallback_candidates(self, collection, spec):
+        column = self._sqlite_bson_query_expression(collection, spec)
+        # A writer may invalidate keys after refresh but before this statement.
+        # Read those rows too; cached arrays are a separate, disjoint branch.
+        return (
+            "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} IS NULL "
+            "UNION ALL {2} AND {1} IS NOT NULL"
+        ).format(
+            _quote_identifier(collection),
+            column,
+            self._sqlite_array_candidate_query(collection, spec.field),
+        )
+
     def _sqlite_bson_equality_candidates(self, conn, collection, spec, values):
         self._ensure_bson_query_index(conn, collection, spec)
         keys = list(dict.fromkeys(_sqlite_bson_query_key(value) for value in values))
         sql = "SELECT rowid AS candidate_rowid FROM {0} WHERE {1} IN ({2})".format(
             _quote_identifier(collection),
-            self._sqlite_bson_query_expression(spec.field),
+            self._sqlite_bson_query_expression(collection, spec),
             ", ".join("?" for _ in keys),
         )
         return (
             sql
             + " UNION ALL "
-            + self._sqlite_array_candidate_query(collection, spec.field),
+            + self._sqlite_bson_fallback_candidates(collection, spec),
             keys,
         )
 
@@ -3599,7 +3723,8 @@ class SQLiteTableBackend(TableBackend):
             if identity is not None and identity[0] == "datetime":
                 dates.append(
                     "{0} {1} ?".format(
-                        self._sqlite_bson_query_expression(field), comparisons[operator]
+                        self._sqlite_bson_query_expression(collection, spec),
+                        comparisons[operator],
                     )
                 )
                 date_params.append(_sqlite_bson_query_key(operand))
@@ -3613,7 +3738,7 @@ class SQLiteTableBackend(TableBackend):
         table = _quote_identifier(collection)
         if dates:
             self._ensure_bson_query_index(conn, collection, spec)
-            expression = self._sqlite_bson_query_expression(field)
+            expression = self._sqlite_bson_query_expression(collection, spec)
             if ">" not in date_directions:
                 dates.append(expression + " >= 'd:'")
             if "<" not in date_directions:
@@ -3623,7 +3748,7 @@ class SQLiteTableBackend(TableBackend):
             ).format(
                 table,
                 " AND ".join(dates),
-                self._sqlite_array_candidate_query(collection, field),
+                self._sqlite_bson_fallback_candidates(collection, spec),
             )
             return sql, date_params
         if numbers:
@@ -4536,6 +4661,23 @@ class SQLiteTableBackend(TableBackend):
                 "DROP INDEX IF EXISTS {0}".format(
                     _quote_identifier(physical_name + "_bson_v1")
                 )
+            )
+            column = self._sqlite_bson_query_expression(collection, spec)
+            query_storage = self._sqlite_bson_query_storage_name(collection, spec)
+            table = _quote_identifier(collection)
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(" + table + ")")
+            }
+            if query_storage + "_bson_key_v2" in columns:
+                # Keep a concurrent reader's old plan conservative after drop.
+                # Retain the empty column for older SQLite without DROP COLUMN.
+                conn.execute("UPDATE {0} SET {1} = NULL".format(table, column))
+            conn.execute(
+                "DROP INDEX IF EXISTS " + _quote_identifier(query_storage + "_bson_v2")
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                + _quote_identifier(query_storage + "_bson_invalidate_v2")
             )
             conn.execute(
                 "DELETE FROM {0} WHERE collection_name = ? AND index_name = ?".format(

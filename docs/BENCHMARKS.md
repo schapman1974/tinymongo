@@ -175,8 +175,9 @@ PYTHONPATH=. python tests/benchmarks/bench_sqlite_tm042.py --sizes 2000 20000 --
 PYTHONPATH=/path/to/baseline python tests/benchmarks/bench_sqlite_tm042.py --sizes 2000 20000 --repeats 5
 ```
 
-Local measurements on 2026-09-18 compared `59b5eaa` with the TM-042 follow-up on
-Darwin arm64, Python 3.14.5. Each size uses a fresh temporary SQLite database,
+Historical measurements on 2026-09-18 compared `59b5eaa` with the original
+TM-042 implementation merged in #179 (`a54a8ec`) on Darwin arm64, Python 3.14.5.
+Each size uses a fresh temporary SQLite database,
 five declared indexes, 200-byte body strings, and ObjectId/date/numeric/Decimal128/
 Binary fields. Warm values are medians of five reads after one cold read.
 These are synthetic single-process measurements; the private Talk Python
@@ -200,9 +201,9 @@ this scalar-only corpus, and `EXPLAIN QUERY PLAN` uses native index searches.
 Arrays and ambiguous numeric representations remain conservative candidates;
 collections dominated by those values can still require substantial matching.
 
-The first BSON equality/date read lazily builds a derived native index. At
-20,000 documents those first reads took 229–539 ms depending on the field,
-versus roughly 1 ms warm. Each derived index scans the collection once, consumes
+In that implementation, the first BSON equality/date read lazily built a derived
+expression index. At 20,000 documents those first reads took 229–539 ms depending
+on the field, versus roughly 1 ms warm. Each derived index scans the collection once, consumes
 disk space, and adds work to subsequent writes. The range and `$or` cases above
 reuse indexes built by earlier equality cases; their reported cold times are
 not independent first-build measurements. Date keys preserve UTC millisecond
@@ -213,10 +214,63 @@ With all five derived indexes present, an `_id` point update had a median of
 the baseline. This small sample does not isolate per-index maintenance cost;
 it checks that these point updates remain bounded in this workload. Initial
 migration before the first BSON/date read does not build these derived indexes.
-All clients writing an indexed file must register the new function, so upgrade
-every writer before sharing it. Dropping the declared index removes its derived
-index as well.
+Those historical indexes required every writer to register the query-key
+function and prevented some plain SQLite maintenance. TM-053 replaces that
+implementation with stored keys, as measured below.
 
 The planner still declines unsafe anchors such as null/regex, partial indexes,
 dotted fields, incomplete `$or` plans, and queries exceeding its bounded tree or
 parameter limits. The exact BSON matcher remains the final result authority.
+
+## TM-053 portable SQLite query keys
+
+The same synthetic script was rerun locally for TM-053 on 2026-09-18. These
+measurements use the stored-key implementation, fresh temporary databases at
+each size, and five warm repetitions. They are separate from the historical
+TM-042 measurements above and from Michael's private real-store retest.
+Other validation was active on the host, so these timings do not isolate the
+index-maintenance overhead or establish a controlled latency guarantee.
+
+| Query | Warm, 2,000 docs | First read, 20,000 docs | Warm, 20,000 docs |
+| --- | ---: | ---: | ---: |
+| ObjectId equality | 0.742 ms | 599.842 ms | 0.782 ms |
+| datetime equality | 1.116 ms | 456.078 ms | 1.023 ms |
+| Int64 equality with residual predicate | 1.185 ms | 605.817 ms | 0.930 ms |
+| Decimal128 equality | 1.012 ms | 789.270 ms | 0.899 ms |
+| Binary subtype 128 equality | 1.048 ms | 874.408 ms | 0.894 ms |
+| Standalone date range | 0.773 ms | 1.174 ms | 0.986 ms |
+| Standalone numeric range | 0.945 ms | 1.230 ms | 0.976 ms |
+| Two indexed `$or` arms | 1.042 ms | 1.405 ms | 1.098 ms |
+
+The five equality cases each pay to add a key column, native index, and SQL
+invalidation trigger, then scan the collection and write its canonical keys.
+At 20,000 documents this costs 456–874 ms for a new field. The date range and
+`$or` reuse keys built by earlier equality cases; their first-read values do
+not measure a new key build. Ordinary numeric ranges use existing JSON
+expression indexes. Warm reads still take about 1 ms in this scalar-only
+workload. Stored keys and their indexes add disk and schema overhead.
+
+An `_id` point update with five derived indexes had a median of 2.665 ms at
+2,000 documents and 6.659 ms at 20,000, compared with 2.513 and 2.660 ms before
+those indexes were created in the same run. Writes now invalidate cached keys
+through native SQL triggers, including writes from older clients or plain
+SQLite. The next relevant read refreshes only uncomputed keys under a write
+transaction. These point-update timings do not include that deferred refresh;
+a large intervening batch of writes makes the next read pay for a larger
+refresh. Queries conservatively include keys invalidated after refresh so
+concurrent writers cannot cause missing matches.
+
+A separate 200-document check with 128 KiB payloads and five warmed BSON/date
+indexes timed each update together with the following five indexed reads, so
+deferred refresh was included. Median of three was 11.957 ms at `a54a8ec` and
+12.349 ms with stored keys. This small local comparison found no material
+large-document penalty, but is not a private application rerun.
+
+The new query indexes contain no application-defined function. Local
+portability regressions cover plain SQLite updates and inserts, `VACUUM`,
+`REINDEX`, backup and dump restore, and cleanup of legacy `_bson_v1` indexes.
+Clients running the original #179 read planner still need upgrading because
+they can recreate those legacy indexes. Existing explicit unique and partial
+indexes have separate function requirements, outside this query-cache change.
+Dropping a declared index removes its derived index and trigger and clears its
+keys; the empty column remains for SQLite versions without `DROP COLUMN`.

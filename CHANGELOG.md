@@ -2,13 +2,33 @@
 
 ## [Unreleased]
 
+### TM-053 SQLite portability and partial-index validation
+- Replace read-created BSON/date expression indexes with stored canonical key
+  columns and native indexes. Native SQL triggers invalidate changed rows;
+  relevant reads refresh uncomputed keys transactionally and retain them as
+  conservative candidates if another writer changes a row before selection.
+- Remove owned legacy `_bson_v1` query indexes when opening a store and when
+  queries discover schema changes. The replacement permits pre-#179 writers
+  and plain SQLite maintenance without the query-key Python function. Clients
+  using #179 must upgrade to avoid recreating the old indexes; explicit unique
+  and partial indexes retain their separate function requirements.
+- Dropping a declared index removes its derived index and invalidation trigger
+  and clears its keys. Retain the empty key column for older SQLite versions.
+- Finish the remaining partial-filter error-code mismatch: unknown operators
+  inside field predicates and malformed nested operands report
+  `OperationFailure` code `2`, while valid prohibited predicates retain code
+  `67`. Validate syntax before deciding whether a partial predicate is allowed.
+- Record Michael Kennedy's real-store confirmation of TM-042 at `a54a8ec` and
+  his TM-053 report, with local portability regressions and updated cold/warm
+  measurements kept separate from his application results.
+
 ### TM-042 SQLite read planner follow-up
 - Use declared top-level indexes for BSON scalar equality and `$in`, standalone
   date and ordinary numeric ranges, and `$or` with a safe indexed source in every
   arm. Preserve exact BSON matching, array semantics, counts, and cursor bounds.
-- Build derived BSON/date native indexes lazily, maintain them on writes, and
-  remove them with their declared index. First use scans the collection; all
-  writers sharing the file must use a version that registers the new function.
+- Build derived BSON/date native indexes lazily. The original expression-index
+  implementation required a Python function on every writer; TM-053 above
+  replaces it with portable stored keys and native invalidation triggers.
 - Add MongoDB reference contracts, index-use and bounded-decode regressions,
   and a reproducible cold/warm SQLite benchmark. Unsupported shapes continue
   through conservative fallback.
