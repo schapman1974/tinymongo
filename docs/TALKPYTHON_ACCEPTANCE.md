@@ -257,8 +257,9 @@ These are his measurements, not a local rerun or validation of subsequent change
 TM-044's original cases, TM-046, TM-047, and TM-048 passed. The new tuple-shaped
 parallel-array case and remaining TM-045 declaration errors are covered by
 `tests/contracts/test_index_validation_contract.py`, through both client APIs,
-all six embedded backends, and real MongoDB. Michael has not yet rerun these
-round-21 follow-up fixes against the private application.
+all six embedded backends, and real MongoDB. These fixes had not yet been
+retested by Michael at the time of the round-21 report; his later `a54a8ec`
+retest is recorded below.
 
 The real-store sharded timings from round 19 were not remeasured. TM-042 still
 returned correct results for all 45 tested filter shapes, but 28 declined index
@@ -267,19 +268,81 @@ cost is resolved by the index-validation follow-up.
 
 ## TM-042 SQLite planner follow-up (local evidence)
 
-The next follow-up extends indexed reads to BSON scalar equality and `$in`,
-standalone date and ordinary numeric ranges, and `$or` whose every arm has a safe
-indexed candidate source. `tests/contracts/test_sqlite_candidate_contract.py`
+The follow-up merged as #179 (`a54a8ec`) extends indexed reads to BSON scalar
+equality and `$in`, standalone date and ordinary numeric ranges, and `$or` whose
+every arm has a safe indexed candidate source.
+`tests/contracts/test_sqlite_candidate_contract.py`
 checks sync and async results against MongoDB 8.2, while
 `tests/test_sqlite_tm042.py` checks SQLite/sharded SQLite decoding bounds, native
 index use, reopen/update/drop behavior, and conservative fallback. The
 [synthetic benchmark](BENCHMARKS.md#tm-042-sqlite-indexed-read-coverage) measures
 both cold and warm reads and documents index maintenance costs.
 
-These local results do not establish that all 45 shapes in Michael's private
-differential now engage the planner, or rerun the 903 application tests. His next
-SQLite pass should repeat that differential, the real-store date range, cold and
-warm timings, and write/migration checks after derived indexes exist. Upgrade
-all writers sharing the store before testing; older clients cannot maintain the
-new derived index function. JSON/memory whole-database write cost remains outside
-this SQLite follow-up.
+These local results did not rerun the private differential or the 903
+application tests. Michael's subsequent SQLite report below covers the
+differential, real-store reads, and write/migration checks. The original derived
+expression index required a Python function on every writer; TM-053 below
+replaces it. JSON/memory whole-database write cost remains outside this SQLite
+follow-up.
+
+## Michael Kennedy's TM-042 retest and TM-053 report (external evidence)
+
+Michael's [retest of `a54a8ec`](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5736103996)
+compared it with `7055584` on the real SQLite store, with 75,617 `opt_ins`
+documents and 563 `episodes`. Warm values are medians of three in the same
+session. These are Michael's measurements, not a local application rerun.
+
+- The unanchored `opt_ins` date range returned 191 rows in 4.32 ms warm,
+  down from 945.51 ms, a 219x improvement. Its first read took 372.78 ms.
+  Datetime equality improved from 519.66 to 0.61 ms, or 852x. That equality's
+  first read reused the index already built by the range query.
+- All three original TM-042 shapes narrowed: BSON equality, standalone date
+  ranges, and indexed `$or`. Of the 45 differential shapes, 27 narrowed and
+  18 declined, compared with 17 and 28 previously. He found zero narrowing
+  bugs and zero divergences against MongoDB 8.2.
+- Inserting one document into `opt_ins` after derived indexes existed took
+  1,056.15 ms versus 1,048.71 ms at the prior pin. Full migration took
+  5.0 seconds versus 5.2; re-migration took 10.9 versus 9.8 seconds. Synthetic
+  payload checks found no added database-size scaling from the derived index.
+- Tuple parallel arrays now returned code `171`, empty partial filters were
+  accepted, and the reported malformed/non-mapping declaration cases returned
+  the expected codes. One partial-filter mismatch remained: an unknown field
+  operator returned `67` instead of MongoDB's `2`.
+- **TM-053:** One BSON/date read created a persistent expression index requiring
+  the per-connection `tinymongo_bson_query_key_v1` Python function. Older writers
+  and plain SQLite updates, `VACUUM`, and `REINDEX` then failed. Dropping the
+  declared index restored access; he reported no data loss.
+
+Local reproduction confirmed the maintenance failures. Backup creation and
+dump generation themselves succeeded; restoring that dump without the function
+failed. This qualifies the broader backup/dump failure claim in the report.
+The report does not establish a new complete private application test run.
+JSON/memory application tests remained blocked by the startup cost tracked in
+#176.
+
+## TM-053 and remaining partial-filter validation follow-up (local evidence)
+
+The combined follow-up stores canonical BSON/date keys in ordinary SQLite
+columns, with native indexes and SQL triggers that invalidate keys when a
+document changes. Relevant reads refresh only uncomputed keys transactionally
+and also include rows invalidated concurrently as conservative candidates.
+Opening a store removes owned legacy `_bson_v1` indexes; queries repeat cleanup
+when they discover schema changes. The new read-created schema requires no
+query-key Python function. Older pre-#179 writers remain compatible, while
+original #179 readers must upgrade so they cannot recreate the legacy indexes.
+Explicit unique and partial indexes retain separate function requirements.
+
+`tests/test_sqlite_query_portability.py` covers plain SQLite maintenance,
+backup and restore, external writes, legacy-index cleanup, and invalidation
+lifecycle. Existing SQLite candidate tests preserve exact matching and bounded
+warm decoding. The [TM-053 synthetic measurements](BENCHMARKS.md#tm-053-portable-sqlite-query-keys)
+keep first-build costs, warm reads, and write costs separate; a write defers key
+refresh work to the next relevant read.
+
+The same follow-up validates partial-filter syntax before restricting which
+valid predicates may appear in an index. Unknown operators inside field
+predicates and malformed nested operands return code `2`; valid prohibited
+predicates retain code `67`. The shared index-validation contracts cover the
+embedded backends, sync/async APIs, and the MongoDB reference backend. These
+local checks are not a rerun of Michael's private application; his next SQLite
+pass should confirm portability and query behavior against the new pin.

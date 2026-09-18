@@ -1,4 +1,6 @@
-"""Round-21 index guards compared with MongoDB through both client APIs."""
+"""Index validation compared with MongoDB through both client APIs."""
+
+import re
 
 import pytest
 from pymongo import IndexModel
@@ -73,6 +75,42 @@ def test_tuple_arrays_outside_partial_index_are_legal(contract_target, unique):
 @pytest.mark.parametrize(
     "expression, code",
     [
+        ({"a": {"$unknown": 1}}, 2),
+        ({"a": {"$and": [{"$eq": 1}]}}, 2),
+        ({"a": {"$comment": "unknown in a field predicate"}}, 2),
+        ({"a": {"$expr": {"$eq": [1, 1]}}}, 2),
+        ({"a": {"$gt": 1, "$unknown": 1}}, 2),
+        ({"a": {"$ne": 1, "$unknown": 1}}, 2),
+        ({"a": {"$not": {"$unknown": 1}}}, 2),
+        ({"a": {"$not": {"$and": [{"$eq": 1}]}}}, 2),
+        ({"a": {"$elemMatch": {"$unknown": 1}}}, 2),
+        ({"a": {"$elemMatch": {"b": {"$unknown": 1}}}}, 2),
+        ({"a": {"$all": [{"$elemMatch": {"b": {"$unknown": 1}}}]}}, 2),
+        ({"$or": [{"a": 1}, {"b": {"$unknown": 1}}]}, 2),
+        ({"$and": [{"a": {"$ne": 1}}, {"b": {"$unknown": 1}}]}, 2),
+        ({"$nor": [{"a": {"$unknown": 1}}]}, 2),
+        ({"$and": [{"a": {"$ne": 1}}, {"$or": [{"b": {"$unknown": 1}}]}]}, 2),
+        ({"a": {"$ne": 1}, "b": {"$in": 1}}, 2),
+        ({"a": {"$nin": 1}}, 2),
+        ({"a": {"$not": 1}}, 2),
+        ({"a": {"$elemMatch": 1}}, 2),
+        ({"a": {"$all": 1}}, 2),
+        ({"a": {"$size": "invalid"}}, 2),
+        ({"a": {"$regex": 1}}, 2),
+        ({"a": {"$options": "i"}}, 2),
+        ({"a": {"$ne": 1, "unit": "kg"}}, 2),
+        ({"a": {"$not": {"$gt": 1}}}, 67),
+        ({"a": {"$elemMatch": {"$gt": 1}}}, 67),
+        ({"a": {"$elemMatch": {"b": {"$gt": 1}}}}, 67),
+        ({"a": {"$elemMatch": {"$or": [{"b": 1}, {"b": 2}]}}}, 67),
+        ({"a": {"$size": 1}}, 67),
+        ({"a": {"$all": [re.compile("x")]}}, 67),
+        ({"a": {"$all": [{"$elemMatch": {"$gt": 1}}]}}, 67),
+        ({"a": {"$all": []}}, 67),
+        ({"a": {"$elemMatch": {}}}, 67),
+        ({"a": {"$not": re.compile("x")}}, 67),
+        ({"a": {"$regex": "x", "$options": "i"}}, 67),
+        ({"a": {"$bitsAllSet": 1}}, 67),
         ({"a": {"$ne": 1}}, 67),
         ({"a": {"$nin": [1]}}, 67),
         ({"a": {"$regex": "x"}}, 67),
@@ -118,3 +156,16 @@ def test_empty_partial_filter_indexes_every_document(contract_target, batch):
             col.insert_one(doc)
     assert col.index_information()["a_1"]["partialFilterExpression"] == {}
     assert col.count_documents({}) == 2
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_partial_filter_operator_named_keys_in_equality_are_literal(
+    contract_target, batch
+):
+    col = contract_target.collection
+    expression = {"a": {"$eq": {"$unknown": 1}}}
+    if batch:
+        col.create_indexes([IndexModel("a", partialFilterExpression=expression)])
+    else:
+        col.create_index("a", partialFilterExpression=expression)
+    assert col.index_information()["a_1"]["partialFilterExpression"] == expression

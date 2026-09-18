@@ -103,7 +103,7 @@ def test_bson_candidates_use_native_index_and_survive_restart_and_updates(tmp_pa
             plans = [
                 row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, params)
             ]
-            assert any("SEARCH" in plan and "_bson_v1" in plan for plan in plans)
+            assert any("SEARCH" in plan and "_bson_v2" in plan for plan in plans)
             assert not any("SCAN docs" in plan for plan in plans)
         finally:
             conn.close()
@@ -120,7 +120,7 @@ def test_bson_candidates_use_native_index_and_survive_restart_and_updates(tmp_pa
         conn = col.parent.engine._connect()
         try:
             assert not any(
-                row[0].endswith("_bson_v1")
+                row[0].endswith(("_bson_v1", "_bson_v2"))
                 for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='index'"
                 )
@@ -146,7 +146,7 @@ def test_range_candidates_use_native_index_searches(tmp_path, dates):
                 row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, params)
             ]
             assert any(
-                "SEARCH docs" in plan and "<expr>>? AND <expr><?" in plan
+                "SEARCH docs" in plan and ">? AND " in plan and "<?" in plan
                 for plan in plans
             )
             assert not any("SCAN docs" in plan for plan in plans)

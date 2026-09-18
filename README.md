@@ -352,14 +352,30 @@ arrays remain conservative candidates and overlapping `$or` arms are deduplicate
 before cursor bounds. Partial indexes, dotted fields, and unsupported predicates
 retain the fallback path when no other safe anchor exists.
 
-BSON equality and date ranges lazily build a derived native index on first use.
-That first read scans the collection, adds index storage, and holds the write
-lock while building; later writes maintain the derived index. Warm reads avoid
-that setup. Upgrade every writer before sharing such a SQLite file: older
-TinyMongo versions do not register the new index function and cannot maintain
-these indexes. Dropping the corresponding declared index also removes its
-derived index. See the [TM-042 benchmark](docs/BENCHMARKS.md#tm-042-sqlite-indexed-read-coverage)
-for cold-read and write costs.
+BSON equality and date ranges lazily store canonical keys in ordinary SQLite
+columns with native indexes. First use scans the collection, writes the keys,
+adds storage, and holds the write lock while building. Native SQL triggers
+invalidate a changed document's keys, including updates from older writers or
+plain SQLite; new documents start with uncomputed keys. The next relevant read
+refreshes those keys under a transaction. Queries also include any uncomputed
+keys so a concurrent write cannot hide a matching document. Clean warm reads
+avoid this setup and refresh work.
+
+These read-created indexes require no application-defined SQLite function, so
+they permit plain SQLite writes, `VACUUM`, `REINDEX`, backups, and dump restores.
+Opening an older store removes TinyMongo's legacy `_bson_v1` query indexes;
+schema changes noticed by later queries also trigger cleanup. Upgrade clients
+running the original #179 implementation, because their reads can recreate
+those incompatible indexes. Writers from before #179 can use the new key
+columns and invalidation triggers without registering a new function. Explicit
+unique and partial indexes retain their separate function requirements; this
+change does not make every TinyMongo SQLite schema independent of the library.
+
+Dropping the corresponding declared index removes the derived native index and
+trigger and clears its key column. The empty column remains for compatibility
+with SQLite versions that lack `DROP COLUMN`. See the
+[TM-053 benchmark](docs/BENCHMARKS.md#tm-053-portable-sqlite-query-keys) for cold-read,
+refresh, and write costs.
 
 SQLite also uses its primary key and declared non-unique indexes for top-level
 bool/int/float/string equality to restrict ordinary update candidates before
@@ -621,11 +637,13 @@ array/multikey, Decimal128, UUID/Binary, and regex values under unique indexes
 because those tokens cannot yet guarantee cross-process MongoDB multikey or
 BSON identity.
 
-Invalid partial-index predicates such as `$ne`, `$nin`, `$regex`, or
+Valid query predicates prohibited in partial indexes, such as `$ne`, `$nin`, `$regex`, or
 `$exists: false`, and combining `sparse` with `partialFilterExpression`, raise
 `OperationFailure` code `67`. `$nor` is also prohibited in partial indexes and
 reports code `67`. Malformed logical operands, a scalar `$in`, mixed operator and
-literal fields, and unknown top-level operators report code `2`; a non-mapping
+literal fields, and unknown operators at either the top level or inside field
+predicates report code `2`. Malformed nested predicates are validated before
+rejecting otherwise valid but prohibited partial-index operators. A non-mapping
 partial filter reports code `14`. An empty `partialFilterExpression={}` is legal
 and includes every document, so unique constraints apply to the whole collection.
 
