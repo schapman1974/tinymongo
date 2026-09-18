@@ -4,7 +4,11 @@ from uuid import UUID
 
 import pytest
 
-from tinymongo.errors import DuplicateKeyError, TinyMongoNotSupportedError
+from tinymongo.errors import (
+    DuplicateKeyError,
+    OperationFailure,
+    TinyMongoNotSupportedError,
+)
 from tinymongo.indexes import (
     INDEX_METADATA_VERSION,
     IndexSpec,
@@ -88,8 +92,9 @@ def test_partial_filter_accepts_nested_literal_documents():
 @pytest.mark.parametrize("operator", ["$and", "$or"])
 @pytest.mark.parametrize("children", [[], "not-an-array"])
 def test_partial_filter_logical_operators_require_nonempty_arrays(operator, children):
-    with pytest.raises(TinyMongoNotSupportedError, match="non-empty array"):
+    with pytest.raises(OperationFailure, match="non-empty array") as caught:
         parse_index_spec("email", partialFilterExpression={operator: children})
+    assert caught.value.code == 2
 
 
 def test_index_spec_requires_exactly_one_key_input():
@@ -314,7 +319,7 @@ def test_unique_validation_treats_equivalent_numbers_as_duplicates():
     [
         {"nested": "object"},
         [["nested", "array"]],
-        ("tuple",),
+        [("nested", "tuple")],
         object(),
         float("inf"),
         float("nan"),

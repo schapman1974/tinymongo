@@ -464,7 +464,6 @@ def test_partial_filter_supports_boolean_range_in_type_and_logical_predicates(
     ("options", "message"),
     [
         ({"partialFilterExpression": []}, "must be a mapping"),
-        ({"partialFilterExpression": {}}, "non-empty mapping"),
         (
             {"partialFilterExpression": {"active": {"$exists": False}}},
             "only \\$exists: true",
@@ -503,17 +502,25 @@ def test_invalid_advanced_index_predicates_and_options_leave_no_metadata(
     client = tinymongo.TinyMongoClient(str(tmp_path / uuid4().hex), backend="sqlite")
     items = client.app.items
     try:
-        invalid_definition = message in (
-            r"only \$exists: true",
-            "cannot be combined",
-        ) or options.get("partialFilterExpression") == {"email": {"$ne": None}}
+        expression = options.get("partialFilterExpression")
+        code = None
+        if "partialFilterExpression" in options:
+            if not isinstance(expression, dict):
+                code = 14
+            elif message in (
+                r"only \$exists: true",
+                "cannot be combined",
+            ) or expression in ({"email": {"$ne": None}}, {"$nor": [{"active": True}]}):
+                code = 67
+            else:
+                code = 2
         error_type = (
-            OperationFailure if invalid_definition else TinyMongoNotSupportedError
+            OperationFailure if code is not None else TinyMongoNotSupportedError
         )
         with pytest.raises(error_type, match=message) as caught:
             items.create_index("value", **options)
-        if invalid_definition:
-            assert caught.value.code == 67
+        if code is not None:
+            assert caught.value.code == code
         assert items.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
     finally:
         client.close()

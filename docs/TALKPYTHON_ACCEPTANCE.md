@@ -226,5 +226,41 @@ His [harness correction](https://github.com/schapman1974/tinymongo/issues/136#is
 also explains that earlier runs accidentally sent about 30 tests to real MongoDB.
 Round 20 verified all 813 with that server unreachable. TinyMongo's own
 process-wide acceptance runner did not have that hole; the previously documented
-597-test baseline is unchanged. A new private-application run is still required
-to qualify TM-044 through TM-049 against that full workload.
+597-test baseline is unchanged. The subsequent round-21 report below evaluates
+the TM-044 through TM-049 fixes against the full workload.
+
+## Michael Kennedy's round-21 report (external evidence)
+
+Michael's [2026-09-18 follow-up](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5734514300)
+tested merge commit `7055584` after #177 against his application and MongoDB 8.2.
+These are his measurements, not a local rerun or validation of subsequent changes.
+
+- **Default JSON migration completed:** all nine collections and all 81,579
+  documents, zero rejections, in 275.6 seconds wall time. Round 20 could not
+  complete the full corpus on this backend.
+- **903 application tests passed** with real MongoDB deliberately unreachable.
+  The increase from 813 reflects new application tests. His remaining type-checker
+  gate failure came from an application-side `ty` upgrade, unrelated to TinyMongo.
+- The new pin read all 81,579 documents from the old store with no failing
+  collections. Stable SQLite migration took 11.1 / 10.2 seconds versus
+  11.7 / 10.3 seconds at the previous pin in the same session.
+- The 56-script repro sweep reported 51 clean and no regressions. Three scripts
+  lacked old fixture paths, one was stale because unknown client keywords now
+  correctly raise `ConfigurationError`, and TM-045 remained partially open.
+- Cross-shard uniqueness passed 34/34 checks at both 4 and 12 shards. Unindexed
+  and unique-token-preserving updates at 20,000 documents took 0.788 and 0.344 ms;
+  token-changing updates retained the full uniqueness preflight.
+- JSON/memory insert benchmarks improved 58–72 times. Writes still process the
+  whole database: growing an untouched neighbouring collection eightfold caused
+  roughly sixfold growth in the fixed target collection's write time.
+
+TM-044's original cases, TM-046, TM-047, and TM-048 passed. The new tuple-shaped
+parallel-array case and remaining TM-045 declaration errors are covered by
+`tests/contracts/test_index_validation_contract.py`, through both client APIs,
+all six embedded backends, and real MongoDB. Michael has not yet rerun these
+round-21 follow-up fixes against the private application.
+
+The real-store sharded timings from round 19 were not remeasured. TM-042 still
+returned correct results for all 45 tested filter shapes, but 28 declined index
+narrowing. Neither that planner limitation nor whole-database JSON/memory write
+cost is resolved by the index-validation follow-up.

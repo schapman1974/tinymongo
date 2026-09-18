@@ -175,13 +175,18 @@ def test_sharded_changed_unique_tokens_still_reject_conflicts(tmp_path):
     "backend", ["memory", "json", "sqlite", "sqlite-sharded", "duckdb", "parquet"]
 )
 @pytest.mark.parametrize("unique", [False, True])
-def test_parallel_arrays_rejected_for_all_compound_indexes(tmp_path, backend, unique):
+@pytest.mark.parametrize(
+    "arrays", [(list, list), (tuple, tuple), (list, tuple), (tuple, list)]
+)
+def test_parallel_arrays_rejected_for_all_compound_indexes(
+    tmp_path, backend, unique, arrays
+):
     from pymongo.errors import OperationFailure
 
     with TinyMongoClient(str(tmp_path), backend=backend) as client:
         col = client.app.docs
         col.create_index([("a", 1), ("b", 1)], unique=unique)
-        invalid = {"_id": 1, "a": ["x"], "b": ["y"]}
+        invalid = {"_id": 1, "a": arrays[0](["x"]), "b": arrays[1](["y"])}
         for insert in [
             lambda: col.insert_one(invalid),
             lambda: col.insert_many([invalid]),
@@ -192,8 +197,8 @@ def test_parallel_arrays_rejected_for_all_compound_indexes(tmp_path, backend, un
             assert col.count_documents({}) == 0
         col.insert_one({"_id": 1, "a": ["x"], "b": "y"})
         for mutate in [
-            lambda: col.update_one({"_id": 1}, {"$set": {"b": ["y"]}}),
-            lambda: col.update_many({}, {"$set": {"b": ["y"]}}),
+            lambda: col.update_one({"_id": 1}, {"$set": {"b": arrays[1](["y"])}}),
+            lambda: col.update_many({}, {"$set": {"b": arrays[1](["y"])}}),
             lambda: col.replace_one({"_id": 1}, invalid),
         ]:
             with pytest.raises(OperationFailure) as caught:

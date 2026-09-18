@@ -109,24 +109,31 @@ def _default_index_name(keys):
 
 def _validate_partial_filter(expression):
     """Validate MongoDB's supported partial-index predicate subset."""
-    if not isinstance(expression, Mapping) or not expression:
-        _unsupported("partialFilterExpression must be a non-empty mapping")
-
     field_operators = {"$eq", "$exists", "$gt", "$gte", "$in", "$lt", "$lte", "$type"}
     for field, condition in expression.items():
-        if field in ("$and", "$or"):
+        if field in ("$and", "$or", "$nor"):
             if not isinstance(condition, (list, tuple)) or not condition:
-                _unsupported(
+                raise OperationFailure(
                     "{0} in partialFilterExpression requires a non-empty array".format(
                         field
-                    )
+                    ),
+                    code=2,
                 )
             for child in condition:
+                if not isinstance(child, Mapping):
+                    raise OperationFailure(
+                        "{0} entries must be mappings".format(field), code=2
+                    )
                 _validate_partial_filter(child)
+            if field == "$nor":
+                _cannot_create_index(
+                    "Unsupported partialFilterExpression operator: $nor"
+                )
             continue
         if not is_bson_string(field) or field.startswith("$"):
-            _unsupported(
-                "Unsupported partialFilterExpression operator: {0}".format(field)
+            raise OperationFailure(
+                "Unsupported partialFilterExpression operator: {0}".format(field),
+                code=2,
             )
         _validate_field(field)
         if not isinstance(condition, Mapping):
@@ -144,13 +151,16 @@ def _validate_partial_filter(expression):
                 )
             )
         if len(operators) != len(condition):
-            _unsupported(
-                "partialFilterExpression cannot mix operators and literal fields"
+            raise OperationFailure(
+                "partialFilterExpression cannot mix operators and literal fields",
+                code=2,
             )
         if "$exists" in condition and condition["$exists"] is not True:
             _cannot_create_index("partialFilterExpression supports only $exists: true")
         if "$in" in condition and not isinstance(condition["$in"], (list, tuple)):
-            _unsupported("$in in partialFilterExpression requires an array")
+            raise OperationFailure(
+                "$in in partialFilterExpression requires an array", code=2
+            )
 
 
 @dataclass(frozen=True, init=False, eq=False)
@@ -191,7 +201,7 @@ class IndexSpec:
         if not isinstance(sparse, bool):
             _unsupported("The sparse index option must be a boolean")
         if partial_filter is not None and not isinstance(partial_filter, Mapping):
-            _unsupported("partialFilterExpression must be a mapping")
+            raise OperationFailure("partialFilterExpression must be a mapping", code=14)
         if sparse and partial_filter is not None:
             _cannot_create_index(
                 "The sparse and partialFilterExpression options cannot be combined"
@@ -426,7 +436,7 @@ def _validate_model_options(options):
 
     partial_filter = options.get("partialFilterExpression")
     if partial_filter is not None and not isinstance(partial_filter, Mapping):
-        _unsupported("partialFilterExpression must be a mapping")
+        raise OperationFailure("partialFilterExpression must be a mapping", code=14)
     if options.get("sparse", False) and partial_filter is not None:
         _cannot_create_index(
             "The sparse and partialFilterExpression options cannot be combined"
@@ -681,7 +691,7 @@ def index_tokens(document, field):
     _validate_field(field)
 
     value = _nested_value(document, field)
-    values = value if isinstance(value, list) else [value]
+    values = value if isinstance(value, (list, tuple)) else [value]
     if not values:
         return ("undefined:",)
     tokens = []
@@ -754,7 +764,7 @@ def validate_index_document(document, indexes):
         array_fields = [
             field
             for field in spec.fields
-            if isinstance(_nested_value(document, field), list)
+            if isinstance(_nested_value(document, field), (list, tuple))
         ]
         if len(array_fields) > 1:
             raise OperationFailure(
