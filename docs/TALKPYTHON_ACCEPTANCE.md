@@ -264,3 +264,22 @@ The real-store sharded timings from round 19 were not remeasured. TM-042 still
 returned correct results for all 45 tested filter shapes, but 28 declined index
 narrowing. Neither that planner limitation nor whole-database JSON/memory write
 cost is resolved by the index-validation follow-up.
+
+## TM-042 SQLite planner follow-up (local evidence)
+
+The next follow-up extends indexed reads to BSON scalar equality and `$in`,
+standalone date and ordinary numeric ranges, and `$or` whose every arm has a safe
+indexed candidate source. `tests/contracts/test_sqlite_candidate_contract.py`
+checks sync and async results against MongoDB 8.2, while
+`tests/test_sqlite_tm042.py` checks SQLite/sharded SQLite decoding bounds, native
+index use, reopen/update/drop behavior, and conservative fallback. The
+[synthetic benchmark](BENCHMARKS.md#tm-042-sqlite-indexed-read-coverage) measures
+both cold and warm reads and documents index maintenance costs.
+
+These local results do not establish that all 45 shapes in Michael's private
+differential now engage the planner, or rerun the 903 application tests. His next
+SQLite pass should repeat that differential, the real-store date range, cold and
+warm timings, and write/migration checks after derived indexes exist. Upgrade
+all writers sharing the store before testing; older clients cannot maintain the
+new derived index function. JSON/memory whole-database write cost remains outside
+this SQLite follow-up.

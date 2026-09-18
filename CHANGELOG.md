@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### TM-042 SQLite read planner follow-up
+- Use declared top-level indexes for BSON scalar equality and `$in`, standalone
+  date and ordinary numeric ranges, and `$or` with a safe indexed source in every
+  arm. Preserve exact BSON matching, array semantics, counts, and cursor bounds.
+- Build derived BSON/date native indexes lazily, maintain them on writes, and
+  remove them with their declared index. First use scans the collection; all
+  writers sharing the file must use a version that registers the new function.
+- Add MongoDB reference contracts, index-use and bounded-decode regressions,
+  and a reproducible cold/warm SQLite benchmark. Unsupported shapes continue
+  through conservative fallback.
+
 ### Michael Kennedy acceptance follow-ups (TM-044–TM-049)
 - JSON and memory storage merge document IDs through BSON-aware identity maps,
   removing quadratic scans of unchanged neighbouring collections (TM-049).

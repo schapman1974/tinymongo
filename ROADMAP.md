@@ -243,6 +243,15 @@ update path no longer need that larger migration.
 
 #### SQLite candidate-selective reads and updates
 
+- [x] **TM-042:** Extend read candidates to registered BSON scalar equality and
+  `$in`, standalone datetime and ordinary numeric ranges, and `$or` with a safe
+  candidate source in every arm. Preserve exact matching, array membership,
+  natural order, counts, projections, and cursor bounds. Warm synthetic reads
+  at 20,000 documents take about 1 ms; BSON/date indexes have a one-time build
+  cost and ongoing write/storage overhead. Dotted fields, partial indexes,
+  null/regex anchors, oversized query trees, and incomplete `$or` plans retain
+  conservative fallback. Local contracts cover sync/async APIs and MongoDB;
+  Michael's private 45-shape differential still needs a rerun.
 - [x] Reuse declared top-level SQLite expression indexes as conservative
   candidate sources for complex positive `$and` reads with scalar equality or
   `$in` anchors. Push safe numeric ranges and `$mod` into SQLite, then retain
