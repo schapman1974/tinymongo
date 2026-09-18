@@ -322,14 +322,16 @@ JSON/memory application tests remained blocked by the startup cost tracked in
 
 ## TM-053 and remaining partial-filter validation follow-up (local evidence)
 
-The combined follow-up stores canonical BSON/date keys in ordinary SQLite
-columns, with native indexes and SQL triggers that invalidate keys when a
-document changes. Relevant reads refresh only uncomputed keys transactionally
-and also include rows invalidated concurrently as conservative candidates.
+The combined follow-up, merged as #180 (`e39357b`), stores canonical BSON/date
+keys in ordinary SQLite columns, with native indexes and SQL triggers that
+invalidate keys when a document changes. Relevant reads refresh only uncomputed
+keys transactionally and also include rows invalidated concurrently as
+conservative candidates.
 Opening a store removes owned legacy `_bson_v1` indexes; queries repeat cleanup
 when they discover schema changes. The new read-created schema requires no
-query-key Python function. Older pre-#179 writers remain compatible, while
-original #179 readers must upgrade so they cannot recreate the legacy indexes.
+query-key Python function. Older pre-#179 writers remain compatible. Stop or
+upgrade every original #179 process sharing the file, including both readers
+and writers, so its reads cannot recreate the legacy indexes.
 Explicit unique and partial indexes retain separate function requirements.
 
 `tests/test_sqlite_query_portability.py` covers plain SQLite maintenance,
@@ -344,5 +346,65 @@ valid predicates may appear in an index. Unknown operators inside field
 predicates and malformed nested operands return code `2`; valid prohibited
 predicates retain code `67`. The shared index-validation contracts cover the
 embedded backends, sync/async APIs, and the MongoDB reference backend. These
-local checks are not a rerun of Michael's private application; his next SQLite
-pass should confirm portability and query behavior against the new pin.
+local checks are separate from Michael's subsequent private application rerun,
+recorded below.
+
+## Michael Kennedy's #180 acceptance (external evidence)
+
+Michael's [retest of `fac214c`](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5736577143)
+compared the #180 branch with `a54a8ec` using direct `sqlite` storage. The branch
+merged as `e39357b` during his measurements; he verified the three source files
+were byte-identical between those pins. He confirmed both TM-053 and the
+remaining partial-filter error-code mismatch, TM-054, were fixed, with no
+regressions. These are his external results, not a local rerun or new evidence
+for other storage backends.
+
+- **903 application tests passed on both pins** against the seeded SQLite
+  store. The separate type-checker gate failed on both because of pre-existing
+  application diagnostics, unrelated to TinyMongo.
+- All 45 differential query shapes retained their results: 27 narrowed, with
+  zero narrowing bugs and zero divergences from MongoDB 8.2. Eight selective
+  shapes still examined 0–1% of a 2,000-document collection.
+- A date read created a native `_bson_v2` index and invalidation trigger, with
+  no `_bson_v1` dependency. A pre-#179 client's insert and plain SQLite
+  `UPDATE`, `REINDEX`, and `VACUUM` succeeded. Opening a store containing a
+  legacy query index removed it and restored writer and maintenance access.
+  His application test run itself also left the store free of legacy indexes.
+- The 13-case partial-filter matrix had zero error-code divergences, down
+  from one. Unknown operators returned `2`; prohibited predicates retained
+  `67`, and non-mapping filters retained `14`. The pre-existing distinction
+  between `OperationFailure` and PyMongo's `WriteError` remained; `WriteError`
+  subclasses `OperationFailure`, so existing exception handlers still match.
+
+His mixed-version check makes the upgrade order significant: a single read by
+an original #179 (`a54a8ec`) client recreated `_bson_v1` alongside the native
+index and again prevented other writers and plain SQLite maintenance from
+working. Opening the store with #180 repaired it again. **Stop or upgrade all
+original #179 readers and writers before returning the shared file to service.**
+Pre-#179 writers can remain; they do not create the incompatible query index.
+Repeated cleanup cannot make a live mix of #179 and #180 clients stable.
+
+He also measured the cost of first-use key materialization separately from
+warm reads:
+
+| Direct SQLite workload | `a54a8ec` cold | `fac214c` cold | `a54a8ec` warm | `fac214c` warm |
+| --- | ---: | ---: | ---: | ---: |
+| Synthetic, 200 MiB | 199.83 ms | 1,386.07 ms | 59.69 ms | 63.81 ms |
+| Real `opt_ins` date range, 75,617 documents | 380.29 ms | 760.54 ms | 4.38 ms | 4.49 ms |
+
+Warm performance stayed approximately flat, while cold key construction was
+6.9x slower in the large synthetic case and 2.0x slower on `opt_ins`. These
+are first-use costs to budget before serving traffic, not steady-state query
+latencies. The [full external cold-read table](BENCHMARKS.md#tm-053-external-direct-sqlite-retest)
+includes the smaller synthetic collections and `episodes`.
+
+His write checks found a 1.0x before/after-index ratio at every synthetic payload
+on both pins; a real `opt_ins` insert stayed near one second. Migration took
+11.1 versus 10.9 seconds, and application startup took 0.8 versus 1.1 seconds.
+He separately corrected the NUL documentation request: the PostgreSQL
+limitation was already documented at the tested pin in `REMOTE_SQL.md`.
+
+The external run used Python 3.14.6, PyMongo 4.17, MongoDB 8.2.3 as the query
+oracle, and macOS 26.2 arm64, with serialized runs against an 81,579-document
+real dataset. It does not replace the historical results for JSON, memory, or
+sharded SQLite.

@@ -32,6 +32,10 @@ the current stable package exactly; `master` may contain later changes. See
 [`CHANGELOG.md`](https://github.com/schapman1974/tinymongo/blob/master/CHANGELOG.md)
 for the complete release history and any unreleased work.
 
+If you deployed the SQLite changes from PR #179 (`a54a8ec`), follow the
+[SQLite upgrade steps](#upgrading-sqlite-stores-from-pr-179) before resuming
+traffic with PR #180 (`e39357b`) or later.
+
 The default JSON backend has a small dependency set. Optional database backends
 may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
 
@@ -341,6 +345,8 @@ run or application restart. The command-line tool intentionally omits the
 memory backend because every CLI invocation exits immediately; use it through
 the Python API instead.
 
+## SQLite read planning
+
 SQLite, DuckDB, and Parquet compile supported Mongo-style filters into SQL over
 the `_id` column and JSON document payload. Unsupported filter shapes fall back
 to Python document matching so existing TinyMongo behavior remains available.
@@ -364,10 +370,9 @@ avoid this setup and refresh work.
 These read-created indexes require no application-defined SQLite function, so
 they permit plain SQLite writes, `VACUUM`, `REINDEX`, backups, and dump restores.
 Opening an older store removes TinyMongo's legacy `_bson_v1` query indexes;
-schema changes noticed by later queries also trigger cleanup. Upgrade clients
-running the original #179 implementation, because their reads can recreate
-those incompatible indexes. Writers from before #179 can use the new key
-columns and invalidation triggers without registering a new function. Explicit
+schema changes noticed by later queries also trigger cleanup. Writers from
+before #179 can use the new key columns and invalidation triggers without
+registering a new function. Explicit
 unique and partial indexes retain their separate function requirements; this
 change does not make every TinyMongo SQLite schema independent of the library.
 
@@ -383,6 +388,75 @@ BSON decoding. Collections with user-created unique indexes retain complete
 post-image validation.
 Older blob-format SQLite and DuckDB files are migrated to collection tables when
 opened.
+
+### Upgrading SQLite stores from PR #179
+
+These steps apply to direct SQLite stores (`backend="sqlite"`).
+
+**Stop or upgrade every process running the original PR #179 implementation
+(`a54a8ec`), including readers, before resuming traffic.** A single indexed BSON
+or date read by a stale #179 client can recreate a legacy `_bson_v1` index and
+break older writers and plain SQLite operations such as `UPDATE`, `REINDEX`,
+and `VACUUM`. A fixed client removes that index on its next database open, so
+mixed versions can repeatedly break and repair access to the same store.
+
+1. Stop the #179 readers and writers, including background workers and scripts
+   that share the SQLite files. Upgrade them to PR #180 (`e39357b`) or later.
+2. With the fixed version, reopen each affected SQLite database and perform a
+   storage operation, for example
+   `client[database_name].list_collection_names()`. This removes the owned
+   legacy indexes automatically; constructing a client alone does not open
+   the database files.
+3. After migrations or bulk loading, warm the indexes used by critical reads
+   as described below, then resume traffic with the upgraded processes.
+
+Pre-#179 writers can continue using the repaired store; the requirement above
+targets clients that can recreate the #179 query indexes. The portability
+change applies to the read-created BSON/date indexes. Explicit unique and
+partial indexes still have their separate SQLite function requirements.
+
+### Warm SQLite reads before serving traffic
+
+The portability fix trades a more expensive first read for native SQLite
+maintenance and stable warm reads. In Michael Kennedy's direct SQLite retest,
+the first indexed read of a 200 MiB synthetic collection rose from 199.83 ms
+to 1,386.07 ms; a date range over 75,617 real `opt_ins` documents rose from
+380.29 ms to 760.54 ms. Warm reads were similar: 59.69 to 63.81 ms and 4.38 to
+4.49 ms respectively. These are measurements of his datasets, not timing
+guarantees. See the [external retest](docs/BENCHMARKS.md#tm-053-external-direct-sqlite-retest)
+for the full comparison and [his report](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5736577143)
+for the environment.
+
+Run representative indexed reads after migrations and bulk loading, before
+marking the application ready for traffic. Warm each relevant declared
+top-level BSON/date index with a separate supported predicate; a query using
+several indexed fields may select only one candidate source. Partial indexes,
+dotted fields, and unsupported predicates do not gain acceleration from this
+step. Ordinary numeric ranges use a different path and do not need these
+materialized BSON keys.
+
+Consume the cursor: `list(collection.find(query).limit(1))` executes the read,
+whereas constructing the cursor alone does not. The limit bounds the returned
+documents, **not the first key build**, which scans the collection and holds a
+write lock. Keys persist across client restarts, but later inserts and updates
+leave uncomputed keys for the next relevant read to refresh. Warm-up moves the
+initial cost into startup; it does not eliminate refresh work after writes.
+
+The runnable [startup warm-up example](examples/sqlite_warmup.py) uses public
+APIs and synthetic data in a temporary direct SQLite store. It demonstrates
+declaring indexes, loading data, and consuming representative date and BSON
+scalar reads before serving requests. From a checkout, install the optional
+BSON types used by the example and run it:
+
+```bash
+python -m pip install -e '.[bson]'
+python -m examples.sqlite_warmup
+```
+
+Adapt its warm-up function to your existing collections and query values;
+keep index creation and data migration in your application's setup phase.
+
+## Backend guides and benchmarks
 
 Local load-test results for these backends are documented in
 [backend benchmarks](https://github.com/schapman1974/tinymongo/blob/master/docs/BENCHMARKS.md).
