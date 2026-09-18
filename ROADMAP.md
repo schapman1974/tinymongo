@@ -227,6 +227,20 @@ bulk inserts and updates that actually change entries in user-created unique
 indexes. TM-040's measured no-index application path and TM-043's unchanged-key
 update path no longer need that larger migration.
 
+#### Mike's rounds 19–20 acceptance follow-ups
+
+- [x] **TM-044:** Reject parallel arrays in non-unique compound indexes too,
+  including index builds and writes; report MongoDB error code `171`.
+- [x] **TM-045:** Match `OperationFailure` code `67` for invalid partial-index
+  predicates and sparse/partial combinations.
+- [x] **TM-046:** Compare unique-token sets before sharded modifier-update
+  preflights, including local-shard replacement validation.
+- [x] **TM-047:** Translate PostgreSQL Unicode encoding failures into the
+  compatible exception hierarchy and document NUL-value limitations.
+- [x] **TM-048:** Reject NUL-containing document keys recursively before writes.
+- [x] **TM-049:** Replace JSON/memory quadratic ID merge scans with BSON-aware
+  identity lookups, retaining recursive IDs and exact fallback comparisons.
+
 #### SQLite candidate-selective reads and updates
 
 - [x] Reuse declared top-level SQLite expression indexes as conservative

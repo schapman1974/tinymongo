@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from .bson_codec import clone as clone_document
 from .bson_codec import dumps as json_dumps
 from .bson_codec import loads as json_loads
-from .bson_types import bson_values_equal
+from .bson_types import bson_value_identity_key, bson_values_equal
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
 
@@ -168,6 +168,16 @@ class AtomicJSONStorage(Storage):
                 for key, value in existing_table.items()
                 if isinstance(value, dict) and "_id" in value
             ]
+            identities = {}
+            fallback_ids = []
+            # Keep the first owner, just as the previous linear search did.
+            # Recursive keys cover document-valued IDs as well as scalars.
+            for doc_id, eid in ids_and_eids:
+                identity = bson_value_identity_key(doc_id)
+                if identity is None:
+                    fallback_ids.append((doc_id, eid))
+                else:
+                    identities.setdefault(identity, eid)
             try:
                 next_eid = max(int(key) for key in existing_table.keys()) + 1
             except Exception:
@@ -179,14 +189,19 @@ class AtomicJSONStorage(Storage):
                     if isinstance(value, dict) and "_id" in value
                     else _MISSING_ID
                 )
-                existing_eid = next(
-                    (
-                        eid
-                        for existing_id, eid in ids_and_eids
-                        if bson_values_equal(existing_id, doc_id)
-                    ),
-                    None,
-                )
+                identity = bson_value_identity_key(doc_id)
+                existing_eid = identities.get(identity)
+                if identity is None or fallback_ids:
+                    # Custom/legacy values may compare equal to registered BSON
+                    # values. Preserve their original first-match ordering.
+                    existing_eid = next(
+                        (
+                            eid
+                            for existing_id, eid in ids_and_eids
+                            if bson_values_equal(existing_id, doc_id)
+                        ),
+                        None,
+                    )
                 if doc_id is not _MISSING_ID and existing_eid is not None:
                     existing_table[existing_eid] = value
                 else:

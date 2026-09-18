@@ -9,7 +9,7 @@ from typing import Mapping, Optional
 
 from .bson_codec import clone as bson_clone
 from .bson_codec import dumps as bson_json_dumps
-from .errors import DuplicateKeyError, TinyMongoNotSupportedError
+from .errors import DuplicateKeyError, OperationFailure, TinyMongoNotSupportedError
 from .bson_types import (
     bson_identity_key,
     bson_number_decimal,
@@ -47,6 +47,10 @@ class TinyMongoUnsupportedWarning(UserWarning):
 
 def _unsupported(message):
     raise TinyMongoNotSupportedError(message)
+
+
+def _cannot_create_index(message):
+    raise OperationFailure(message, code=67)
 
 
 def _validate_field(field):
@@ -134,7 +138,7 @@ def _validate_partial_filter(expression):
             operator for operator in operators if operator not in field_operators
         ]
         if unknown:
-            _unsupported(
+            _cannot_create_index(
                 "Unsupported partialFilterExpression operator(s): {0}".format(
                     ", ".join(sorted(unknown))
                 )
@@ -144,7 +148,7 @@ def _validate_partial_filter(expression):
                 "partialFilterExpression cannot mix operators and literal fields"
             )
         if "$exists" in condition and condition["$exists"] is not True:
-            _unsupported("partialFilterExpression supports only $exists: true")
+            _cannot_create_index("partialFilterExpression supports only $exists: true")
         if "$in" in condition and not isinstance(condition["$in"], (list, tuple)):
             _unsupported("$in in partialFilterExpression requires an array")
 
@@ -189,7 +193,7 @@ class IndexSpec:
         if partial_filter is not None and not isinstance(partial_filter, Mapping):
             _unsupported("partialFilterExpression must be a mapping")
         if sparse and partial_filter is not None:
-            _unsupported(
+            _cannot_create_index(
                 "The sparse and partialFilterExpression options cannot be combined"
             )
         if partial_filter is not None:
@@ -424,7 +428,7 @@ def _validate_model_options(options):
     if partial_filter is not None and not isinstance(partial_filter, Mapping):
         _unsupported("partialFilterExpression must be a mapping")
     if options.get("sparse", False) and partial_filter is not None:
-        _unsupported(
+        _cannot_create_index(
             "The sparse and partialFilterExpression options cannot be combined"
         )
 
@@ -731,20 +735,8 @@ def index_entry_tokens(document, spec):
     if len(spec.keys) == 1:
         return index_tokens(document, spec.field)
 
-    components = []
-    array_fields = []
-    for field in spec.fields:
-        value = _nested_value(document, field)
-        if isinstance(value, list):
-            array_fields.append(field)
-        components.append(index_tokens(document, field))
-    if len(array_fields) > 1:
-        _unsupported(
-            "Compound index {0!r} cannot index parallel array fields: {1}".format(
-                spec.name,
-                ", ".join(array_fields),
-            )
-        )
+    validate_index_document(document, (spec,))
+    components = [index_tokens(document, field) for field in spec.fields]
 
     return tuple(
         "compound:{0}".format(
@@ -752,6 +744,25 @@ def index_entry_tokens(document, spec):
         )
         for values in product(*components)
     )
+
+
+def validate_index_document(document, indexes):
+    """Reject parallel arrays in participating compound indexes, unique or not."""
+    for spec in indexes:
+        if len(spec.keys) < 2 or not document_matches_index(document, spec):
+            continue
+        array_fields = [
+            field
+            for field in spec.fields
+            if isinstance(_nested_value(document, field), list)
+        ]
+        if len(array_fields) > 1:
+            raise OperationFailure(
+                "Compound index {0!r} cannot index parallel array fields: {1}".format(
+                    spec.name, ", ".join(array_fields)
+                ),
+                code=171,
+            )
 
 
 def validate_unique_documents(documents, indexes):
@@ -762,6 +773,9 @@ def validate_unique_documents(documents, indexes):
         if not isinstance(spec, IndexSpec):
             raise TypeError("Unique index validation requires IndexSpec values")
         if not spec.unique:
+            if len(spec.keys) > 1:
+                for document in docs:
+                    validate_index_document(document, (spec,))
             continue
 
         owners = {}
@@ -797,4 +811,5 @@ __all__ = [
     "plan_index_model",
     "plan_index_models",
     "validate_unique_documents",
+    "validate_index_document",
 ]

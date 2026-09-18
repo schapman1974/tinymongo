@@ -101,6 +101,9 @@ directly bypasses that coordination and is unsupported. See SQLite's
   those particular writes do not gain the full sharded concurrency benefit.
   The current experimental implementation also decodes the full logical
   collection when a unique value may change, making these point writes O(N).
+  Modifier updates compare exact before/after unique-index token sets first:
+  unrelated-field edits, setting a unique value to itself, and array reorderings
+  that preserve those sets skip the full scan. The coordination lock remains.
 - A multi-document operation can span several SQLite files. TinyMongo reserves
   and validates the affected shards before writing, but SQLite cannot make the
   final commits to separate files power-loss atomic. A process or machine crash

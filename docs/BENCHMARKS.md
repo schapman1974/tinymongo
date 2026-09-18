@@ -135,3 +135,32 @@ To refresh only one backend row, pass `--backend` for only that backend:
   --workers 4 \
   --json-output /tmp/tinymongo-sqlite-sharded.json
 ```
+
+## TM-049 JSON/memory write scaling
+
+`tests/benchmarks/bench_json_merge_scaling.py` measures one insert while either
+its own collection grows or an untouched neighbouring collection grows beside
+a fixed 200-document target. Run it from the repository with:
+
+```bash
+PYTHONPATH=. python tests/benchmarks/bench_json_merge_scaling.py
+```
+
+A local comparison on 2026-09-18 (Darwin arm64, Python 3.14.5, median of three
+inserts) swapped only `AtomicJSONStorage._merge_data` between the implementation
+at `a6b9f8c` and the BSON identity-map implementation. These are synthetic,
+single-process measurements, not a rerun of the Talk Python application.
+Other test processes were running on the host; absolute timings are illustrative.
+
+| Backend | Growing collection | Before, 500 docs | Before, 4,000 docs | After, 500 docs | After, 4,000 docs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| JSON | target | 181.1 ms | 11,430.5 ms | 9.4 ms | 75.6 ms |
+| JSON | untouched neighbour | 203.2 ms | 10,809.3 ms | 10.1 ms | 62.5 ms |
+| memory | target | 170.6 ms | 10,814.3 ms | 7.1 ms | 63.9 ms |
+| memory | untouched neighbour | 193.2 ms | 10,555.9 ms | 8.0 ms | 53.6 ms |
+
+The nested identity scan is gone. JSON serialization and memory copying still
+process the database snapshot, so this change makes the merge linear rather
+than making writes constant-time. Regression tests additionally count identity
+work, independent of wall-clock timing, and cover recursive BSON IDs, numeric
+identity, booleans, missing IDs, and legacy comparison fallbacks.

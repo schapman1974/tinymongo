@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Michael Kennedy acceptance follow-ups (TM-044–TM-049)
+- JSON and memory storage merge document IDs through BSON-aware identity maps,
+  removing quadratic scans of unchanged neighbouring collections (TM-049).
+- Reject NUL characters in field names at every nesting level before writes,
+  while preserving valid NUL-containing string values (TM-048).
+- Translate PostgreSQL's unsupported Unicode encoding errors into
+  `InvalidDocument` and document JSONB's NUL-value limitation (TM-047).
+- Skip full sharded and local SQLite uniqueness scans for modifier updates
+  whose unique-index token sets do not change (TM-046).
+- Reject parallel arrays for non-unique as well as unique compound indexes,
+  including index creation and updates, with error code `171` (TM-044).
+- Report invalid partial-index predicates and sparse/partial combinations as
+  `OperationFailure` code `67` (TM-045).
+
 ### Added
 - An opt-in experimental `sqlite-sharded` backend now routes stable BSON `_id`
   values across independent SQLite WAL files. It supports concurrent writers on

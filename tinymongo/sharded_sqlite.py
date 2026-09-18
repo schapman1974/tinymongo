@@ -34,7 +34,12 @@ from .errors import (
     OperationFailure,
     StorageCorruptionError,
 )
-from .indexes import IndexSpec, validate_unique_documents
+from .indexes import (
+    IndexSpec,
+    index_entry_tokens,
+    validate_unique_documents,
+    validate_index_document,
+)
 from .parquet_storage import _acquire_rlock, _local_rlocks, portalocker
 from .table_backends import (
     SQLiteTableBackend,
@@ -1609,7 +1614,7 @@ class ShardedSQLiteTableBackend(TableBackend):
             existing = self._check_index_compatibility(collection, spec, current)
             if existing is not None:
                 return existing.name
-            if spec.unique:
+            if spec.unique or len(spec.keys) > 1:
                 validate_unique_documents(self._find_existing(collection), [spec])
             self._store_manifest_index(collection, spec, "pending")
             completed = []
@@ -1929,6 +1934,8 @@ class ShardedSQLiteTableBackend(TableBackend):
             )
         target_indexes = tuple(grouped)
         with self._write_shards(target_indexes, collection=collection) as specs:
+            for prepared in prepared_documents:
+                validate_index_document(prepared.document, specs)
             if any(spec.unique for spec in specs):
                 validate_unique_documents(
                     self._find_existing(collection)
@@ -1999,8 +2006,10 @@ class ShardedSQLiteTableBackend(TableBackend):
 
         replacements = []
         modified_count = 0
+        specs = self.get_index_specs(collection)
         for document in matches:
             updated = self.apply_update(document, update_doc)
+            validate_index_document(updated, specs)
             if validate_document is not None:
                 validate_document(updated)
             modified_count += int(
@@ -2009,15 +2018,26 @@ class ShardedSQLiteTableBackend(TableBackend):
             if not storage_values_equal(document, updated):
                 replacements.append((document, updated))
 
-        replacement_by_id = {
-            _physical_id_key(original["_id"]): updated
-            for original, updated in replacements
-        }
-        post_image = [
-            replacement_by_id.get(_physical_id_key(document["_id"]), document)
-            for document in self._find_existing(collection)
+        changed_unique_specs = [
+            spec
+            for spec in specs
+            if spec.unique
+            and any(
+                frozenset(index_entry_tokens(original, spec))
+                != frozenset(index_entry_tokens(updated, spec))
+                for original, updated in replacements
+            )
         ]
-        validate_unique_documents(post_image, self.get_index_specs(collection))
+        if changed_unique_specs:
+            replacement_by_id = {
+                _physical_id_key(original["_id"]): updated
+                for original, updated in replacements
+            }
+            post_image = [
+                replacement_by_id.get(_physical_id_key(document["_id"]), document)
+                for document in self._find_existing(collection)
+            ]
+            validate_unique_documents(post_image, changed_unique_specs)
         for original, updated in replacements:
             shard = self._shards[self._shard_index(original["_id"])]
             shard.replace_one(collection, original["_id"], updated)

@@ -168,6 +168,8 @@ def _encode_builtin_tree(value):
             return _BUILTIN_TREE_FALLBACK
         encoded = {}
         for key, item in value.items():
+            if "\x00" in str(key):
+                return _BUILTIN_TREE_FALLBACK
             encoded_item = _encode_builtin_tree(item)
             if encoded_item is _BUILTIN_TREE_FALLBACK:
                 return _BUILTIN_TREE_FALLBACK
@@ -302,6 +304,13 @@ def _encode_nonfinite_float(value):
 
 
 def _encode_mapping(value, path, root, context):
+    for key in value:
+        if "\x00" in str(key):
+            raise InvalidDocument(
+                "Invalid document{0} at {1!r}: field names cannot contain NUL "
+                "characters".format(_context_suffix(context), _nested_path(path, key)),
+                document=root,
+            )
     # A user mapping can legitimately have the same two keys as one of our
     # scalar tags. Wrap that exact shape so it cannot be silently decoded as a
     # datetime/ObjectId when it crosses a persistence boundary.

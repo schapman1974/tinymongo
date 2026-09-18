@@ -590,8 +590,9 @@ created because weakening it would compromise integrity.
 Unique indexes support JSON scalar values, Decimal128, UUID/Binary, regex, and
 flat arrays on embedded backends. Ordinary indexes treat missing and `null` as
 one unique key, while sparse and partial membership follows the rules above.
-Embedded compound unique indexes support one flat array field and reject
-parallel arrays. Object values, ObjectId, datetime, nested arrays, non-finite
+Embedded compound indexes, whether unique or non-unique, reject parallel arrays
+with `OperationFailure` code `171` on index creation and writes. Compound unique
+indexes support one flat array field. Object values, ObjectId, datetime, nested arrays, non-finite
 numbers, and array traversal inside a dotted index path are not supported for
 unique indexes yet.
 Remote SQL stores a versioned canonical token digest beside each unique-indexed
@@ -601,6 +602,10 @@ while keeping booleans distinct from numbers. Remote SQL still rejects all
 array/multikey, Decimal128, UUID/Binary, and regex values under unique indexes
 because those tokens cannot yet guarantee cross-process MongoDB multikey or
 BSON identity.
+
+Invalid partial-index predicates such as `$ne`, `$nin`, `$regex`, or
+`$exists: false`, and combining `sparse` with `partialFilterExpression`, raise
+`OperationFailure` code `67`.
 
 SQL, DuckDB, and Parquet storage uses typed physical `_id` keys for new rows.
 Existing databases with older stringified keys remain readable and mutable.

@@ -7,7 +7,11 @@ import pytest
 
 import tinymongo
 from tinymongo import table_backends
-from tinymongo.errors import DuplicateKeyError, TinyMongoNotSupportedError
+from tinymongo.errors import (
+    DuplicateKeyError,
+    OperationFailure,
+    TinyMongoNotSupportedError,
+)
 from tinymongo.indexes import IndexSpec
 from tinymongo.storage_backends import clear_memory_namespace
 
@@ -269,14 +273,14 @@ def test_compound_parallel_arrays_fail_clearly_and_atomically(
     )
 
     with pytest.raises(
-        TinyMongoNotSupportedError,
+        OperationFailure,
         match="cannot index parallel array fields: regions, labels",
     ):
         items.insert_one({"_id": 1, "regions": ["east", "west"], "labels": ["a", "b"]})
     assert items.find_one({"_id": 1}) is None
 
     items.insert_one({"_id": 2, "regions": "east", "labels": "a"})
-    with pytest.raises(TinyMongoNotSupportedError, match="parallel array fields"):
+    with pytest.raises(OperationFailure, match="parallel array fields"):
         items.update_one(
             {"_id": 2},
             {"$set": {"regions": ["east", "west"], "labels": ["a", "b"]}},
@@ -499,8 +503,17 @@ def test_invalid_advanced_index_predicates_and_options_leave_no_metadata(
     client = tinymongo.TinyMongoClient(str(tmp_path / uuid4().hex), backend="sqlite")
     items = client.app.items
     try:
-        with pytest.raises(TinyMongoNotSupportedError, match=message):
+        invalid_definition = message in (
+            r"only \$exists: true",
+            "cannot be combined",
+        ) or options.get("partialFilterExpression") == {"email": {"$ne": None}}
+        error_type = (
+            OperationFailure if invalid_definition else TinyMongoNotSupportedError
+        )
+        with pytest.raises(error_type, match=message) as caught:
             items.create_index("value", **options)
+        if invalid_definition:
+            assert caught.value.code == 67
         assert items.list_indexes() == [{"name": "_id_", "key": [("_id", 1)]}]
     finally:
         client.close()

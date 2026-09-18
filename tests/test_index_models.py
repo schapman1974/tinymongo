@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from tinymongo.errors import TinyMongoNotSupportedError
+from tinymongo.errors import OperationFailure, TinyMongoNotSupportedError
 from tinymongo.indexes import (
     IndexBatchPlan,
     IndexSpec,
@@ -175,8 +175,13 @@ def test_sparse_model_preserves_membership_semantics_without_degradation():
     ],
 )
 def test_model_rejects_invalid_partial_index_option_combinations(document, message):
-    with pytest.raises(TinyMongoNotSupportedError, match=message):
+    error_type = (
+        OperationFailure if document.get("sparse") else TinyMongoNotSupportedError
+    )
+    with pytest.raises(error_type, match=message) as caught:
         plan_index_model(document)
+    if document.get("sparse"):
+        assert caught.value.code == 67
 
 
 def test_false_performance_flags_require_no_degradation():
