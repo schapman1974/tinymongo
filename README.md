@@ -20,21 +20,21 @@ build is supported at the beta level for the backends described below.
 
 # Installation
 
-The latest stable release is 1.3.0 and can be installed from PyPI:
+The latest stable release is 1.3.1 and can be installed from PyPI:
 
 ```bash
-pip install "tinymongo==1.3.0"
+pip install "tinymongo==1.3.1"
 ```
 
 For development, clone this repository and run `pip install -e .` from its
-root. Use the `v1.3.0` tag when you need source and documentation that match
+root. Use the `v1.3.1` tag when you need source and documentation that match
 the current stable package exactly; `master` may contain later changes. See
 [`CHANGELOG.md`](https://github.com/schapman1974/tinymongo/blob/master/CHANGELOG.md)
 for the complete release history and any unreleased work.
 
 If you deployed the SQLite changes from PR #179 (`a54a8ec`), follow the
 [SQLite upgrade steps](#upgrading-sqlite-stores-from-pr-179) before resuming
-traffic with PR #180 (`e39357b`) or later.
+traffic with 1.3.1, which includes PR #180 (`e39357b`) and its upgrade guidance.
 
 The default JSON backend has a small dependency set. Optional database backends
 may install native binary wheels supplied by DuckDB, PyArrow, or SQL drivers.
@@ -379,7 +379,7 @@ change does not make every TinyMongo SQLite schema independent of the library.
 Dropping the corresponding declared index removes the derived native index and
 trigger and clears its key column. The empty column remains for compatibility
 with SQLite versions that lack `DROP COLUMN`. See the
-[TM-053 benchmark](docs/BENCHMARKS.md#tm-053-portable-sqlite-query-keys) for cold-read,
+[TM-053 benchmark](https://github.com/schapman1974/tinymongo/blob/v1.3.1/docs/BENCHMARKS.md#tm-053-portable-sqlite-query-keys) for cold-read,
 refresh, and write costs.
 
 SQLite also uses its primary key and declared non-unique indexes for top-level
@@ -423,7 +423,7 @@ the first indexed read of a 200 MiB synthetic collection rose from 199.83 ms
 to 1,386.07 ms; a date range over 75,617 real `opt_ins` documents rose from
 380.29 ms to 760.54 ms. Warm reads were similar: 59.69 to 63.81 ms and 4.38 to
 4.49 ms respectively. These are measurements of his datasets, not timing
-guarantees. See the [external retest](docs/BENCHMARKS.md#tm-053-external-direct-sqlite-retest)
+guarantees. See the [external retest](https://github.com/schapman1974/tinymongo/blob/v1.3.1/docs/BENCHMARKS.md#tm-053-external-direct-sqlite-retest)
 for the full comparison and [his report](https://github.com/schapman1974/tinymongo/issues/136#issuecomment-5736577143)
 for the environment.
 
@@ -442,7 +442,7 @@ write lock. Keys persist across client restarts, but later inserts and updates
 leave uncomputed keys for the next relevant read to refresh. Warm-up moves the
 initial cost into startup; it does not eliminate refresh work after writes.
 
-The runnable [startup warm-up example](examples/sqlite_warmup.py) uses public
+The runnable [startup warm-up example](https://github.com/schapman1974/tinymongo/blob/v1.3.1/examples/sqlite_warmup.py) uses public
 APIs and synthetic data in a temporary direct SQLite store. It demonstrates
 declaring indexes, loading data, and consuming representative date and BSON
 scalar reads before serving requests. From a checkout, install the optional

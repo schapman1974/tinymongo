@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-21
+
 ### Direct SQLite upgrade guidance for PR #179 users
 
 - **Stop or upgrade every original #179 (`a54a8ec`) client, including readers,
@@ -89,93 +91,10 @@
 - Record Michael Kennedy's external round-21 application results at `7055584`,
   including the complete default-JSON migration and remaining performance limits.
 
-### Added
-- An opt-in experimental `sqlite-sharded` backend now routes stable BSON `_id`
-  values across independent SQLite WAL files. It supports concurrent writers on
-  different shards without a daemon, fans collection and index metadata across
-  the shard set, enforces secondary uniqueness globally, and retains the
-  synchronous and asynchronous TinyMongo APIs.
-- Ascending compound, sparse, and partial indexes now preserve their complete
-  definitions across durable backends and enforce matching unique-key
-  membership. Embedded compound indexes support one flat multikey field,
-  parallel arrays fail atomically, and remote SQL keeps unsupported multikey
-  unique values fail-closed.
-- Beanie 2.1 can initialize through the async client without application
-  shims. TinyMongo now answers the discovery-safe `ping` and `buildInfo`
-  database commands, accepts Beanie's `authorizedCollections` and `nameOnly`
-  collection-listing hints, and runs a pinned real-Beanie CRUD smoke contract.
-- A reproducible comparison benchmark now runs the same JSON-document workload
-  against TinyMongo SQLite, raw `sqlite3`, and an optional real MongoDB server.
-- A TM-040 SQLite scaling benchmark reports successive fixed-size insert
-  windows, first-to-last throughput, and the number of existing rows decoded
-  during duplicate preflight.
-
-### Changed
-- The shared storage benchmark now accepts a one-process baseline and uses the
-  selected worker count for every phase, including point reads. Documentation
-  separates that baseline from four-process contention results and does not
-  publish partial metrics when a backend run fails.
-- SQLite bulk inserts now use BSON-aware identity sets and one-pass unique-index
-  token maps instead of quadratic duplicate planning and repeated backend
-  preflights.
-- SQLite multi-document updates now select, validate, and write their complete
-  batch in one transaction with one `executemany()` call and commit.
-- Exact SQLite `_id` queries now use the primary-key path directly, while
-  declared scalar indexes use bounded reads plus a companion candidate index
-  for array and object values. One-time migration, WAL, and collection setup is
-  cached without losing recovery from external collection drops.
-- Sharded SQLite exact-ID reads now reuse bounded query-only connections,
-  validate a generation-keyed manifest cache instead of repeating catalog
-  joins, and canonicalize, route, and query the primary key once. Legacy ID
-  representations remain a miss-only fallback, and inherited raw-fork handles
-  fail closed before touching SQLite.
-- Sharded SQLite unfiltered scans now attach up to ten read-only shard files to
-  one pooled connection and execute an ordered `UNION ALL`, moving fan-in into
-  SQLite and decoding every payload only once. Filtered and larger-shard-count
-  scans retain the established scatter path.
-- **TM-040:** Repeated SQLite `insert_many()` batches without user-created
-  unique indexes now probe only incoming `_id` candidates through the native
-  primary key instead of rereading and BSON-decoding the entire collection.
-  BSON-aware ordered and unordered planning remains shared, while unique
-  indexes, Decimal128 IDs, and non-enumerable legacy IDs retain the conservative
-  full-scan fallback for released legacy-store formats.
-- SQLite `update_one()` and `update_many()` now select exact `_id` rows through
-  the primary key and declared index candidates for top-level
-  bool/int/float/string equality inside the existing atomic transaction. Exact
-  BSON post-filtering and natural first-match order are preserved.
-- **TM-043:** SQLite modifier updates with unique indexes now compare exact
-  before/after token sets for only the selected documents. Updates that leave
-  compound, sparse, partial, and multikey entries unchanged avoid a complete
-  collection decode; actual entry changes retain atomic full post-image
-  validation.
-
-### Fixed
-- **TM-037:** Direct, non-`_id` `Timestamp(0, 0)` values now receive a
-  process-local logical timestamp during inserts and replacement writes.
-  Nested, array, `_id`, and modifier-update values remain literal, and
-  caller-owned documents are not rewritten.
-- **TM-038:** `$pull` now accepts `$exists`, `$type`, `$ne`, `$mod`, `$all`,
-  `$size`, and document-field `$not` through the shared query matcher.
-  Top-level `$not` remains a code-`2` write error, while document-level
-  `$expr` now matches MongoDB's refusal code `224`.
-- **TM-039:** Replacement upserts now retain an `_id` pinned by a top-level
-  direct value or sole `$eq` predicate, return that exact value through
-  `upserted_id`, and leave the inserted document findable through the caller's
-  chosen key. Conflicting replacement IDs fail with MongoDB's immutable-field
-  code instead of silently inserting under the wrong key, and stored
-  replacements keep `_id` first.
-- Update and delete operations now expose PyMongo-shaped reply mappings through
-  `raw_result`, including `n`, `nModified`, `updatedExisting`, `upserted`, and
-  `ok` where applicable. Counts and upsert IDs are derived from that shared
-  reply, allowing Beanie `replace()` calls to complete normally.
-- **TM-036:** `MinKey` and `MaxKey` range operands now cross BSON type
-  brackets, so whole-range queries return every supported value through
-  `find()`, aggregation `$match`, and `$pull` instead of silently returning an
-  empty result.
-
 ## [1.3.0] - 2026-08-02
 
 ### Added
+
 - A shared, backend-independent aggregation engine for `$match`, `$sort`,
   `$skip`, `$limit`, `$count`, `$project`, `$set`, `$addFields`, `$unset`, and
   `$group`, with `$ifNull`, `$literal`, and `$size` projection expressions,
@@ -213,8 +132,28 @@
   find-and-modify writes, immutable `_id` handling, path conflicts, blocked
   paths, invalid targets, and single-document atomic failure behavior for the
   expanded update operator set.
+- An opt-in experimental `sqlite-sharded` backend now routes stable BSON `_id`
+  values across independent SQLite WAL files. It supports concurrent writers on
+  different shards without a daemon, fans collection and index metadata across
+  the shard set, enforces secondary uniqueness globally, and retains the
+  synchronous and asynchronous TinyMongo APIs.
+- Ascending compound, sparse, and partial indexes now preserve their complete
+  definitions across durable backends and enforce matching unique-key
+  membership. Embedded compound indexes support one flat multikey field,
+  parallel arrays fail atomically, and remote SQL keeps unsupported multikey
+  unique values fail-closed.
+- Beanie 2.1 can initialize through the async client without application
+  shims. TinyMongo now answers the discovery-safe `ping` and `buildInfo`
+  database commands, accepts Beanie's `authorizedCollections` and `nameOnly`
+  collection-listing hints, and runs a pinned real-Beanie CRUD smoke contract.
+- A reproducible comparison benchmark now runs the same JSON-document workload
+  against TinyMongo SQLite, raw `sqlite3`, and an optional real MongoDB server.
+- A TM-040 SQLite scaling benchmark reports successive fixed-size insert
+  windows, first-to-last throughput, and the number of existing rows decoded
+  during duplicate preflight.
 
 ### Changed
+
 - Datetimes now persist in MongoDB's canonical signed UTC millisecond form.
   Naive inputs are interpreted as UTC, aware inputs are converted to UTC, and
   PyMongo-shaped clients return naive UTC by default or timezone-aware values
@@ -254,8 +193,46 @@
 - Remote SQL unique indexes also fail closed for Binary, UUID, and regex values
   whose exact cross-process BSON identity cannot be enforced by the native token
   constraint.
+- The shared storage benchmark now accepts a one-process baseline and uses the
+  selected worker count for every phase, including point reads. Documentation
+  separates that baseline from four-process contention results and does not
+  publish partial metrics when a backend run fails.
+- SQLite bulk inserts now use BSON-aware identity sets and one-pass unique-index
+  token maps instead of quadratic duplicate planning and repeated backend
+  preflights.
+- SQLite multi-document updates now select, validate, and write their complete
+  batch in one transaction with one `executemany()` call and commit.
+- Exact SQLite `_id` queries now use the primary-key path directly, while
+  declared scalar indexes use bounded reads plus a companion candidate index
+  for array and object values. One-time migration, WAL, and collection setup is
+  cached without losing recovery from external collection drops.
+- Sharded SQLite exact-ID reads now reuse bounded query-only connections,
+  validate a generation-keyed manifest cache instead of repeating catalog
+  joins, and canonicalize, route, and query the primary key once. Legacy ID
+  representations remain a miss-only fallback, and inherited raw-fork handles
+  fail closed before touching SQLite.
+- Sharded SQLite unfiltered scans now attach up to ten read-only shard files to
+  one pooled connection and execute an ordered `UNION ALL`, moving fan-in into
+  SQLite and decoding every payload only once. Filtered and larger-shard-count
+  scans retain the established scatter path.
+- **TM-040:** Repeated SQLite `insert_many()` batches without user-created
+  unique indexes now probe only incoming `_id` candidates through the native
+  primary key instead of rereading and BSON-decoding the entire collection.
+  BSON-aware ordered and unordered planning remains shared, while unique
+  indexes, Decimal128 IDs, and non-enumerable legacy IDs retain the conservative
+  full-scan fallback for released legacy-store formats.
+- SQLite `update_one()` and `update_many()` now select exact `_id` rows through
+  the primary key and declared index candidates for top-level
+  bool/int/float/string equality inside the existing atomic transaction. Exact
+  BSON post-filtering and natural first-match order are preserved.
+- **TM-043:** SQLite modifier updates with unique indexes now compare exact
+  before/after token sets for only the selected documents. Updates that leave
+  compound, sparse, partial, and multikey entries unchanged avoid a complete
+  collection decode; actual entry changes retain atomic full post-image
+  validation.
 
 ### Fixed
+
 - **TM-019 / TM-030:** `MongoClient` and `AsyncMongoClient` now honor
   `document_class` recursively across finds, projections, aggregation,
   document-valued `distinct()` results, and find-and-modify returns. The same
@@ -355,6 +332,28 @@
   materializing an entire collection; synchronous and asynchronous paths share
   the optimization, while sorted cursors still load every candidate needed for
   correct global ordering.
+- **TM-037:** Direct, non-`_id` `Timestamp(0, 0)` values now receive a
+  process-local logical timestamp during inserts and replacement writes.
+  Nested, array, `_id`, and modifier-update values remain literal, and
+  caller-owned documents are not rewritten.
+- **TM-038:** `$pull` now accepts `$exists`, `$type`, `$ne`, `$mod`, `$all`,
+  `$size`, and document-field `$not` through the shared query matcher.
+  Top-level `$not` remains a code-`2` write error, while document-level
+  `$expr` now matches MongoDB's refusal code `224`.
+- **TM-039:** Replacement upserts now retain an `_id` pinned by a top-level
+  direct value or sole `$eq` predicate, return that exact value through
+  `upserted_id`, and leave the inserted document findable through the caller's
+  chosen key. Conflicting replacement IDs fail with MongoDB's immutable-field
+  code instead of silently inserting under the wrong key, and stored
+  replacements keep `_id` first.
+- Update and delete operations now expose PyMongo-shaped reply mappings through
+  `raw_result`, including `n`, `nModified`, `updatedExisting`, `upserted`, and
+  `ok` where applicable. Counts and upsert IDs are derived from that shared
+  reply, allowing Beanie `replace()` calls to complete normally.
+- **TM-036:** `MinKey` and `MaxKey` range operands now cross BSON type
+  brackets, so whole-range queries return every supported value through
+  `find()`, aggregation `$match`, and `$pull` instead of silently returning an
+  empty result.
 
 ## [1.2.1] - 2026-07-31
 

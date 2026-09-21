@@ -1,6 +1,6 @@
 # Parquet Object Storage
 
-This feature remains experimental in `1.3.0`.
+This feature remains experimental in `1.3.1`.
 
 TinyMongo's `parquet` and `parquetv2` backends can place collection Parquet
 files under an object-storage URI. DuckDB performs the remote file reads and

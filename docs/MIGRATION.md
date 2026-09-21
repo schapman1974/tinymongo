@@ -1,7 +1,12 @@
 # Migration Guide
 
-This guide helps you migrate from earlier `tinymongo` versions to the 1.3.0
+This guide helps you migrate from earlier `tinymongo` versions to the 1.3.1
 release line.
+
+For direct SQLite stores that ran the unreleased PR #179 code (`a54a8ec`),
+follow the [SQLite upgrade and warm-up guidance](../README.md#upgrading-sqlite-stores-from-pr-179).
+Stop or upgrade every affected process, including readers, before reopening
+the store with 1.3.1 and resuming traffic.
 
 ## Key changes
 
