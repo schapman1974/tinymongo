@@ -3,6 +3,7 @@ import json
 import sys
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -220,12 +221,29 @@ def test_real_local_backends_report_equivalent_crud_semantics(
         assert result[key] > 0
 
 
+@pytest.mark.parametrize(
+    "backend", ["memory", "tinydb", "parquet", "sqlite", "sqlite-sharded", "duckdb"]
+)
 def test_single_worker_profile_uses_one_process_for_every_phase(
     benchmark,
     tmp_path,
+    monkeypatch,
+    backend,
 ):
+    unavailable = benchmark._availability_error(backend, None)
+    if unavailable:
+        pytest.skip(unavailable)
+    clients = []
+    original_open = benchmark._open_tinymongo_client
+
+    def open_client(*args):
+        client = original_open(*args)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(benchmark, "_open_tinymongo_client", open_client)
     result = benchmark.run_backend(
-        "sqlite",
+        backend,
         doc_count=13,
         query_count=5,
         work_root=str(tmp_path),
@@ -236,6 +254,15 @@ def test_single_worker_profile_uses_one_process_for_every_phase(
     assert result["insert_batch_sizes"] == [13]
     assert result["point_batch_sizes"] == [5]
     assert result["read_count"] == 13
+    assert result["available"] is True
+    assert result["updated_docs"] == 2
+    assert result["deleted_docs"] == 2
+    assert result["remaining_docs"] == 11
+    assert result["persistence_verified"] is (backend != "memory")
+    assert len(clients) == (1 if backend == "memory" else 2)
+    assert result["insert_mode"] == "1 process, 1 insert_many bulk"
+    assert "shard-affine" not in result["point_mode"]
+    assert result["point_reads_per_second"] == 5 / result["point_wall_seconds"]
     for key in (
         "insert_process_ids",
         "read_process_ids",
@@ -243,7 +270,68 @@ def test_single_worker_profile_uses_one_process_for_every_phase(
         "update_process_ids",
         "delete_process_ids",
     ):
-        assert len(result[key]) == 1
+        assert result[key] == [benchmark.os.getpid()]
+
+
+def test_single_worker_memory_uses_one_bulk_and_individual_exact_id_mutations(
+    benchmark, monkeypatch, tmp_path
+):
+    calls = []
+
+    def track(method_name):
+        original = getattr(benchmark.tm.TinyMongoCollection, method_name)
+
+        def invoke(collection, *args, **kwargs):
+            calls.append((method_name, id(collection), args[0]))
+            return original(collection, *args, **kwargs)
+
+        monkeypatch.setattr(benchmark.tm.TinyMongoCollection, method_name, invoke)
+
+    for method_name in ("insert_many", "update_one", "delete_one"):
+        track(method_name)
+    benchmark.run_backend("memory", 13, 5, str(tmp_path), insert_workers=1)
+
+    assert len({collection for _method, collection, _argument in calls}) == 1
+    assert [method for method, _collection, _argument in calls] == [
+        "insert_many",
+        "update_one",
+        "update_one",
+        "delete_one",
+        "delete_one",
+    ]
+    assert calls[0][2] == benchmark._docs(13)
+    assert [argument for _method, _collection, argument in calls[1:]] == [
+        {"_id": "doc-1"},
+        {"_id": "doc-11"},
+        {"_id": "doc-2"},
+        {"_id": "doc-12"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [("sqlite-sharded", ["a", "b", "d"]), ("sqlite", ["a"]), ("memory", ["a"])],
+)
+def test_single_worker_point_warmup_covers_each_touched_shard_once(
+    benchmark, backend, expected
+):
+    calls = []
+    routes = {"a": 2, "b": 0, "c": 2, "d": 1, "e": 0}
+
+    def find_one(query):
+        calls.append(query["_id"])
+        return query
+
+    collection = SimpleNamespace(
+        parent=SimpleNamespace(engine=SimpleNamespace(_shard_index=routes.__getitem__)),
+        find_one=find_one,
+    )
+    benchmark._warm_tinymongo_points(collection, backend, ["a", "b", "c", "d", "e"])
+    assert calls == expected
+
+    calls.clear()
+    benchmark._warm_tinymongo_points(collection, backend, [])
+    assert calls == []
 
 
 @pytest.mark.parametrize("backend", ["memory", "duckdb"])
@@ -417,7 +505,7 @@ def test_repeats_rotate_backends_and_aggregate_each_backend_in_input_order(
         (["--insert-workers", "65"], "--insert-workers must be between 1 and 64"),
         (
             ["--insert-workers", "3"],
-            "--insert-workers must equal --sqlite-shards",
+            "--insert-workers must be 1 or equal --sqlite-shards",
         ),
     ],
 )
@@ -438,6 +526,21 @@ def test_cli_rejects_invalid_positive_counts_and_shard_bounds(
 
     assert exc_info.value.code == 2
     assert message in capsys.readouterr().err
+
+
+def test_cli_accepts_single_worker_with_all_default_backends(benchmark, monkeypatch):
+    captured = {}
+
+    def fake_run(backends, **kwargs):
+        captured.update(kwargs)
+        captured["backends"] = backends
+        return {"results": []}
+
+    monkeypatch.setattr(benchmark, "run_benchmark", fake_run)
+    assert benchmark.main(["--workers", "1"]) == 0
+    assert captured["backends"] == benchmark.BACKENDS
+    assert captured["insert_workers"] == 1
+    assert captured["sqlite_shards"] == 4
 
 
 def test_cli_selects_backends_and_writes_json_without_external_services(

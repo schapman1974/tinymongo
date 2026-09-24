@@ -1,10 +1,10 @@
 """Run one comparable CRUD workload across TinyMongo and reference engines.
 
 This is intentionally a local benchmark rather than a pytest test.  Every row
-uses the same JSON-shaped documents. Embedded engines and raw SQLite receive
-four synchronized bulk insert calls from distinct spawned processes.
-Full-collection reads, exact-ID reads, disjoint-ID updates, and disjoint-ID
-deletes use the same process model. Raw SQLite is a native-SQL lower bound;
+uses the same JSON-shaped documents. With ``--workers 1``, TinyMongo engines
+use one initialized client for a sequential CRUD workload. Multiworker profiles
+use synchronized spawned processes, with shard-affine streams for sharded
+SQLite. Raw SQLite is a native-SQL lower bound;
 MongoDB is an optional client/server reference selected with ``--mongo-uri``.
 """
 
@@ -1346,6 +1346,147 @@ def _run_tinymongo_backend(
     return benchmark_result
 
 
+def _warm_tinymongo_points(collection, backend, document_ids):
+    """Initialize every shard connection that the following ID stream will use."""
+    warmed_shards = set()
+    for document_id in document_ids:
+        if backend == "sqlite-sharded":
+            shard = collection.parent.engine._shard_index(document_id)
+        else:
+            shard = None
+        if shard in warmed_shards:
+            continue
+        found = collection.find_one({"_id": document_id})
+        if found is None or found.get("_id") != document_id:
+            raise AssertionError("TinyMongo operation warm-up missed")
+        warmed_shards.add(shard)
+        if backend != "sqlite-sharded":
+            break
+
+
+def _run_tinymongo_single_process(
+    backend,
+    documents,
+    queries,
+    work_root,
+    sqlite_shards,
+):
+    """Run the same sequential public operations through one initialized client."""
+    run_root = tempfile.mkdtemp(prefix="{0}-".format(backend), dir=work_root)
+    database_path = os.path.join(run_root, "database")
+    source_documents = _docs(documents)
+    targets = _point_targets(source_documents, queries)
+    update_ids = _mutation_target_batches(source_documents, "g1", 1)[0]
+    delete_ids = _mutation_target_batches(source_documents, "g2", 1)[0]
+    client = _open_tinymongo_client(backend, database_path, sqlite_shards)
+    try:
+        collection = client.loadtest.records
+        collection.build_table()
+        collection.count_documents({})
+        durability = {"policy": "backend default"}
+        if backend in ("sqlite", "sqlite-sharded"):
+            durability = _tinymongo_sqlite_settings(collection, backend)
+        elif backend == "memory":
+            durability = {"policy": "process memory only"}
+
+        insert_seconds, inserted = _time_call(
+            lambda: collection.insert_many(source_documents)
+        )
+        if inserted.inserted_ids != [doc["_id"] for doc in source_documents]:
+            raise AssertionError("TinyMongo insert returned the wrong IDs")
+
+        list(collection.find({}))
+        read_seconds, all_documents = _time_call(lambda: list(collection.find({})))
+        _validate_initial_documents(
+            all_documents, source_documents, "TinyMongo read-all"
+        )
+
+        _warm_tinymongo_points(collection, backend, targets)
+        point_latencies = []
+        started = time.perf_counter()
+        for target in targets:
+            read_started = time.perf_counter()
+            found = collection.find_one({"_id": target})
+            point_latencies.append(time.perf_counter() - read_started)
+            if found is None or found.get("_id") != target:
+                raise AssertionError("TinyMongo point read missed {0}".format(target))
+        point_wall_seconds = time.perf_counter() - started
+
+        def update_documents():
+            for document_id in update_ids:
+                result = collection.update_one({"_id": document_id}, {"$inc": {"i": 1}})
+                if result.matched_count != 1 or result.modified_count != 1:
+                    raise AssertionError("TinyMongo update count mismatch")
+            return len(update_ids)
+
+        def delete_documents():
+            for document_id in delete_ids:
+                result = collection.delete_one({"_id": document_id})
+                if result.deleted_count != 1:
+                    raise AssertionError("TinyMongo delete count mismatch")
+            return len(delete_ids)
+
+        _warm_tinymongo_points(collection, backend, update_ids)
+        update_seconds, updated_docs = _time_call(update_documents)
+        _warm_tinymongo_points(collection, backend, delete_ids)
+        delete_seconds, deleted_docs = _time_call(delete_documents)
+        remaining_docs = collection.count_documents({})
+        if remaining_docs != documents - _group_count(documents, 2):
+            raise AssertionError("TinyMongo retained the wrong document count")
+        _validate_final_documents(list(collection.find({})), source_documents)
+    finally:
+        client.close()
+
+    persistence_verified = False
+    if backend != "memory":
+        verifier = _open_tinymongo_client(backend, database_path, sqlite_shards)
+        try:
+            _validate_final_documents(
+                list(verifier.loadtest.records.find({})), source_documents
+            )
+            persistence_verified = True
+        finally:
+            verifier.close()
+
+    result = _result(
+        backend,
+        documents,
+        queries,
+        insert_seconds,
+        read_seconds,
+        len(all_documents),
+        point_latencies,
+        update_seconds,
+        updated_docs,
+        delete_seconds,
+        deleted_docs,
+        remaining_docs,
+        None if backend == "memory" else _file_size(run_root) / 1024.0,
+        persistence_verified,
+        durability,
+        insert_mode="1 process, 1 insert_many bulk",
+    )
+    result.update(
+        {
+            "insert_batch_sizes": [documents],
+            "read_mode": "1 process, 1 warmed full-collection scan",
+            "point_mode": "1 process, warmed exact-ID stream",
+            "point_batch_sizes": [queries],
+            "point_wall_seconds": point_wall_seconds,
+            "point_reads_per_second": (
+                queries / point_wall_seconds if point_wall_seconds else 0.0
+            ),
+            "update_mode": "1 process, exact-ID update_one stream",
+            "delete_mode": "1 process, exact-ID delete_one stream",
+        }
+    )
+    for phase in ("insert", "read", "point", "update", "delete"):
+        result[phase + "_process_ids"] = [os.getpid()]
+    if backend == "sqlite-sharded":
+        result["label"] = "TinyMongo SQLite-sharded ({0})".format(sqlite_shards)
+    return result
+
+
 def _run_raw_sqlite(documents, queries, work_root, insert_workers):
     run_root = tempfile.mkdtemp(prefix="raw-sqlite-", dir=work_root)
     database_path = os.path.join(run_root, "database.sqlite")
@@ -1689,21 +1830,21 @@ def run_backend(
     insert_workers=4,
     mongo_uri=None,
 ):
-    if backend == "memory":
+    if backend == "memory" and insert_workers != 1:
         return _unavailable(
             backend,
             "the memory backend is process-local and cannot expose one shared "
             "database to spawned workers",
         )
-    if backend == "duckdb":
+    if backend == "duckdb" and insert_workers != 1:
         return _unavailable(
             backend,
             "DuckDB does not support this shared writable database across "
             "multiple processes",
         )
-    if backend == "sqlite-sharded" and insert_workers != sqlite_shards:
+    if backend == "sqlite-sharded" and insert_workers not in (1, sqlite_shards):
         raise ValueError(
-            "insert_workers must equal sqlite_shards for shard-affine inserts"
+            "insert_workers must be 1 or equal sqlite_shards for shard-affine inserts"
         )
     availability_error = _availability_error(backend, mongo_uri)
     if availability_error:
@@ -1721,6 +1862,10 @@ def run_backend(
             query_count,
             mongo_uri,
             insert_workers,
+        )
+    if insert_workers == 1:
+        return _run_tinymongo_single_process(
+            backend, doc_count, query_count, work_root, sqlite_shards
         )
     return _run_tinymongo_backend(
         backend,
@@ -1788,9 +1933,9 @@ def run_benchmark(
     insert_workers=4,
     mongo_uri=None,
 ):
-    if "sqlite-sharded" in backends and insert_workers != sqlite_shards:
+    if "sqlite-sharded" in backends and insert_workers not in (1, sqlite_shards):
         raise ValueError(
-            "insert_workers must equal sqlite_shards for shard-affine inserts"
+            "insert_workers must be 1 or equal sqlite_shards for shard-affine inserts"
         )
     _document_batches(_docs(documents), insert_workers)
     runs = {backend: [] for backend in backends}
@@ -1801,6 +1946,13 @@ def run_benchmark(
         for order, backend in enumerate(ordered):
             if backend in unavailable:
                 continue
+            print(
+                "Repeat {0}/{1}: {2} ({3} worker(s))".format(
+                    repeat + 1, repeats, backend, insert_workers
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
             result = run_backend(
                 backend,
                 documents,
@@ -1897,9 +2049,12 @@ def main(argv=None):
         parser.error("--sqlite-shards must be between 2 and 64")
     if not 1 <= args.insert_workers <= 64:
         parser.error("--insert-workers must be between 1 and 64")
-    if "sqlite-sharded" in requested and args.insert_workers != args.sqlite_shards:
+    if "sqlite-sharded" in requested and args.insert_workers not in (
+        1,
+        args.sqlite_shards,
+    ):
         parser.error(
-            "--insert-workers must equal --sqlite-shards for shard-affine inserts"
+            "--insert-workers must be 1 or equal --sqlite-shards for shard-affine inserts"
         )
     try:
         _document_batches(

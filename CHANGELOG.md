@@ -25,7 +25,7 @@
   date range at 380.29 ms versus 760.54 ms. Warm reads stayed similar (59.69 to
   63.81 ms and 4.38 to 4.49 ms). These external measurements describe his
   workloads, not a latency guarantee. See the
-  [benchmark comparison](docs/BENCHMARKS.md#tm-053-external-direct-sqlite-retest).
+  [benchmark comparison](https://github.com/schapman1974/tinymongo/blob/v1.3.1/docs/BENCHMARKS.md#tm-053-external-direct-sqlite-retest).
 - Add a tested [startup warm-up example](examples/sqlite_warmup.py): consume a
   supported query for each relevant declared BSON/date index after migrations
   and bulk loading, before traffic. Limiting results does not limit key-build
