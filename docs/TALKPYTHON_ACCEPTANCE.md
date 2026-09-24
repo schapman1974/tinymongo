@@ -275,7 +275,7 @@ every arm has a safe indexed candidate source.
 checks sync and async results against MongoDB 8.2, while
 `tests/test_sqlite_tm042.py` checks SQLite/sharded SQLite decoding bounds, native
 index use, reopen/update/drop behavior, and conservative fallback. The
-[synthetic benchmark](BENCHMARKS.md#tm-042-sqlite-indexed-read-coverage) measures
+[synthetic benchmark](https://github.com/schapman1974/tinymongo/blob/v1.3.1/docs/BENCHMARKS.md#tm-042-sqlite-indexed-read-coverage) measures
 both cold and warm reads and documents index maintenance costs.
 
 These local results did not rerun the private differential or the 903
@@ -337,7 +337,7 @@ Explicit unique and partial indexes retain separate function requirements.
 `tests/test_sqlite_query_portability.py` covers plain SQLite maintenance,
 backup and restore, external writes, legacy-index cleanup, and invalidation
 lifecycle. Existing SQLite candidate tests preserve exact matching and bounded
-warm decoding. The [TM-053 synthetic measurements](BENCHMARKS.md#tm-053-portable-sqlite-query-keys)
+warm decoding. The [TM-053 synthetic measurements](https://github.com/schapman1974/tinymongo/blob/v1.3.1/docs/BENCHMARKS.md#tm-053-portable-sqlite-query-keys)
 keep first-build costs, warm reads, and write costs separate; a write defers key
 refresh work to the next relevant read.
 
@@ -395,7 +395,7 @@ warm reads:
 Warm performance stayed approximately flat, while cold key construction was
 6.9x slower in the large synthetic case and 2.0x slower on `opt_ins`. These
 are first-use costs to budget before serving traffic, not steady-state query
-latencies. The [full external cold-read table](BENCHMARKS.md#tm-053-external-direct-sqlite-retest)
+latencies. The [full external cold-read table](https://github.com/schapman1974/tinymongo/blob/v1.3.1/docs/BENCHMARKS.md#tm-053-external-direct-sqlite-retest)
 includes the smaller synthetic collections and `episodes`.
 
 His write checks found a 1.0x before/after-index ratio at every synthetic payload

@@ -1,0 +1,1702 @@
+{
+  "environment": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.11 (main, Jul 11 2025, 22:26:01) [Clang 20.1.4 ]",
+    "sqlite": "3.49.1"
+  },
+  "provenance": {
+    "command": "python tests/benchmarks/bench_storage.py --backend memory --backend tinydb --backend parquet --backend sqlite --backend sqlite-sharded --backend duckdb --backend raw-sqlite --docs 1000 --queries 1000 --repeats 3 --workers 1 --sqlite-shards 4 --json-output /tmp/tinymongo-benchmarks.json",
+    "date": "2026-09-23",
+    "dependencies": {
+      "duckdb": "1.4.5",
+      "portalocker": "3.2.0",
+      "pyarrow": "21.0.0",
+      "pymongo": "4.17.0",
+      "tinydb": "3.15.2"
+    },
+    "harness_sha256": "13ac32e1900295c9d5bd2b3d6a056549863b79c900a229c6c9b3f428028ec8bf",
+    "host_note": "Developer laptop with unrelated applications active. Benchmark backends and repetitions run serially, without concurrent TinyMongo test runs.",
+    "machine": "Apple M1 Pro",
+    "memory_bytes": 17179869184,
+    "os": "macOS-26.6.2-arm64-arm-64bit",
+    "profile": "One active worker per phase; six TinyMongo backends reuse one initialized client per repetition. Raw SQLite uses a fresh spawned connection per phase with setup excluded.",
+    "python": "3.12.11",
+    "recorded_at_utc": "2026-09-24T02:51:58.634326+00:00",
+    "release": "1.3.1",
+    "revision": "89593ab45c2631f302386b275ca5f0b8e0b697f2",
+    "sqlite": "3.49.1"
+  },
+  "results": [
+    {
+      "available": true,
+      "backend": "memory",
+      "delete_docs_per_second": 51.29260353873737,
+      "delete_mode": "1 process, exact-ID delete_one stream",
+      "delete_process_ids": [
+        21077
+      ],
+      "delete_seconds": 1.949598832987249,
+      "deleted_docs": 100,
+      "documents": 1000,
+      "durability": {
+        "policy": "process memory only"
+      },
+      "execution_order": 1,
+      "file_kib": null,
+      "insert_batch_sizes": [
+        1000
+      ],
+      "insert_batches": 1,
+      "insert_docs_per_second": 92311.95660862245,
+      "insert_mode": "1 process, 1 insert_many bulk",
+      "insert_process_ids": [
+        21077
+      ],
+      "insert_seconds": 0.010832832893356681,
+      "insert_workers": 1,
+      "label": "TinyMongo Memory",
+      "persistence_verified": false,
+      "point_avg_ms": 2.835596736287698,
+      "point_batch_sizes": [
+        1000
+      ],
+      "point_mode": "1 process, warmed exact-ID stream",
+      "point_p95_ms": 3.0165829230099916,
+      "point_process_ids": [
+        21077
+      ],
+      "point_reads_per_second": 352.60694146873755,
+      "point_wall_seconds": 2.836019041016698,
+      "queries": 1000,
+      "read_count": 1000,
+      "read_docs_per_second": 245318.5241685138,
+      "read_mode": "1 process, 1 warmed full-collection scan",
+      "read_process_ids": [
+        21077
+      ],
+      "read_seconds": 0.004076333018019795,
+      "remaining_docs": 900,
+      "repeat": 1,
+      "repeat_count": 3,
+      "runs": [
+        {
+          "available": true,
+          "backend": "memory",
+          "delete_docs_per_second": 51.29260353873737,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 1.949598832987249,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "process memory only"
+          },
+          "execution_order": 1,
+          "file_kib": null,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 87953.00640204467,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.011369707994163036,
+          "insert_workers": 1,
+          "label": "TinyMongo Memory",
+          "persistence_verified": false,
+          "point_avg_ms": 2.748929967870936,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 2.9522920958697796,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 363.7127158195586,
+          "point_wall_seconds": 2.7494227078277618,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 184912.67668067207,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.005407958058640361,
+          "remaining_docs": 900,
+          "repeat": 1,
+          "update_docs_per_second": 44.670958467384104,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 2.2385908749420196,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "memory",
+          "delete_docs_per_second": 51.22601572092785,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 1.952133083017543,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "process memory only"
+          },
+          "execution_order": 7,
+          "file_kib": null,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 92311.95660862245,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.010832832893356681,
+          "insert_workers": 1,
+          "label": "TinyMongo Memory",
+          "persistence_verified": false,
+          "point_avg_ms": 3.276938115945086,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 4.766874946653843,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 305.09572797297506,
+          "point_wall_seconds": 3.2776597910560668,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 245318.5241685138,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.004076333018019795,
+          "remaining_docs": 900,
+          "repeat": 2,
+          "update_docs_per_second": 40.196977249105736,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 2.4877492499072105,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "memory",
+          "delete_docs_per_second": 54.05585834665793,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 1.8499382501468062,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "process memory only"
+          },
+          "execution_order": 6,
+          "file_kib": null,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 115123.37569932622,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.008686333196237683,
+          "insert_workers": 1,
+          "label": "TinyMongo Memory",
+          "persistence_verified": false,
+          "point_avg_ms": 2.835596736287698,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 3.0165829230099916,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 352.60694146873755,
+          "point_wall_seconds": 2.836019041016698,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 252355.35688695352,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.003962666029110551,
+          "remaining_docs": 900,
+          "repeat": 3,
+          "update_docs_per_second": 42.94660370795678,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 2.3284728329163045,
+          "updated_docs": 100
+        }
+      ],
+      "update_docs_per_second": 42.94660370795678,
+      "update_mode": "1 process, exact-ID update_one stream",
+      "update_process_ids": [
+        21077
+      ],
+      "update_seconds": 2.3284728329163045,
+      "updated_docs": 100
+    },
+    {
+      "available": true,
+      "backend": "tinydb",
+      "delete_docs_per_second": 108.55719254757666,
+      "delete_mode": "1 process, exact-ID delete_one stream",
+      "delete_process_ids": [
+        21077
+      ],
+      "delete_seconds": 0.9211734170094132,
+      "deleted_docs": 100,
+      "documents": 1000,
+      "durability": {
+        "policy": "backend default"
+      },
+      "execution_order": 2,
+      "file_kib": 66.44140625,
+      "insert_batch_sizes": [
+        1000
+      ],
+      "insert_batches": 1,
+      "insert_docs_per_second": 143192.11003132214,
+      "insert_mode": "1 process, 1 insert_many bulk",
+      "insert_process_ids": [
+        21077
+      ],
+      "insert_seconds": 0.006983625004068017,
+      "insert_workers": 1,
+      "label": "TinyMongo TinyDB",
+      "persistence_verified": true,
+      "point_avg_ms": 2.4472302589565516,
+      "point_batch_sizes": [
+        1000
+      ],
+      "point_mode": "1 process, warmed exact-ID stream",
+      "point_p95_ms": 3.076125169172883,
+      "point_process_ids": [
+        21077
+      ],
+      "point_reads_per_second": 408.54910812126474,
+      "point_wall_seconds": 2.4476861658040434,
+      "queries": 1000,
+      "read_count": 1000,
+      "read_docs_per_second": 236670.03311917884,
+      "read_mode": "1 process, 1 warmed full-collection scan",
+      "read_process_ids": [
+        21077
+      ],
+      "read_seconds": 0.004225292010232806,
+      "remaining_docs": 900,
+      "repeat": 1,
+      "repeat_count": 3,
+      "runs": [
+        {
+          "available": true,
+          "backend": "tinydb",
+          "delete_docs_per_second": 116.0419147733294,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.8617575829848647,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 2,
+          "file_kib": 66.44140625,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 143192.11003132214,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.006983625004068017,
+          "insert_workers": 1,
+          "label": "TinyMongo TinyDB",
+          "persistence_verified": true,
+          "point_avg_ms": 2.379201338859275,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 2.711750101298094,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 420.2238690486745,
+          "point_wall_seconds": 2.3796839581336826,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 247872.43873536424,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.004034333163872361,
+          "remaining_docs": 900,
+          "repeat": 1,
+          "update_docs_per_second": 51.066241857486965,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 1.958240833133459,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "tinydb",
+          "delete_docs_per_second": 88.90199043047673,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 1.1248342080507427,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 1,
+          "file_kib": 66.44140625,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 148912.94098328918,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.006715333089232445,
+          "insert_workers": 1,
+          "label": "TinyMongo TinyDB",
+          "persistence_verified": true,
+          "point_avg_ms": 2.698133448138833,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 3.7242090329527855,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 370.5515117397334,
+          "point_wall_seconds": 2.698680124944076,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 234748.66976562777,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.004259875044226646,
+          "remaining_docs": 900,
+          "repeat": 2,
+          "update_docs_per_second": 33.503150562255335,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 2.9847939170431346,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "tinydb",
+          "delete_docs_per_second": 108.55719254757666,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.9211734170094132,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 7,
+          "file_kib": 66.44140625,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 120135.15814480478,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.008323957910761237,
+          "insert_workers": 1,
+          "label": "TinyMongo TinyDB",
+          "persistence_verified": true,
+          "point_avg_ms": 2.4472302589565516,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 3.076125169172883,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 408.54910812126474,
+          "point_wall_seconds": 2.4476861658040434,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 236670.03311917884,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.004225292010232806,
+          "remaining_docs": 900,
+          "repeat": 3,
+          "update_docs_per_second": 52.16912483142506,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 1.9168425831012428,
+          "updated_docs": 100
+        }
+      ],
+      "update_docs_per_second": 51.066241857486965,
+      "update_mode": "1 process, exact-ID update_one stream",
+      "update_process_ids": [
+        21077
+      ],
+      "update_seconds": 1.958240833133459,
+      "updated_docs": 100
+    },
+    {
+      "available": true,
+      "backend": "parquet",
+      "delete_docs_per_second": 3.1327863774532534,
+      "delete_mode": "1 process, exact-ID delete_one stream",
+      "delete_process_ids": [
+        21077
+      ],
+      "delete_seconds": 31.920465665869415,
+      "deleted_docs": 100,
+      "documents": 1000,
+      "durability": {
+        "policy": "backend default"
+      },
+      "execution_order": 3,
+      "file_kib": 68.8876953125,
+      "insert_batch_sizes": [
+        1000
+      ],
+      "insert_batches": 1,
+      "insert_docs_per_second": 3502.482319454907,
+      "insert_mode": "1 process, 1 insert_many bulk",
+      "insert_process_ids": [
+        21077
+      ],
+      "insert_seconds": 0.2855117910075933,
+      "insert_workers": 1,
+      "label": "TinyMongo Parquet",
+      "persistence_verified": true,
+      "point_avg_ms": 8.029020835878327,
+      "point_batch_sizes": [
+        1000
+      ],
+      "point_mode": "1 process, warmed exact-ID stream",
+      "point_p95_ms": 13.93020898103714,
+      "point_process_ids": [
+        21077
+      ],
+      "point_reads_per_second": 124.52470024147638,
+      "point_wall_seconds": 8.03053529188037,
+      "queries": 1000,
+      "read_count": 1000,
+      "read_docs_per_second": 94042.04195182843,
+      "read_mode": "1 process, 1 warmed full-collection scan",
+      "read_process_ids": [
+        21077
+      ],
+      "read_seconds": 0.010633541969582438,
+      "remaining_docs": 900,
+      "repeat": 1,
+      "repeat_count": 3,
+      "runs": [
+        {
+          "available": true,
+          "backend": "parquet",
+          "delete_docs_per_second": 2.9410005295460846,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 34.00203400012106,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 3,
+          "file_kib": 68.8876953125,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 3443.939763147321,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.2903651250526309,
+          "insert_workers": 1,
+          "label": "TinyMongo Parquet",
+          "persistence_verified": true,
+          "point_avg_ms": 6.852312713395804,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 9.955582907423377,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 145.91652866420952,
+          "point_wall_seconds": 6.853233209112659,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 103453.17515868742,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.009666208876296878,
+          "remaining_docs": 900,
+          "repeat": 1,
+          "update_docs_per_second": 2.5965510916552126,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 38.512625582981855,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "parquet",
+          "delete_docs_per_second": 3.3127369205660377,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 30.186520209070295,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 2,
+          "file_kib": 68.8876953125,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 3502.482319454907,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.2855117910075933,
+          "insert_workers": 1,
+          "label": "TinyMongo Parquet",
+          "persistence_verified": true,
+          "point_avg_ms": 8.575474506244063,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 14.485749881714582,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 116.59227366614513,
+          "point_wall_seconds": 8.576897667022422,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 94042.04195182843,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.010633541969582438,
+          "remaining_docs": 900,
+          "repeat": 2,
+          "update_docs_per_second": 2.034246674999155,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 49.15824675001204,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "parquet",
+          "delete_docs_per_second": 3.1327863774532534,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 31.920465665869415,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 1,
+          "file_kib": 68.8876953125,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 3741.931455274274,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.26724166702479124,
+          "insert_workers": 1,
+          "label": "TinyMongo Parquet",
+          "persistence_verified": true,
+          "point_avg_ms": 8.029020835878327,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 13.93020898103714,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 124.52470024147638,
+          "point_wall_seconds": 8.03053529188037,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 89539.54197392393,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.011168250115588307,
+          "remaining_docs": 900,
+          "repeat": 3,
+          "update_docs_per_second": 2.8419716276487206,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 35.18683966691606,
+          "updated_docs": 100
+        }
+      ],
+      "update_docs_per_second": 2.5965510916552126,
+      "update_mode": "1 process, exact-ID update_one stream",
+      "update_process_ids": [
+        21077
+      ],
+      "update_seconds": 38.512625582981855,
+      "updated_docs": 100
+    },
+    {
+      "available": true,
+      "backend": "sqlite",
+      "delete_docs_per_second": 303.2116171238844,
+      "delete_mode": "1 process, exact-ID delete_one stream",
+      "delete_process_ids": [
+        21077
+      ],
+      "delete_seconds": 0.32980266702361405,
+      "deleted_docs": 100,
+      "documents": 1000,
+      "durability": {
+        "journal_mode": "WAL",
+        "synchronous": "FULL"
+      },
+      "execution_order": 4,
+      "file_kib": 264.0,
+      "insert_batch_sizes": [
+        1000
+      ],
+      "insert_batches": 1,
+      "insert_docs_per_second": 105600.80173624284,
+      "insert_mode": "1 process, 1 insert_many bulk",
+      "insert_process_ids": [
+        21077
+      ],
+      "insert_seconds": 0.009469625074416399,
+      "insert_workers": 1,
+      "label": "TinyMongo SQLite",
+      "persistence_verified": true,
+      "point_avg_ms": 1.0199337925296277,
+      "point_batch_sizes": [
+        1000
+      ],
+      "point_mode": "1 process, warmed exact-ID stream",
+      "point_p95_ms": 2.303832909092307,
+      "point_process_ids": [
+        21077
+      ],
+      "point_reads_per_second": 979.3352111788541,
+      "point_wall_seconds": 1.021100833080709,
+      "queries": 1000,
+      "read_count": 1000,
+      "read_docs_per_second": 197224.06941789069,
+      "read_mode": "1 process, 1 warmed full-collection scan",
+      "read_process_ids": [
+        21077
+      ],
+      "read_seconds": 0.005070375045761466,
+      "remaining_docs": 900,
+      "repeat": 1,
+      "repeat_count": 3,
+      "runs": [
+        {
+          "available": true,
+          "backend": "sqlite",
+          "delete_docs_per_second": 303.2116171238844,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.32980266702361405,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "FULL"
+          },
+          "execution_order": 4,
+          "file_kib": 264.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 105600.80173624284,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.009469625074416399,
+          "insert_workers": 1,
+          "label": "TinyMongo SQLite",
+          "persistence_verified": true,
+          "point_avg_ms": 1.1256553416606039,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 3.006207989528775,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 887.5162301995267,
+          "point_wall_seconds": 1.126739958068356,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 206031.57080097386,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.0048536250833421946,
+          "remaining_docs": 900,
+          "repeat": 1,
+          "update_docs_per_second": 359.00659255721706,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 0.27854641689918935,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "sqlite",
+          "delete_docs_per_second": 544.8603995943737,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.18353325012139976,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "FULL"
+          },
+          "execution_order": 3,
+          "file_kib": 264.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 97860.52470045793,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.010218624956905842,
+          "insert_workers": 1,
+          "label": "TinyMongo SQLite",
+          "persistence_verified": true,
+          "point_avg_ms": 1.014225099235773,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 2.303832909092307,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 984.2205257094407,
+          "point_wall_seconds": 1.0160324580501765,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 197224.06941789069,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.005070375045761466,
+          "remaining_docs": 900,
+          "repeat": 2,
+          "update_docs_per_second": 510.7464239451163,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 0.19579187501221895,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "sqlite",
+          "delete_docs_per_second": 196.44274946119106,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.5090541660320014,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "FULL"
+          },
+          "execution_order": 2,
+          "file_kib": 264.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 106438.1810019956,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.009395124856382608,
+          "insert_workers": 1,
+          "label": "TinyMongo SQLite",
+          "persistence_verified": true,
+          "point_avg_ms": 1.0199337925296277,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 2.017499879002571,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 979.3352111788541,
+          "point_wall_seconds": 1.021100833080709,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 194779.89957715888,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.005133999977260828,
+          "remaining_docs": 900,
+          "repeat": 3,
+          "update_docs_per_second": 233.14398157773968,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 0.4289194999728352,
+          "updated_docs": 100
+        }
+      ],
+      "update_docs_per_second": 359.00659255721706,
+      "update_mode": "1 process, exact-ID update_one stream",
+      "update_process_ids": [
+        21077
+      ],
+      "update_seconds": 0.27854641689918935,
+      "updated_docs": 100
+    },
+    {
+      "available": true,
+      "backend": "sqlite-sharded",
+      "delete_docs_per_second": 773.3690370015732,
+      "delete_mode": "1 process, exact-ID delete_one stream",
+      "delete_process_ids": [
+        21077
+      ],
+      "delete_seconds": 0.12930437503382564,
+      "deleted_docs": 100,
+      "documents": 1000,
+      "durability": {
+        "journal_mode": "WAL",
+        "synchronous": "FULL"
+      },
+      "execution_order": 5,
+      "file_kib": 512.0,
+      "insert_batch_sizes": [
+        1000
+      ],
+      "insert_batches": 1,
+      "insert_docs_per_second": 43475.1118576583,
+      "insert_mode": "1 process, 1 insert_many bulk",
+      "insert_process_ids": [
+        21077
+      ],
+      "insert_seconds": 0.023001665947958827,
+      "insert_workers": 1,
+      "label": "TinyMongo SQLite-sharded (4)",
+      "persistence_verified": true,
+      "point_avg_ms": 0.034403664292767644,
+      "point_batch_sizes": [
+        1000
+      ],
+      "point_mode": "1 process, warmed exact-ID stream",
+      "point_p95_ms": 0.03854208625853062,
+      "point_process_ids": [
+        21077
+      ],
+      "point_reads_per_second": 28887.367082881756,
+      "point_wall_seconds": 0.0346172081772238,
+      "queries": 1000,
+      "read_count": 1000,
+      "read_docs_per_second": 199024.78023349607,
+      "read_mode": "1 process, 1 warmed full-collection scan",
+      "read_process_ids": [
+        21077
+      ],
+      "read_seconds": 0.005024499958381057,
+      "remaining_docs": 900,
+      "repeat": 1,
+      "repeat_count": 3,
+      "runs": [
+        {
+          "available": true,
+          "backend": "sqlite-sharded",
+          "delete_docs_per_second": 519.6971726805306,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.19241974991746247,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "FULL"
+          },
+          "execution_order": 5,
+          "file_kib": 512.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 32348.065241460565,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.030913749942556024,
+          "insert_workers": 1,
+          "label": "TinyMongo SQLite-sharded (4)",
+          "persistence_verified": true,
+          "point_avg_ms": 0.03142477315850556,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 0.0363748986274004,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 31543.66760127214,
+          "point_wall_seconds": 0.03170208400115371,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 208844.56900546973,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.004788249963894486,
+          "remaining_docs": 900,
+          "repeat": 1,
+          "update_docs_per_second": 1068.3470666020742,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 0.09360254090279341,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "sqlite-sharded",
+          "delete_docs_per_second": 1142.0756354987998,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.08755987510085106,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "FULL"
+          },
+          "execution_order": 4,
+          "file_kib": 512.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 43475.1118576583,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.023001665947958827,
+          "insert_workers": 1,
+          "label": "TinyMongo SQLite-sharded (4)",
+          "persistence_verified": true,
+          "point_avg_ms": 0.03741475706920028,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 0.05466700531542301,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 26561.63074391599,
+          "point_wall_seconds": 0.03764829086139798,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 199024.78023349607,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.005024499958381057,
+          "remaining_docs": 900,
+          "repeat": 2,
+          "update_docs_per_second": 1104.7185690397082,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 0.09052079217508435,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "sqlite-sharded",
+          "delete_docs_per_second": 773.3690370015732,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 0.12930437503382564,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "FULL"
+          },
+          "execution_order": 3,
+          "file_kib": 512.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 44927.75108627133,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.022257958073168993,
+          "insert_workers": 1,
+          "label": "TinyMongo SQLite-sharded (4)",
+          "persistence_verified": true,
+          "point_avg_ms": 0.034403664292767644,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 0.03854208625853062,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 28887.367082881756,
+          "point_wall_seconds": 0.0346172081772238,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 193236.71286146564,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.0051750000566244125,
+          "remaining_docs": 900,
+          "repeat": 3,
+          "update_docs_per_second": 678.7650881600164,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 0.14732637512497604,
+          "updated_docs": 100
+        }
+      ],
+      "update_docs_per_second": 1068.3470666020742,
+      "update_mode": "1 process, exact-ID update_one stream",
+      "update_process_ids": [
+        21077
+      ],
+      "update_seconds": 0.09360254090279341,
+      "updated_docs": 100
+    },
+    {
+      "available": true,
+      "backend": "duckdb",
+      "delete_docs_per_second": 16.47683612355994,
+      "delete_mode": "1 process, exact-ID delete_one stream",
+      "delete_process_ids": [
+        21077
+      ],
+      "delete_seconds": 6.069126332877204,
+      "deleted_docs": 100,
+      "documents": 1000,
+      "durability": {
+        "policy": "backend default"
+      },
+      "execution_order": 6,
+      "file_kib": 1036.0,
+      "insert_batch_sizes": [
+        1000
+      ],
+      "insert_batches": 1,
+      "insert_docs_per_second": 1430.2555542040527,
+      "insert_mode": "1 process, 1 insert_many bulk",
+      "insert_process_ids": [
+        21077
+      ],
+      "insert_seconds": 0.6991757501382381,
+      "insert_workers": 1,
+      "label": "TinyMongo DuckDB",
+      "persistence_verified": true,
+      "point_avg_ms": 29.777147753164172,
+      "point_batch_sizes": [
+        1000
+      ],
+      "point_mode": "1 process, warmed exact-ID stream",
+      "point_p95_ms": 53.38595900684595,
+      "point_process_ids": [
+        21077
+      ],
+      "point_reads_per_second": 33.58019548205292,
+      "point_wall_seconds": 29.779457374941558,
+      "queries": 1000,
+      "read_count": 1000,
+      "read_docs_per_second": 35228.84091924598,
+      "read_mode": "1 process, 1 warmed full-collection scan",
+      "read_process_ids": [
+        21077
+      ],
+      "read_seconds": 0.028385833138599992,
+      "remaining_docs": 900,
+      "repeat": 1,
+      "repeat_count": 3,
+      "runs": [
+        {
+          "available": true,
+          "backend": "duckdb",
+          "delete_docs_per_second": 15.729095275321848,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 6.357644750038162,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 6,
+          "file_kib": 1036.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 1326.0559385035126,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.7541159999091178,
+          "insert_workers": 1,
+          "label": "TinyMongo DuckDB",
+          "persistence_verified": true,
+          "point_avg_ms": 40.461051444290206,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 96.96854208596051,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 24.713687680678923,
+          "point_wall_seconds": 40.46340687479824,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 35866.98799501476,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.02788079110905528,
+          "remaining_docs": 900,
+          "repeat": 1,
+          "update_docs_per_second": 5.452143760457405,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 18.34140924992971,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "duckdb",
+          "delete_docs_per_second": 16.47683612355994,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 6.069126332877204,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 5,
+          "file_kib": 1036.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 1997.7072992252993,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.5005738330073655,
+          "insert_workers": 1,
+          "label": "TinyMongo DuckDB",
+          "persistence_verified": true,
+          "point_avg_ms": 29.777147753164172,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 53.38595900684595,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 33.58019548205292,
+          "point_wall_seconds": 29.779457374941558,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 35228.84091924598,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.028385833138599992,
+          "remaining_docs": 900,
+          "repeat": 2,
+          "update_docs_per_second": 5.737987647369068,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 17.427712666103616,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "duckdb",
+          "delete_docs_per_second": 18.70576918411526,
+          "delete_mode": "1 process, exact-ID delete_one stream",
+          "delete_process_ids": [
+            21077
+          ],
+          "delete_seconds": 5.34594429214485,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "policy": "backend default"
+          },
+          "execution_order": 4,
+          "file_kib": 1036.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 1430.2555542040527,
+          "insert_mode": "1 process, 1 insert_many bulk",
+          "insert_process_ids": [
+            21077
+          ],
+          "insert_seconds": 0.6991757501382381,
+          "insert_workers": 1,
+          "label": "TinyMongo DuckDB",
+          "persistence_verified": true,
+          "point_avg_ms": 26.58791528851725,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 process, warmed exact-ID stream",
+          "point_p95_ms": 41.794374817982316,
+          "point_process_ids": [
+            21077
+          ],
+          "point_reads_per_second": 37.60919913208487,
+          "point_wall_seconds": 26.589239416876808,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 33502.89486326974,
+          "read_mode": "1 process, 1 warmed full-collection scan",
+          "read_process_ids": [
+            21077
+          ],
+          "read_seconds": 0.029848166974261403,
+          "remaining_docs": 900,
+          "repeat": 3,
+          "update_docs_per_second": 7.03497335568014,
+          "update_mode": "1 process, exact-ID update_one stream",
+          "update_process_ids": [
+            21077
+          ],
+          "update_seconds": 14.214694916969165,
+          "updated_docs": 100
+        }
+      ],
+      "update_docs_per_second": 5.737987647369068,
+      "update_mode": "1 process, exact-ID update_one stream",
+      "update_process_ids": [
+        21077
+      ],
+      "update_seconds": 17.427712666103616,
+      "updated_docs": 100
+    },
+    {
+      "available": true,
+      "backend": "raw-sqlite",
+      "delete_docs_per_second": 33321.30263002118,
+      "delete_mode": "1 spawned disjoint-ID streams",
+      "delete_process_ids": [
+        26498
+      ],
+      "delete_seconds": 0.00300108315423131,
+      "deleted_docs": 100,
+      "documents": 1000,
+      "durability": {
+        "journal_mode": "WAL",
+        "synchronous": "NORMAL"
+      },
+      "execution_order": 7,
+      "file_kib": 104.0,
+      "insert_batch_sizes": [
+        1000
+      ],
+      "insert_batches": 1,
+      "insert_docs_per_second": 295413.7268764778,
+      "insert_mode": "1 spawned executemany bulks",
+      "insert_process_ids": [
+        26491
+      ],
+      "insert_seconds": 0.0033850830513983965,
+      "insert_workers": 1,
+      "label": "Raw SQLite (native SQL)",
+      "persistence_verified": true,
+      "point_avg_ms": 0.005377295659855008,
+      "point_batch_sizes": [
+        1000
+      ],
+      "point_mode": "1 spawned exact-ID streams",
+      "point_p95_ms": 0.005958136171102524,
+      "point_process_ids": [
+        26495
+      ],
+      "point_reads_per_second": 182431.81791441422,
+      "point_wall_seconds": 0.005481499945744872,
+      "queries": 1000,
+      "read_count": 1000,
+      "read_docs_per_second": 759829.8845580516,
+      "read_mode": "1 spawned full-collection scans",
+      "read_process_ids": [
+        26494
+      ],
+      "read_seconds": 0.001316084060817957,
+      "remaining_docs": 900,
+      "repeat": 1,
+      "repeat_count": 3,
+      "runs": [
+        {
+          "available": true,
+          "backend": "raw-sqlite",
+          "delete_docs_per_second": 4001.31387192484,
+          "delete_mode": "1 spawned disjoint-ID streams",
+          "delete_process_ids": [
+            26498
+          ],
+          "delete_seconds": 0.024991790996864438,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "NORMAL"
+          },
+          "execution_order": 7,
+          "file_kib": 104.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 296018.6189203033,
+          "insert_mode": "1 spawned executemany bulks",
+          "insert_process_ids": [
+            26491
+          ],
+          "insert_seconds": 0.0033781658858060837,
+          "insert_workers": 1,
+          "label": "Raw SQLite (native SQL)",
+          "persistence_verified": true,
+          "point_avg_ms": 0.005623991833999753,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 spawned exact-ID streams",
+          "point_p95_ms": 0.0069160014390945435,
+          "point_process_ids": [
+            26495
+          ],
+          "point_reads_per_second": 174123.7523755708,
+          "point_wall_seconds": 0.005743041867390275,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 753626.6556005239,
+          "read_mode": "1 spawned full-collection scans",
+          "read_process_ids": [
+            26494
+          ],
+          "read_seconds": 0.0013269169721752405,
+          "remaining_docs": 900,
+          "repeat": 1,
+          "update_docs_per_second": 30290.408566065824,
+          "update_mode": "1 spawned disjoint-ID streams",
+          "update_process_ids": [
+            26496
+          ],
+          "update_seconds": 0.0033013750799000263,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "raw-sqlite",
+          "delete_docs_per_second": 33321.30263002118,
+          "delete_mode": "1 spawned disjoint-ID streams",
+          "delete_process_ids": [
+            31617
+          ],
+          "delete_seconds": 0.00300108315423131,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "NORMAL"
+          },
+          "execution_order": 6,
+          "file_kib": 104.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 288319.4617387091,
+          "insert_mode": "1 spawned executemany bulks",
+          "insert_process_ids": [
+            31550
+          ],
+          "insert_seconds": 0.003468374954536557,
+          "insert_workers": 1,
+          "label": "Raw SQLite (native SQL)",
+          "persistence_verified": true,
+          "point_avg_ms": 0.005337458336725831,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 spawned exact-ID streams",
+          "point_p95_ms": 0.005915993824601173,
+          "point_process_ids": [
+            31555
+          ],
+          "point_reads_per_second": 183615.40833577552,
+          "point_wall_seconds": 0.005446166032925248,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 759829.8845580516,
+          "read_mode": "1 spawned full-collection scans",
+          "read_process_ids": [
+            31553
+          ],
+          "read_seconds": 0.001316084060817957,
+          "remaining_docs": 900,
+          "repeat": 2,
+          "update_docs_per_second": 9953.467465690925,
+          "update_mode": "1 spawned disjoint-ID streams",
+          "update_process_ids": [
+            31565
+          ],
+          "update_seconds": 0.010046750074252486,
+          "updated_docs": 100
+        },
+        {
+          "available": true,
+          "backend": "raw-sqlite",
+          "delete_docs_per_second": 35272.33816238178,
+          "delete_mode": "1 spawned disjoint-ID streams",
+          "delete_process_ids": [
+            37100
+          ],
+          "delete_seconds": 0.002835082821547985,
+          "deleted_docs": 100,
+          "documents": 1000,
+          "durability": {
+            "journal_mode": "WAL",
+            "synchronous": "NORMAL"
+          },
+          "execution_order": 5,
+          "file_kib": 104.0,
+          "insert_batch_sizes": [
+            1000
+          ],
+          "insert_batches": 1,
+          "insert_docs_per_second": 295413.7268764778,
+          "insert_mode": "1 spawned executemany bulks",
+          "insert_process_ids": [
+            37052
+          ],
+          "insert_seconds": 0.0033850830513983965,
+          "insert_workers": 1,
+          "label": "Raw SQLite (native SQL)",
+          "persistence_verified": true,
+          "point_avg_ms": 0.005377295659855008,
+          "point_batch_sizes": [
+            1000
+          ],
+          "point_mode": "1 spawned exact-ID streams",
+          "point_p95_ms": 0.005958136171102524,
+          "point_process_ids": [
+            37096
+          ],
+          "point_reads_per_second": 182431.81791441422,
+          "point_wall_seconds": 0.005481499945744872,
+          "queries": 1000,
+          "read_count": 1000,
+          "read_docs_per_second": 784852.235776889,
+          "read_mode": "1 spawned full-collection scans",
+          "read_process_ids": [
+            37095
+          ],
+          "read_seconds": 0.0012741251848638058,
+          "remaining_docs": 900,
+          "repeat": 3,
+          "update_docs_per_second": 44988.464702221754,
+          "update_mode": "1 spawned disjoint-ID streams",
+          "update_process_ids": [
+            37097
+          ],
+          "update_seconds": 0.002222792012616992,
+          "updated_docs": 100
+        }
+      ],
+      "update_docs_per_second": 30290.408566065824,
+      "update_mode": "1 spawned disjoint-ID streams",
+      "update_process_ids": [
+        26496
+      ],
+      "update_seconds": 0.0033013750799000263,
+      "updated_docs": 100
+    }
+  ],
+  "workload": {
+    "compact_json_bytes": 60671,
+    "delete_operations": 100,
+    "documents": 1000,
+    "id_type": "string",
+    "insert_workers": 1,
+    "point_read_seed": 1974,
+    "queries": 1000,
+    "repeats": 3,
+    "secondary_indexes": 0,
+    "sqlite_shards": 4,
+    "update_operations": 100,
+    "workers": 1
+  }
+}
