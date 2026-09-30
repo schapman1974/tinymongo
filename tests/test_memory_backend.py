@@ -519,7 +519,8 @@ def test_whole_memory_storage_api_remains_compatible_with_table_writes():
     assert storage.table_names() == {"replacement"}
 
 
-def test_memory_insert_does_not_json_serialize_resident_builtin_rows(monkeypatch):
+@pytest.mark.parametrize("with_bson", [False, True])
+def test_memory_insert_does_not_json_serialize_resident_rows(monkeypatch, with_bson):
     from tinymongo import bson_codec
 
     client = tm.TinyMongoClient(backend="memory")
@@ -529,6 +530,10 @@ def test_memory_insert_does_not_json_serialize_resident_builtin_rows(monkeypatch
         "body": "large transcript" * 10000,
         "nested": {"values": [1]},
     }
+    if with_bson:
+        bson = pytest.importorskip("bson")
+        resident["objectid"] = bson.ObjectId()
+        resident["script"] = bson.Code("x", {"values": [1]})
     collection.insert_one(resident)
     original = bson_codec.json.dumps
 
@@ -552,5 +557,10 @@ def test_memory_insert_does_not_json_serialize_resident_builtin_rows(monkeypatch
     assert fetched["nested"]["values"] == [1]
     fetched["nested"]["values"].append(3)
     assert collection.find_one({"_id": "resident"})["nested"]["values"] == [1]
+    if with_bson:
+        fetched["script"].scope["values"].append(2)
+        assert collection.find_one({"_id": "resident"})["script"].scope == {
+            "values": [1]
+        }
     assert collection.count_documents({}) == 2
     client.close()

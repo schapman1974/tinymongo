@@ -231,3 +231,74 @@ def test_clone_invalid_document_preserves_root(document):
     with pytest.raises(InvalidDocument) as caught:
         bson_codec.clone(document)
     assert caught.value.document is document
+
+
+def test_clone_bson_tree_does_not_serialize_resident_text(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from uuid import UUID
+    import re
+
+    bson = pytest.importorskip("bson")
+    document = {
+        "_id": bson.ObjectId(),
+        "body": "transcript 🦆" * 10000,
+        "date": datetime(
+            2026, 1, 1, microsecond=123456, tzinfo=timezone(timedelta(hours=2))
+        ),
+        "binary": bson.Binary(b"abc", subtype=0),
+        "uuid_binary": bson.Binary(bytes(range(16)), subtype=4),
+        "uuid": UUID(int=1),
+        "decimal": bson.Decimal128("sNaN"),
+        "bounds": [bson.MinKey(), bson.MaxKey()],
+        "timestamp": bson.Timestamp(123, 2),
+        "regex": [re.compile(b"abc", re.I), bson.Regex("abc", re.I)],
+        "code": bson.Code("x", {"nested": [1]}),
+        "escaped": {"__tinymongo_type_v1__": "objectid", "value": "user data"},
+    }
+    expected = bson_codec.dumps(document, sort_keys=True)
+
+    with monkeypatch.context() as patch:
+
+        def unexpected_json(*args, **kwargs):
+            raise AssertionError("BSON cloning must not serialize resident text")
+
+        patch.setattr(bson_codec.json, "dumps", unexpected_json)
+        patch.setattr(bson_codec.json, "loads", unexpected_json)
+        cloned = bson_codec.clone(document)
+
+    assert bson_codec.dumps(cloned, sort_keys=True) == expected
+    assert cloned["date"].microsecond == 123000
+    assert type(cloned["binary"]) is bytes
+    assert cloned["decimal"].bid == document["decimal"].bid
+    cloned["code"].scope["nested"].append(2)
+    assert document["code"].scope["nested"] == [1]
+
+
+def test_clone_normalizes_only_scalar_subclasses(monkeypatch):
+    class Number(int):
+        def __int__(self):
+            return 999
+
+    class Double(float):
+        def __float__(self):
+            return 999.0
+
+    class Text(str):
+        def __str__(self):
+            return "wrong"
+
+    document = {"body": "x" * 10000, "nested": [Number(7), Double(2.5), Text("text")]}
+    expected = bson_codec.loads(bson_codec.dumps(document))
+    original = bson_codec.json.dumps
+    seen = []
+
+    def scalar_only(value, **kwargs):
+        assert type(value) in (Number, Double, Text)
+        seen.append(type(value))
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(bson_codec.json, "dumps", scalar_only)
+    cloned = bson_codec.clone(document)
+    assert cloned == expected
+    assert [type(value) for value in cloned["nested"]] == [int, float, str]
+    assert seen == [Number, Double, Text]
