@@ -2653,6 +2653,16 @@ class TinyMongoCollection(object):
     def _get_index(self, key):
         if key not in self._indexes:
             return None
+        revision = self.parent._current_memory_revision()
+        if revision is not None:
+            # Collection handles are cheap and frequently short-lived. Share
+            # their derived indexes on the TinyDB table for this storage
+            # generation, without extending its lifetime beyond the table.
+            shared = getattr(self.table, "_tinymongo_index_cache", None)
+            if shared is None or shared[0] != revision:
+                shared = (revision, {})
+                self.table._tinymongo_index_cache = shared
+            self._index_cache = shared[1]
         if key in self._index_cache:
             return self._index_cache[key]
         index = {}
