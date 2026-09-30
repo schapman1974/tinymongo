@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from .bson_codec import clone as clone_document
 from .bson_codec import dumps as json_dumps
 from .bson_codec import loads as json_loads
+from .bson_codec import storage_values_equal
 from .bson_types import bson_value_identity_key, bson_values_equal
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
@@ -115,6 +116,7 @@ class AtomicJSONStorage(Storage):
         self._cached_signature = None
         self._cached_data = {}
         self._serialized_tables = {}
+        self._serialized_documents = {}
         os.makedirs(self._directory, exist_ok=True)
 
     def _file_signature(self):
@@ -143,6 +145,7 @@ class AtomicJSONStorage(Storage):
             data = self.read() or {}
             self._cached_data = data
             self._serialized_tables = {}
+            self._serialized_documents = {}
             self._cached_signature = signature
         return self._cached_data
 
@@ -165,15 +168,40 @@ class AtomicJSONStorage(Storage):
         finally:
             self._release_lock(rlock, lock)
 
+    def _serialize_table(self, name, table):
+        # Legacy or reserved-marker table shapes keep the full codec path.
+        if (
+            not isinstance(table, dict)
+            or set(table) == {"__tinymongo_type_v1__", "value"}
+            or any("\x00" in str(key) for key in table)
+        ):
+            return (json_dumps(table, ensure_ascii=False),), {}
+        previous = self._cached_data.get(name, {})
+        cached = self._serialized_documents.get(name, {})
+        documents = {}
+        pieces = ["{"]
+        for index, (key, document) in enumerate(table.items()):
+            if index:
+                pieces.append(", ")
+            pieces.append(json_dumps(str(key), ensure_ascii=False) + ": ")
+            if key in cached and storage_values_equal(previous[key], document):
+                chunk = cached[key]
+            else:
+                chunk = json_dumps(document, ensure_ascii=False)
+            documents[key] = chunk
+            pieces.append(chunk)
+        pieces.append("}")
+        return tuple(pieces), documents
+
     def _write_cached_tables(self, data, changed):
-        chunks = {
-            name: (
-                self._serialized_tables[name]
-                if name not in changed and name in self._serialized_tables
-                else json_dumps(table, ensure_ascii=False)
-            )
-            for name, table in data.items()
-        }
+        chunks = {}
+        documents = {}
+        for name, table in data.items():
+            if name not in changed and name in self._serialized_tables:
+                chunks[name] = self._serialized_tables[name]
+                documents[name] = self._serialized_documents[name]
+            else:
+                chunks[name], documents[name] = self._serialize_table(name, table)
         fd, tmp = tempfile.mkstemp(prefix="tmp", dir=self._directory)
         try:
             with os.fdopen(fd, "w", encoding="utf8") as handle:
@@ -187,7 +215,7 @@ class AtomicJSONStorage(Storage):
                         if index:
                             handle.write(", ")
                         handle.write(json_dumps(name, ensure_ascii=False) + ": ")
-                        handle.write(chunk)
+                        handle.writelines(chunk)
                     handle.write("}")
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -196,6 +224,7 @@ class AtomicJSONStorage(Storage):
             self._cached_signature = self._file_signature()
             self._cached_data = data
             self._serialized_tables = chunks
+            self._serialized_documents = documents
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -229,6 +258,7 @@ class AtomicJSONStorage(Storage):
             self._cached_signature = None
             self._cached_data = {}
             self._serialized_tables = {}
+            self._serialized_documents = {}
         finally:
             self._release_lock(rlock, lock)
 
