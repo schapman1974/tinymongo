@@ -2025,6 +2025,34 @@ class TableBackend(object):
     def all_docs(self, collection):
         return self.find(collection, {})
 
+    @_write_locked
+    def insert_one_with_result(
+        self, collection, document, bypass_document_validation=False
+    ):
+        """Validate a single insert using the backend's conflict candidates.
+
+        Use the same conservative candidate boundary as batch planning. Native
+        constraints still arbitrate the final write; legacy IDs and secondary
+        uniqueness can request the complete collection for validation.
+        """
+        find_candidates = getattr(self, "find_insert_conflict_candidates", None)
+        existing = None
+        if callable(find_candidates):
+            existing = find_candidates(
+                collection, [document], self.get_index_specs(collection)
+            )
+        if existing is None:
+            existing = self.find(collection, {})
+        self.validate_unique_post_image(collection, existing + [document])
+        _validate_physical_ids(existing, [document])
+        insert = getattr(self, "insert_many_prevalidated", self.insert_many)
+        results = insert(
+            collection,
+            [document],
+            bypass_document_validation=bypass_document_validation,
+        )
+        return results[0] if results else None
+
     def find(
         self, collection, filter_doc=None, sort=None, skip=None, limit=None
     ):  # pragma: no cover - abstract backend contract
@@ -4866,17 +4894,60 @@ class DuckDBTableBackend(TableBackend):
         existing_docs = self.find(collection, {})
         self.validate_unique_post_image(collection, existing_docs + docs)
         _validate_physical_ids(existing_docs, docs)
+        return self.insert_many_prevalidated(
+            collection, docs, bypass_document_validation=bypass_document_validation
+        )
+
+    def find_insert_conflict_candidates(self, collection, documents, specs):
+        """Probe typed and enumerable legacy IDs without decoding other rows."""
+        if any(spec.unique for spec in specs) or any(
+            _requires_legacy_insert_scan(document["_id"]) for document in documents
+        ):
+            return None
+        candidates = tuple(
+            dict.fromkeys(
+                candidate
+                for document in documents
+                for candidate in _physical_id_candidates(document["_id"])
+            )
+        )
+        self.create_collection(collection)
+        conn = self._connect()
+        try:
+            documents = []
+            for offset in range(0, len(candidates), _SQLITE_CONFLICT_QUERY_SIZE):
+                chunk = candidates[offset : offset + _SQLITE_CONFLICT_QUERY_SIZE]
+                rows = conn.execute(
+                    "SELECT data FROM {0} WHERE _id IN ({1})".format(
+                        _quote_identifier(collection), ", ".join("?" for _ in chunk)
+                    ),
+                    chunk,
+                ).fetchall()
+                documents.extend(_json_loads(row[0]) for row in rows)
+            return documents
+        finally:
+            conn.close()
+
+    @_write_locked
+    def insert_many_prevalidated(
+        self, collection, docs, bypass_document_validation=False
+    ):
+        """Commit a planned batch under the existing store-wide write lock."""
+        self.create_collection(collection)
         rows = [(_physical_id_key(doc["_id"]), _json_dumps(doc)) for doc in docs]
         conn = self._connect()
         try:
+            conn.execute("BEGIN TRANSACTION")
             conn.executemany(
                 "INSERT INTO {0} (_id, data) VALUES (?, ?)".format(
                     _quote_identifier(collection)
                 ),
                 rows,
             )
+            conn.commit()
             return list(range(len(rows)))
         except Exception as exc:
+            conn.rollback()
             constraint_error = getattr(self.duckdb, "ConstraintException", ())
             if constraint_error and isinstance(exc, constraint_error):
                 raise DuplicateKeyError(str(exc))
@@ -5036,6 +5107,17 @@ class DuckDBTableBackend(TableBackend):
 class ParquetDuckDBBackend(DuckDBTableBackend):
     dialect = "duckdb"
     extension = ".parquet"
+
+    def find_insert_conflict_candidates(self, collection, documents, specs):
+        # Parquet rewrites the complete collection and has no physical PK index.
+        return None
+
+    def insert_many_prevalidated(
+        self, collection, docs, bypass_document_validation=False
+    ):
+        return self.insert_many(
+            collection, docs, bypass_document_validation=bypass_document_validation
+        )
 
     def __init__(
         self,

@@ -1202,8 +1202,14 @@ def test_duckdb_does_not_mask_non_constraint_insert_errors(tmp_path, monkeypatch
     backend = DuckDBTableBackend(str(tmp_path / "db.duckdb"))
 
     class FailingConnection:
+        def execute(self, _sql):
+            pass
+
         def executemany(self, *args, **kwargs):
             raise RuntimeError("duckdb execution failed")
+
+        def rollback(self):
+            pass
 
         def close(self):
             pass

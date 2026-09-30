@@ -186,8 +186,14 @@ def test_duckdb_maps_native_insert_conflicts_and_ignores_missing_replacements(
     backend = backends.DuckDBTableBackend(str(tmp_path / "items.duckdb"))
 
     class ConflictConnection:
+        def execute(self, _sql):
+            pass
+
         def executemany(self, _sql, _rows):
             raise backend.duckdb.ConstraintException("native primary-key conflict")
+
+        def rollback(self):
+            pass
 
         def close(self):
             pass
