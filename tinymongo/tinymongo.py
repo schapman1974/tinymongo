@@ -2732,6 +2732,30 @@ class TinyMongoCollection(object):
         self._index_cache[key] = index
         return index
 
+    def _id_read_candidates(self, value):
+        """Reuse exact BSON identities only while the storage revision is stable."""
+        revision = self.parent._current_memory_revision()
+        identity = bson_value_identity_key(value)
+        if revision is None or identity is None:
+            return self.table.all()
+        cached = getattr(self.table, "_tinymongo_id_cache", None)
+        if cached is None or cached[0] != revision:
+            documents = self.table.all()
+            index = {}
+            for document in documents:
+                key = bson_value_identity_key(document.get("_id"))
+                if key is None:
+                    # Custom/legacy values can compare equal to registered
+                    # values. Keep the complete scan and its original order.
+                    self.table._tinymongo_id_cache = (revision, None)
+                    return documents
+                index.setdefault(key, []).append(document)
+            cached = (revision, index)
+            self.table._tinymongo_id_cache = cached
+        if cached[1] is None:
+            return self.table.all()
+        return cached[1].get(identity, [])
+
     def _acquire_memory_collection_lock(self):
         storage = getattr(self.parent.tinydb, "_storage", None)
         memory_lock = getattr(storage, "collection_lock", None)
@@ -3823,7 +3847,7 @@ class TinyMongoCollection(object):
                 if direct_id is not _MISSING:
                     result = [
                         document
-                        for document in self.table.all()
+                        for document in self._id_read_candidates(direct_id)
                         if bson_values_equal(document.get("_id"), direct_id)
                     ]
                     return TinyMongoCursor(
