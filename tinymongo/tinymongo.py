@@ -2479,6 +2479,13 @@ class TinyMongoCollection(object):
         try:
             if self.table is None:
                 self.build_table()
+            revision = self.parent._current_memory_revision()
+            if revision is not None and revision == self._memory_revision:
+                # An unchanged catalog can answer retries without rebuilding
+                # TinyDB tables and copying their resident documents.
+                existing = self._validate_index_compatibility(spec)
+                if existing is not None:
+                    return existing.name
             self._refresh_table()
             existing = self._validate_index_compatibility(spec)
             if existing is not None:
