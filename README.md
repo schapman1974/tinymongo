@@ -254,6 +254,13 @@ Available backends:
 - `postgres` or `postgresql`: Remote PostgreSQL storage using one SQL table per database collection.
 - `mysql` or `mariadb`: Remote MariaDB/MySQL storage using one SQL table per database collection.
 
+JSON storage caches decoded tables and their serialized text per open database.
+Warm collection operations copy and serialize only the selected table; external
+file changes invalidate the cache, and closing the database releases it. Writes
+still atomically replace and sync the complete JSON file, so large databases
+retain whole-file I/O costs and the cache requires additional memory. The file
+format is unchanged.
+
 Install only the drivers you need:
 
 ```bash

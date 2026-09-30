@@ -112,7 +112,125 @@ class AtomicJSONStorage(Storage):
         self.path = path
         self._directory = os.path.dirname(path) or "."
         self.merge_writes = True
+        self._cached_signature = None
+        self._cached_data = {}
+        self._serialized_tables = {}
         os.makedirs(self._directory, exist_ok=True)
+
+    def _file_signature(self):
+        try:
+            stat = os.stat(self.path)
+        except FileNotFoundError:
+            return None
+        return (
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        )
+
+    @property
+    def revision(self):
+        """Invalidate retained TinyDB query caches after external file changes."""
+        return self._file_signature() or (None,)
+
+    def _load_cached(self):
+        # Called with the database lock held. External replacements, edits and
+        # deletions invalidate both decoded values and serialized table chunks.
+        signature = self._file_signature()
+        if signature != self._cached_signature:
+            data = self.read() or {}
+            self._cached_data = data
+            self._serialized_tables = {}
+            self._cached_signature = signature
+        return self._cached_data
+
+    def table_names(self):
+        rlock, lock = self._acquire_lock()
+        try:
+            return set(self._load_cached())
+        finally:
+            self._release_lock(rlock, lock)
+
+    def read_table(self, name):
+        rlock, lock = self._acquire_lock()
+        try:
+            data = self._load_cached()
+            if name not in data:
+                data = dict(data)
+                data[name] = {}
+                self._write_cached_tables(data, {name})
+            return copy.deepcopy(data[name])
+        finally:
+            self._release_lock(rlock, lock)
+
+    def _write_cached_tables(self, data, changed):
+        chunks = {
+            name: (
+                self._serialized_tables[name]
+                if name not in changed and name in self._serialized_tables
+                else json_dumps(table, ensure_ascii=False)
+            )
+            for name, table in data.items()
+        }
+        fd, tmp = tempfile.mkstemp(prefix="tmp", dir=self._directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf8") as handle:
+                # The BSON codec escapes a mapping with exactly these keys.
+                # Keep that rare database-name combination byte compatible.
+                if set(data) == {"__tinymongo_type_v1__", "value"}:
+                    handle.write(json_dumps(data, ensure_ascii=False))
+                else:
+                    handle.write("{")
+                    for index, (name, chunk) in enumerate(chunks.items()):
+                        if index:
+                            handle.write(", ")
+                        handle.write(json_dumps(name, ensure_ascii=False) + ": ")
+                        handle.write(chunk)
+                    handle.write("}")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            _fsync_dir(self._directory)
+            self._cached_signature = self._file_signature()
+            self._cached_data = data
+            self._serialized_tables = chunks
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    def write_table(self, name, data):
+        rlock, lock = self._acquire_lock()
+        try:
+            existing = self._load_cached()
+            incoming = clone_document({name: dict(data)})
+            if self.merge_writes:
+                incoming = self._merge_data({name: existing.get(name, {})}, incoming)
+            payload = dict(existing)
+            payload[name] = incoming[name]
+            self._write_cached_tables(payload, {name})
+        finally:
+            self._release_lock(rlock, lock)
+
+    def purge_table(self, name):
+        rlock, lock = self._acquire_lock()
+        try:
+            payload = dict(self._load_cached())
+            if name in payload:
+                del payload[name]
+                self._write_cached_tables(payload, set())
+        finally:
+            self._release_lock(rlock, lock)
+
+    def close(self):
+        rlock, lock = self._acquire_lock()
+        try:
+            self._cached_signature = None
+            self._cached_data = {}
+            self._serialized_tables = {}
+        finally:
+            self._release_lock(rlock, lock)
 
     def _lock_path(self):
         return os.path.join(self._directory, ".tinymongo.lock")
