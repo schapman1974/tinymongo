@@ -4,6 +4,8 @@ import sqlite3
 import tempfile
 import threading
 from typing import Any
+from tinydb import TinyDB
+from tinydb.database import StorageProxy
 from tinydb.storages import Storage
 from urllib.parse import urlparse
 from .bson_codec import clone as clone_document
@@ -277,8 +279,64 @@ class MemoryStorage(AtomicJSONStorage):
             self._entry["data"] = copy.deepcopy(payload)
             self._entry["revision"] += 1
 
+    def table_names(self):
+        with self.collection_lock:
+            return set(self._entry["data"] or {})
+
+    def read_table(self, name):
+        with self.collection_lock:
+            if self._entry["data"] is None:
+                self._entry["data"] = {}
+            if name not in self._entry["data"]:
+                self._entry["data"][name] = {}
+                self._entry["revision"] += 1
+            return copy.deepcopy(self._entry["data"][name])
+
+    def write_table(self, name, data):
+        with self.collection_lock:
+            # Normalize BSON and detach caller-owned values before publishing.
+            payload = clone_document({name: dict(data)})
+            existing = self._entry["data"] or {}
+            if self.merge_writes:
+                payload = self._merge_data({name: existing.get(name, {})}, payload)
+            if self._entry["data"] is None:
+                self._entry["data"] = {}
+            self._entry["data"][name] = payload[name]
+            self._entry["revision"] += 1
+
+    def purge_table(self, name):
+        with self.collection_lock:
+            data = self._entry["data"] or {}
+            if name in data:
+                del data[name]
+                self._entry["revision"] += 1
+
     def close(self):
         """Memory remains available to other clients in the process."""
+
+
+class MemoryStorageProxy(StorageProxy):
+    """Keep TinyDB table operations inside their selected memory table."""
+
+    def read(self):
+        return {
+            int(key): self._new_document(key, value)
+            for key, value in self._storage.read_table(self._table_name).items()
+        }
+
+    def write(self, data):
+        self._storage.write_table(self._table_name, data)
+
+
+class MemoryTinyDB(TinyDB):
+    storage_proxy_class = MemoryStorageProxy
+
+    def tables(self):
+        return self._storage.table_names()
+
+    def purge_table(self, name):
+        self._table_cache.pop(name, None)
+        self._storage.purge_table(name)
 
 
 class SQLiteStorage(Storage):

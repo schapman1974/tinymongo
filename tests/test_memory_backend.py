@@ -439,3 +439,81 @@ def test_other_uri_schemes_are_rejected_instead_of_silently_isolated(
 
 def test_memory_storage_extension_is_empty():
     assert storage_extension("memory") == ""
+
+
+def test_collection_operations_do_not_read_or_write_untouched_memory_tables(
+    monkeypatch,
+):
+    with tm.TinyMongoClient(backend="memory") as client:
+        db = client.app
+        db.archive.insert_one({"_id": "large", "body": "x" * 100_000})
+        storage = db.tinydb._storage
+        archive = storage._entry["data"]["archive"]
+
+        def reject_whole_database(*args, **kwargs):
+            pytest.fail("collection operation accessed the whole memory database")
+
+        monkeypatch.setattr(
+            storage_backends.MemoryStorage, "read", reject_whole_database
+        )
+        monkeypatch.setattr(
+            storage_backends.MemoryStorage, "write", reject_whole_database
+        )
+        target = db.items
+        target.insert_one({"_id": "one", "value": 1})
+        target.create_index("value", unique=True)
+        target.update_one({"_id": "one"}, {"$set": {"value": 2}})
+        assert target.find_one({"_id": "one"})["value"] == 2
+        assert "archive" in db.list_collection_names()
+        target.delete_one({"_id": "one"})
+        target.drop()
+        assert storage._entry["data"]["archive"] is archive
+        assert db.archive.find_one({"_id": "large"})["body"] == "x" * 100_000
+
+
+def test_table_storage_preserves_merge_replacement_and_caller_isolation():
+    storage = storage_backends.MemoryStorage(_memory_uri("table-storage"))
+    storage.write({"neighbor": {"1": {"_id": "untouched"}}})
+    source = {1: {"_id": True, "nested": {"values": [1]}}}
+    storage.write_table("items", source)
+    source[1]["nested"]["values"].append(2)
+    storage.write_table("items", {1: {"_id": 1, "value": "numeric"}})
+    result = storage.read_table("items")
+    assert len(result) == 2
+    assert result["1"]["nested"]["values"] == [1]
+    result["1"]["nested"]["values"].append(3)
+    assert storage.read_table("items")["1"]["nested"]["values"] == [1]
+    storage.merge_writes = False
+    storage.write_table("items", {})
+    assert storage.read_table("items") == {}
+    assert storage.read()["neighbor"] == {"1": {"_id": "untouched"}}
+    revision = storage.revision
+    storage.purge_table("items")
+    assert storage.revision == revision + 1
+    storage.purge_table("missing")
+    assert storage.revision == revision + 1
+
+
+def test_invalid_table_write_does_not_publish_partial_changes():
+    storage = storage_backends.MemoryStorage(_memory_uri("invalid-table"))
+    storage.write_table("items", {1: {"_id": "valid"}})
+    revision = storage.revision
+    with pytest.raises((TypeError, InvalidDocument)):
+        storage.write_table("items", {2: {"_id": "bad", "value": object()}})
+    assert storage.revision == revision
+    assert storage.read_table("items") == {"1": {"_id": "valid"}}
+
+
+def test_whole_memory_storage_api_remains_compatible_with_table_writes():
+    storage = storage_backends.MemoryStorage(_memory_uri("whole-storage"))
+    assert storage.read() is None
+    assert storage.table_names() == set()
+    storage.write_table("items", {1: {"_id": "first"}})
+    storage.write({"items": {1: {"_id": "second"}}})
+    assert {doc["_id"] for doc in storage.read_table("items").values()} == {
+        "first",
+        "second",
+    }
+    storage.merge_writes = False
+    storage.write({"replacement": {"1": {"_id": "only"}}})
+    assert storage.table_names() == {"replacement"}

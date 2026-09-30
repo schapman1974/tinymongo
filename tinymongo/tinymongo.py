@@ -41,6 +41,7 @@ from .aggregation import AggregationEngine, aggregation_capabilities
 from .sorting import bson_document_sort_value_key, sort_documents
 from .warning_context import capture_warning_origin, emit_warning, use_warning_origin
 from .storage_backends import (
+    MemoryTinyDB,
     clear_memory_database,
     clear_memory_namespace,
     get_storage_class,
@@ -2051,7 +2052,13 @@ class TinyMongoDatabase(object):
         self._storage = storage
         self._client = client
         self.engine = engine
-        self.tinydb = None if engine is not None else TinyDB(path, storage=storage)
+        self.tinydb = (
+            None
+            if engine is not None
+            else (MemoryTinyDB if getattr(storage, "is_memory", False) else TinyDB)(
+                path, storage=storage
+            )
+        )
         self._memory_revision = self._current_memory_revision()
 
     @property
@@ -2071,7 +2078,9 @@ class TinyMongoDatabase(object):
             self.tinydb.close()
         except Exception:
             pass
-        self.tinydb = TinyDB(self._path, storage=self._storage)
+        self.tinydb = (
+            MemoryTinyDB if getattr(self._storage, "is_memory", False) else TinyDB
+        )(self._path, storage=self._storage)
         self._memory_revision = self._current_memory_revision()
 
     def __getattr__(self, name):
