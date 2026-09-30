@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Avoid full-collection scans for ordinary SQLite and DuckDB `insert_one()`
+  calls by probing typed and enumerable legacy `_id` keys before the native
+  insert (#183). Secondary unique indexes and non-enumerable legacy IDs retain
+  conservative validation. DuckDB batch planning uses the same candidate
+  lookups, and planned DuckDB writes now roll back atomically on native errors.
+
 ## [1.3.1] - 2026-09-21
 
 ### Direct SQLite upgrade guidance for PR #179 users
