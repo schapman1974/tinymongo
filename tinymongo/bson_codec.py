@@ -610,6 +610,21 @@ def loads(value):
     return decode_value(value)
 
 
+def _normalize_encoded_scalars(value):
+    """Apply JSON scalar normalization without serializing an encoded tree."""
+    value_type = type(value)
+    if value_type is dict:
+        return {key: _normalize_encoded_scalars(item) for key, item in value.items()}
+    if value_type is list:
+        return [_normalize_encoded_scalars(item) for item in value]
+    if value is None or value_type in (bool, int, float, str):
+        return value
+    # encode_value can retain primitive subclasses (including BSON Int64).
+    # Let JSON strip those exactly as storage does, including subclasses that
+    # override __int__, __float__, or __str__. Only this scalar needs text.
+    return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+
+
 def clone(value):
     """Return an isolated copy using the same rules as persistent storage."""
     encoded = _encode_builtin_tree(value)
@@ -618,7 +633,10 @@ def clone(value):
         # restores nonfinite floats. Immutable text needs no JSON round trip,
         # especially when a memory table contains large resident strings.
         return decode_value(encoded)
-    return loads(dumps(value, ensure_ascii=False))
+    # BSON tags already contain JSON-shaped data. Preserve the same encoder,
+    # decoder, and validation rules without copying unrelated resident strings
+    # into JSON text merely because a sibling contains an ObjectId or datetime.
+    return decode_value(_normalize_encoded_scalars(encode_value(value)))
 
 
 def storage_values_equal(left, right):
