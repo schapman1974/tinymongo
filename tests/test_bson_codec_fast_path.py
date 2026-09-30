@@ -153,3 +153,81 @@ def test_nonfinite_float_subclass_uses_the_bson_aware_fallback():
     restored = bson_codec.loads(bson_codec.dumps({"value": Double("inf")}))["value"]
 
     assert restored == float("inf")
+
+
+def test_clone_builtin_tree_matches_storage_without_json_text(monkeypatch):
+    document = {
+        "body": "transcript 🦆" * 10000,
+        "values": [None, True, 2**70, -0.0, 1.25, "\ud800"],
+        "nested": ({1: ["original"], "1": ["last key wins"]},),
+        "nonfinite": [float("nan"), float("inf"), float("-inf")],
+    }
+    expected = bson_codec.loads(bson_codec.dumps(document))
+
+    def unexpected_json(*args, **kwargs):
+        raise AssertionError("cloning builtins must not serialize JSON text")
+
+    monkeypatch.setattr(bson_codec.json, "dumps", unexpected_json)
+    monkeypatch.setattr(bson_codec.json, "loads", unexpected_json)
+    cloned = bson_codec.clone(document)
+    assert cloned["body"] == expected["body"]
+    assert cloned["values"] == expected["values"]
+    assert math.copysign(1, cloned["values"][3]) == -1
+    assert cloned["nested"] == expected["nested"]
+    assert math.isnan(cloned["nonfinite"][0])
+    assert cloned["nonfinite"][1:] == expected["nonfinite"][1:]
+    cloned["nested"][0]["1"].append("changed")
+    cloned["values"].append("changed")
+    assert document["nested"][0]["1"] == ["last key wins"]
+    assert len(document["values"]) == 6
+    document["nested"][0][1].append("source change")
+    assert cloned["nested"][0]["1"] == ["last key wins", "changed"]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"__tinymongo_type_v1__": "float", "value": "infinity"},
+        {"nested": {"__tinymongo_type_v1__": "unknown", "value": [1]}},
+    ],
+)
+def test_clone_reserved_mapping_remains_user_data(document):
+    cloned = bson_codec.clone(document)
+    assert cloned == document
+    assert cloned is not document
+
+
+def test_clone_subclasses_use_storage_normalization():
+    class Text(str):
+        pass
+
+    class Number(int):
+        pass
+
+    cloned = bson_codec.clone({"text": Text("value"), "number": Number(7)})
+    assert type(cloned["text"]) is str
+    assert type(cloned["number"]) is int
+
+
+def test_clone_extended_bson_stays_isolated_and_normalized():
+    bson = pytest.importorskip("bson")
+    value = {
+        "code": bson.Code("x", {"nested": [1]}),
+        "binary": bson.Binary(b"abc", subtype=0),
+        "integer": bson.Int64(7),
+    }
+    cloned = bson_codec.clone(value)
+    expected = bson_codec.loads(bson_codec.dumps(value))
+    assert type(cloned["code"]) is bson.Code
+    assert type(cloned["binary"]) is bytes
+    assert type(cloned["integer"]) is type(expected["integer"])
+    assert cloned["integer"] == expected["integer"]
+    cloned["code"].scope["nested"].append(2)
+    assert value["code"].scope["nested"] == [1]
+
+
+@pytest.mark.parametrize("document", [{"bad\x00key": 1}, {"nested": [object()]}])
+def test_clone_invalid_document_preserves_root(document):
+    with pytest.raises(InvalidDocument) as caught:
+        bson_codec.clone(document)
+    assert caught.value.document is document

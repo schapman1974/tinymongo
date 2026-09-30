@@ -612,6 +612,12 @@ def loads(value):
 
 def clone(value):
     """Return an isolated copy using the same rules as persistent storage."""
+    encoded = _encode_builtin_tree(value)
+    if encoded is not _BUILTIN_TREE_FALLBACK:
+        # Encoding detaches containers and normalizes keys/tuples; decoding
+        # restores nonfinite floats. Immutable text needs no JSON round trip,
+        # especially when a memory table contains large resident strings.
+        return decode_value(encoded)
     return loads(dumps(value, ensure_ascii=False))
 
 

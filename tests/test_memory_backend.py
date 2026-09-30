@@ -517,3 +517,40 @@ def test_whole_memory_storage_api_remains_compatible_with_table_writes():
     storage.merge_writes = False
     storage.write({"replacement": {"1": {"_id": "only"}}})
     assert storage.table_names() == {"replacement"}
+
+
+def test_memory_insert_does_not_json_serialize_resident_builtin_rows(monkeypatch):
+    from tinymongo import bson_codec
+
+    client = tm.TinyMongoClient(backend="memory")
+    collection = client.app.items
+    resident = {
+        "_id": "resident",
+        "body": "large transcript" * 10000,
+        "nested": {"values": [1]},
+    }
+    collection.insert_one(resident)
+    original = bson_codec.json.dumps
+
+    def reject_resident_text(value, *args, **kwargs):
+        def has_resident(node):
+            if isinstance(node, dict):
+                return node.get("_id") == "resident" or any(
+                    has_resident(child) for child in node.values()
+                )
+            if isinstance(node, list):
+                return any(has_resident(child) for child in node)
+            return False
+
+        assert not has_resident(value), "resident row was serialized to JSON"
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(bson_codec.json, "dumps", reject_resident_text)
+    collection.insert_one({"_id": "probe", "body": "small"})
+    resident["nested"]["values"].append(2)
+    fetched = collection.find_one({"_id": "resident"})
+    assert fetched["nested"]["values"] == [1]
+    fetched["nested"]["values"].append(3)
+    assert collection.find_one({"_id": "resident"})["nested"]["values"] == [1]
+    assert collection.count_documents({}) == 2
+    client.close()
