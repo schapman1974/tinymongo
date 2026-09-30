@@ -736,10 +736,12 @@ def test_tinydb_native_search_errors_remain_empty_results(tmp_path, monkeypatch,
     client = tm.TinyMongoClient(str(tmp_path / "db"))
     collection = client.app.items
     collection.insert_one({"_id": 1, "name": "Ada"})
+    # A JSON file revision can replace the table before the query executes.
+    # Inject at the class so the error reaches the native search in either case.
     monkeypatch.setattr(
-        collection.table,
+        type(collection.table),
         "search",
-        lambda _condition: (_ for _ in ()).throw(error),
+        lambda _self, _condition: (_ for _ in ()).throw(error),
     )
 
     assert list(collection.find({"name": {"$exists": True}})) == []
@@ -828,17 +830,23 @@ def test_update_operator_error_edges(tmp_path):
     )
 
 
-def test_database_refresh_ignores_close_errors(tmp_path):
-    client = tm.TinyMongoClient(str(tmp_path / "db"))
-    db = client.db
+def test_database_refresh_ignores_close_errors(tmp_path, monkeypatch):
+    # Legacy whole-storage adapters still close and reopen during refresh;
+    # the built-in JSON adapter now retains its storage and clears table caches.
+    db = core.TinyMongoDatabase("db", str(tmp_path / "db.sqlite"), sb.SQLiteStorage)
+    previous = db.tinydb
+    calls = []
 
-    class BadTinyDB:
-        def close(self):
-            raise RuntimeError()
+    def fail_close():
+        calls.append(True)
+        raise RuntimeError()
 
-    db.tinydb = BadTinyDB()
+    monkeypatch.setattr(previous, "close", fail_close)
     db._refresh_table()
+    assert calls == [True]
+    assert db.tinydb is not previous
     assert "_default" not in db.collection_names()
+    db.tinydb.close()
 
 
 def test_parquet_storage_uri_client_paths_and_listing(tmp_path, monkeypatch):
