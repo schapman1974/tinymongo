@@ -648,8 +648,32 @@ def storage_values_equal(left, right):
     be optimized away.
     """
 
-    options = {"ensure_ascii": False, "separators": (",", ":")}
-    return dumps(left, **options) == dumps(right, **options)
+    def normalized(value):
+        encoded = _encode_builtin_tree(value)
+        if encoded is _BUILTIN_TREE_FALLBACK:
+            encoded = _normalize_encoded_scalars(encode_value(value))
+        return encoded
+
+    return _encoded_values_equal(normalized(left), normalized(right))
+
+
+def _encoded_values_equal(left, right):
+    """Compare normalized JSON trees without building their JSON text."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        # Field order is part of the persisted representation.
+        return list(left) == list(right) and all(
+            _encoded_values_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _encoded_values_equal(a, b) for a, b in zip(left, right)
+        )
+    if isinstance(left, float):
+        # In particular, +0.0 and -0.0 have different JSON representations.
+        return repr(left) == repr(right)
+    return left == right
 
 
 def contains_extended_value(value):
