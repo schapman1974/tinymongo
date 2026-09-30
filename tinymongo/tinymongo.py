@@ -2506,12 +2506,41 @@ class TinyMongoCollection(object):
             return self._create_indexes_locked(batch)
 
         rlock, portalocker_lock = self._acquire_collection_lock()
+        pending = []
         try:
-            return self._create_indexes_locked(batch)
+            try:
+                return self._create_indexes_locked(batch, pending)
+            finally:
+                # Preserve indexes created before a later declaration fails.
+                self._flush_index_batch(pending)
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
-    def _create_indexes_locked(self, batch):
+    def _flush_index_batch(self, pending):
+        if not pending:
+            return
+        documents = [self._index_document(spec) for spec in pending]
+        pending.clear()
+        try:
+            self.parent.tinydb.table(INDEX_CATALOG_TABLE).insert_multiple(documents)
+        except BaseException:
+            # Discard staged metadata and TinyDB caches after a failed write.
+            self._refresh_table()
+            raise
+
+    def _stage_index(self, spec, pending):
+        existing = self._validate_index_compatibility(spec)
+        if existing is not None:
+            return existing.name
+        if spec.unique or len(spec.keys) > 1:
+            self._validate_unique_post_image(self.table.all(), [spec])
+        pending.append(spec)
+        self._index_specs[spec.name] = spec
+        self._indexes.add(spec.field)
+        self._index_cache.pop(spec.field, None)
+        return spec.name
+
+    def _create_indexes_locked(self, batch, pending=None):
         """Plan and create a validated batch while holding its storage lock."""
         current_specs = tuple(self._current_index_specs())
         effective = {index_spec_signature(spec): spec for spec in current_specs}
@@ -2538,6 +2567,7 @@ class TinyMongoCollection(object):
                 # sparse declarations as ordinary leading-field indexes. A
                 # matching retry from the original IndexModel is enough to
                 # promote that legacy metadata and native index safely.
+                self._flush_index_batch(pending)
                 self.drop_index(named.name)
                 effective.pop(index_spec_signature(named), None)
                 by_name.pop(named.name, None)
@@ -2562,11 +2592,17 @@ class TinyMongoCollection(object):
                 options["sparse"] = True
             if entry.spec.partial_filter is not None:
                 options["partialFilterExpression"] = entry.spec.partial_filter
-            name = self.create_index(list(entry.spec.keys), **options)
+            if pending is None or (
+                len(entry.spec.keys) == 1 and entry.spec.field == "_id"
+            ):
+                name = self.create_index(list(entry.spec.keys), **options)
+            else:
+                name = self._stage_index(entry.spec, pending)
             effective[signature] = replace(entry.spec, name=name)
             by_name[name] = effective[signature]
             resolved_entries.append(entry)
             names.append(name)
+        self._flush_index_batch(pending)
         emit_index_plan_warnings(
             IndexBatchPlan(tuple(resolved_entries)),
             stacklevel=3,
