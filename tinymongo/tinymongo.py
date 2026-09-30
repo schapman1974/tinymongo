@@ -41,6 +41,7 @@ from .aggregation import AggregationEngine, aggregation_capabilities
 from .sorting import bson_document_sort_value_key, sort_documents
 from .warning_context import capture_warning_origin, emit_warning, use_warning_origin
 from .storage_backends import (
+    AtomicJSONStorage,
     MemoryTinyDB,
     clear_memory_database,
     clear_memory_namespace,
@@ -2055,9 +2056,11 @@ class TinyMongoDatabase(object):
         self.tinydb = (
             None
             if engine is not None
-            else (MemoryTinyDB if getattr(storage, "is_memory", False) else TinyDB)(
-                path, storage=storage
-            )
+            else (
+                MemoryTinyDB
+                if storage is AtomicJSONStorage or getattr(storage, "is_memory", False)
+                else TinyDB
+            )(path, storage=storage)
         )
         self._memory_revision = self._current_memory_revision()
 
@@ -2073,6 +2076,12 @@ class TinyMongoDatabase(object):
     def _refresh_table(self):
         """Reload the TinyDB database from disk to pick up external writes."""
         if self.engine is not None:
+            return
+        if self._storage is AtomicJSONStorage:
+            # Storage checks file identity under its lock on every access.
+            # Recreate TinyDB tables/query caches, retaining serialized chunks.
+            self.tinydb._table_cache.clear()
+            self._memory_revision = self._current_memory_revision()
             return
         try:
             self.tinydb.close()
