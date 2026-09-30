@@ -5,7 +5,7 @@ import tempfile
 import threading
 from typing import Any
 from tinydb import TinyDB
-from tinydb.database import StorageProxy
+from tinydb.database import Document, StorageProxy
 from tinydb.storages import Storage
 from urllib.parse import urlparse
 from .bson_codec import clone as clone_document
@@ -443,7 +443,14 @@ class MemoryStorageProxy(StorageProxy):
         }
 
     def write(self, data):
-        self._storage.write_table(self._table_name, data)
+        # TinyDB wraps loaded rows in Document to carry a non-persistent ID.
+        # Strip only that exact wrapper so ordinary rows can use the codec's
+        # built-in cloning path; nested BSON/subclass values keep their rules.
+        rows = {
+            key: dict(value) if type(value) is Document else value
+            for key, value in data.items()
+        }
+        self._storage.write_table(self._table_name, rows)
 
 
 class MemoryTinyDB(TinyDB):
