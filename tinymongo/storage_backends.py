@@ -690,7 +690,7 @@ class MemoryTable(Table):
         ):
             return None
         if not ids_only and fields is not None:
-            candidates = self._read_unique_candidates(document, fields, specs)
+            candidates = self._read_unique_candidates([document], fields, specs)
             if candidates is not None:
                 return candidates
             storage = self._storage._storage
@@ -716,7 +716,7 @@ class MemoryTable(Table):
             return snapshot
         return snapshot if isinstance(snapshot, _InsertCandidates) else None
 
-    def _read_unique_candidates(self, document, fields, specs):
+    def _read_unique_candidates(self, documents, fields, specs):
         if not specs or any(
             len(spec.keys) != 1 or spec.partial_filter is not None for spec in specs
         ):
@@ -725,8 +725,12 @@ class MemoryTable(Table):
         storage = self._storage._storage
         revision = storage._entry["revision"]
         index = storage._insert_identity_index(self._name)
-        identity = bson_value_identity_key(document["_id"])
-        if index is None or identity is None or storage._entry["revision"] != revision:
+        identities = [bson_value_identity_key(doc["_id"]) for doc in documents]
+        if (
+            index is None
+            or any(identity is None for identity in identities)
+            or storage._entry["revision"] != revision
+        ):
             return None
         rows = storage._entry["data"][self._name]
         unique = index[3] if len(index) > 3 else None
@@ -748,15 +752,16 @@ class MemoryTable(Table):
                 if unique.matches(tokens):
                     return None  # Legacy residents already violate uniqueness.
                 unique.add(key, tokens)
+        keys = set()
         try:
-            tokens = unique.tokens(document)
+            for document, identity in zip(documents, identities):
+                keys.update(unique.matches(unique.tokens(document)))
+                if identity in index[1]:
+                    keys.add(index[1][identity])
         except Exception:
             return None  # The collection checks duplicate IDs before indexes.
         if storage._entry["revision"] != revision:
             return None
-        keys = unique.matches(tokens)
-        if identity in index[1]:
-            keys.add(index[1][identity])
         snapshot = _InsertCandidates(
             {
                 int(key): copy.deepcopy(
@@ -812,6 +817,10 @@ class MemoryTable(Table):
                 is not _NATIVE_TABLE_INSERT_MULTIPLE
             ):
                 return None
+            if documents is not None:
+                candidates = self._read_unique_candidates(documents, fields, specs)
+                if candidates is not None:
+                    return candidates
             storage = self._storage._storage
             revision = storage._entry["revision"]
             rows = (storage._entry["data"] or {}).get(self._name, {})
@@ -887,6 +896,10 @@ class MemoryTable(Table):
             result = self._append_from_candidates(documents, snapshot)
             if result is not None:
                 return result
+            if snapshot.unique is not None and (
+                self._storage._storage._entry["revision"] != snapshot.revision
+            ):
+                raise _RetryMemoryInsert
             # Candidate rows are never a complete replacement snapshot.
             snapshot = self._read()
         delta = self._native_memory_delta() and len(
@@ -952,6 +965,9 @@ class MemoryTable(Table):
                     return None
                 _indexes.validate_unique_documents(conflicts + [row], unique.specs)
                 token_rows.append(tokens)
+            # Incoming values can normalize into conflicts with each other.
+            # Validate the staged batch without modifying published owners.
+            _indexes.validate_unique_documents(payload.values(), unique.specs)
             if (
                 not self._native_memory_delta()
                 or entry["revision"] != snapshot.revision
