@@ -623,6 +623,24 @@ class MemoryTable(Table):
                     return
         self._init_last_id(native.read_table_ids(name))
 
+    def _read_single_insert_snapshot(self, document):
+        """Use candidates only when the single-write hooks remain native."""
+        if (
+            not self._native_memory_delta()
+            or getattr(self.all, "__func__", None) is not _NATIVE_TABLE_ALL
+            or getattr(self.insert, "__func__", None) is not _NATIVE_TABLE_INSERT
+        ):
+            return None
+        snapshot = self._read_insert_snapshot(ids_only=True, documents=[document])
+        return snapshot if isinstance(snapshot, _InsertCandidates) else None
+
+    def _insert_one_from_snapshot(self, document, snapshot):
+        if getattr(self.insert, "__func__", None) is _NATIVE_TABLE_INSERT:
+            result = self._append_from_candidates([document], snapshot)
+            if result is not None:
+                return result[0]
+        return self.insert(document)
+
     def _read_insert_snapshot(self, ids_only=False, documents=None):
         """Return a detached native snapshot for a collection-locked batch."""
         if type(self._storage) is not MemoryStorageProxy or type(
@@ -753,6 +771,8 @@ class MemoryTable(Table):
         ) == len(identities)
 
 
+_NATIVE_TABLE_ALL = Table.all
+_NATIVE_TABLE_INSERT = Table.insert
 _NATIVE_TABLE_INIT_LAST_ID = Table._init_last_id
 _NATIVE_MEMORY_READ_TABLE_IDS = MemoryStorage.read_table_ids
 _NATIVE_MEMORY_READ_TABLE_SNAPSHOT = MemoryStorage._read_table
