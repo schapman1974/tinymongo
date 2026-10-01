@@ -767,12 +767,41 @@ class MemoryTable(Table):
                 raise _RetryMemoryInsert
         return self.insert(document)
 
-    def _read_insert_snapshot(self, ids_only=False, documents=None):
+    def _read_insert_snapshot(self, ids_only=False, documents=None, fields=None):
         """Return a detached native snapshot for a collection-locked batch."""
         if type(self._storage) is not MemoryStorageProxy or type(
             self._storage._storage
         ) not in (MemoryStorage, AtomicJSONStorage):
             return None
+        if (
+            fields is not None
+            and not ids_only
+            and type(self._storage._storage) is MemoryStorage
+        ):
+            if (
+                not self._native_memory_delta()
+                or getattr(self.all, "__func__", None) is not _NATIVE_TABLE_ALL
+                or getattr(self.insert_multiple, "__func__", None)
+                is not _NATIVE_TABLE_INSERT_MULTIPLE
+            ):
+                return None
+            storage = self._storage._storage
+            revision = storage._entry["revision"]
+            rows = (storage._entry["data"] or {}).get(self._name, {})
+            if type(rows) is dict and all(
+                type(row) is dict and "_id" in row for row in rows.values()
+            ):
+                snapshot = _InsertIDSnapshot(
+                    (int(key), copy.deepcopy({k: row[k] for k in fields if k in row}))
+                    for key, row in list(rows.items())
+                )
+                if (
+                    len(snapshot) == len(rows)
+                    and self._enumerable_insert_ids(snapshot)
+                    and self._native_memory_delta()
+                    and storage._entry["revision"] == revision
+                ):
+                    return snapshot
         if ids_only and self._native_memory_delta():
             if documents is not None:
                 index = self._storage._storage._insert_identity_index(self._name)
@@ -807,6 +836,11 @@ class MemoryTable(Table):
         # A native memory merge can persist only accepted new rows. Keep the
         # full snapshot for custom hooks, replacement writes and legacy IDs:
         # those paths may transform resident rows or rely on replaying them.
+        if isinstance(snapshot, _InsertIDSnapshot) and (
+            getattr(self.insert_multiple, "__func__", None)
+            is not _NATIVE_TABLE_INSERT_MULTIPLE
+        ):
+            return self.insert_multiple(documents)
         if isinstance(snapshot, _InsertCandidates):
             result = self._append_from_candidates(documents, snapshot)
             if result is not None:
@@ -929,6 +963,7 @@ class MemoryTable(Table):
 
 _NATIVE_TABLE_ALL = Table.all
 _NATIVE_TABLE_INSERT = Table.insert
+_NATIVE_TABLE_INSERT_MULTIPLE = Table.insert_multiple
 _NATIVE_TABLE_INIT_LAST_ID = Table._init_last_id
 _NATIVE_MEMORY_READ_TABLE_IDS = MemoryStorage.read_table_ids
 _NATIVE_MEMORY_READ_TABLE_SNAPSHOT = MemoryStorage._read_table

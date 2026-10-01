@@ -3103,24 +3103,47 @@ class TinyMongoCollection(object):
             if self.table is None:
                 self.build_table()
             self._refresh_table()
-            snapshot = (
-                self.table._read_insert_snapshot(
-                    ids_only=not any(
-                        spec.unique for spec in self._index_specs.values()
-                    ),
-                    documents=stored_docs,
+            while True:
+                revision = self.parent._current_memory_revision()
+                specs = tuple(self._index_specs.values())
+                fields = None
+                if not any(spec.partial_filter is not None for spec in specs):
+                    fields = {"_id"}
+                    fields.update(
+                        field.split(".")[0]
+                        for spec in specs
+                        if spec.unique or len(spec.keys) > 1
+                        for field, _ in spec.keys
+                    )
+                snapshot = (
+                    self.table._read_insert_snapshot(
+                        ids_only=not any(spec.unique for spec in specs),
+                        documents=stored_docs,
+                        fields=fields,
+                    )
+                    if type(self.table) is MemoryTable
+                    else None
                 )
-                if type(self.table) is MemoryTable
-                else None
-            )
-            accepted, write_errors = _plan_insert_many(
-                self,
-                stored_docs,
-                list(snapshot.values()) if snapshot is not None else self.table.all(),
-                list(self._index_specs.values()),
-                ordered,
-                original_documents=docs,
-            )
+                residents = (
+                    list(snapshot.values())
+                    if snapshot is not None
+                    else self.table.all()
+                )
+                if self.parent._current_memory_revision() != revision:
+                    self._refresh_table()
+                    continue
+                accepted, write_errors = _plan_insert_many(
+                    self,
+                    stored_docs,
+                    residents,
+                    specs,
+                    ordered,
+                    original_documents=docs,
+                )
+                if self.parent._current_memory_revision() != revision:
+                    self._refresh_table()
+                    continue
+                break
 
             if accepted:
                 if snapshot is None:
