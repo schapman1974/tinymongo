@@ -623,7 +623,7 @@ class MemoryTable(Table):
                     return
         self._init_last_id(native.read_table_ids(name))
 
-    def _read_single_insert_snapshot(self, document, ids_only=True):
+    def _read_single_insert_snapshot(self, document, ids_only=True, fields=None):
         """Read candidates or full unique-index rows while single-write hooks are native."""
         if (
             not self._native_memory_delta()
@@ -631,6 +631,25 @@ class MemoryTable(Table):
             or getattr(self.insert, "__func__", None) is not _NATIVE_TABLE_INSERT
         ):
             return None
+        if not ids_only and fields is not None:
+            storage = self._storage._storage
+            revision = storage._entry["revision"]
+            rows = (storage._entry["data"] or {}).get(self._name, {})
+            if type(rows) is dict and all(
+                type(row) is dict and "_id" in row for row in rows.values()
+            ):
+                # Preserve dotted/array lookup semantics by retaining whole
+                # top-level roots. Never expose references to stored values.
+                snapshot = _InsertIDSnapshot(
+                    (int(key), copy.deepcopy({k: row[k] for k in fields if k in row}))
+                    for key, row in list(rows.items())
+                )
+                if (
+                    self._native_memory_delta()
+                    and storage._entry["revision"] == revision
+                    and self._enumerable_insert_ids(snapshot)
+                ):
+                    return snapshot
         snapshot = self._read_insert_snapshot(ids_only=ids_only, documents=[document])
         if not ids_only:
             return snapshot

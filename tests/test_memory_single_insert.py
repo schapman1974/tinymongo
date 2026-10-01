@@ -171,7 +171,7 @@ def test_single_json_keeps_durable_path(tmp_path):
         assert conn.app.items.count_documents({}) == 2
 
 
-def test_unique_single_insert_copies_residents_only_once(monkeypatch):
+def test_unique_single_insert_avoids_full_resident_copy(monkeypatch):
     with client() as conn:
         col = conn.app.items
         col.insert_many(
@@ -190,7 +190,7 @@ def test_unique_single_insert_copies_residents_only_once(monkeypatch):
         result = col.insert_one({"_id": 1000, "email": "1000", "payload": [1000]})
         assert result.inserted_id == 1000
         assert result.eid == 1001
-        assert visited == [1000]
+        assert visited == []
         assert col.find_one({"_id": 0})["payload"] == [0]
 
 
