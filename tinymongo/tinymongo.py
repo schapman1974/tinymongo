@@ -3143,18 +3143,21 @@ class TinyMongoCollection(object):
                 if self.parent._current_memory_revision() != revision:
                     self._refresh_table()
                     continue
+                try:
+                    if accepted:
+                        if snapshot is None:
+                            results = self.table.insert_multiple(accepted)
+                        else:
+                            results = self.table._insert_multiple_from_snapshot(
+                                accepted, snapshot
+                            )
+                        self._invalidate_indexes()
+                    else:
+                        results = []
+                except _RetryMemoryInsert:
+                    self._refresh_table()
+                    continue
                 break
-
-            if accepted:
-                if snapshot is None:
-                    results = self.table.insert_multiple(accepted)
-                else:
-                    results = self.table._insert_multiple_from_snapshot(
-                        accepted, snapshot
-                    )
-                self._invalidate_indexes()
-            else:
-                results = []
 
             if write_errors:
                 raise BulkWriteError(_bulk_write_details(len(accepted), write_errors))

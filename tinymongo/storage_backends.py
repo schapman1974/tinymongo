@@ -222,7 +222,10 @@ class AtomicJSONStorage(Storage):
             if index:
                 pieces.append(", ")
             pieces.append(json_dumps(str(key), ensure_ascii=False) + ": ")
-            if key in cached and storage_values_equal(previous[key], document):
+            if key in cached and (
+                previous[key] is document
+                or storage_values_equal(previous[key], document)
+            ):
                 chunk = cached[key]
             else:
                 chunk = json_dumps(document, ensure_ascii=False)
@@ -584,6 +587,16 @@ class _InsertIDSnapshot(dict):
     """Detached IDs for a native memory delta write, never a full table."""
 
 
+class _JSONInsertSnapshot(_InsertIDSnapshot):
+    """Detached resident IDs bound to an atomic JSON file generation."""
+
+    def __init__(self, rows, revision, last_id, identities):
+        super().__init__(rows)
+        self.revision = revision
+        self.last_id = last_id
+        self.identities = identities
+
+
 class _InsertCandidates(_InsertIDSnapshot):
     """Detached conflict candidates, carrying the native storage generation."""
 
@@ -802,6 +815,10 @@ class MemoryTable(Table):
                     and storage._entry["revision"] == revision
                 ):
                     return snapshot
+        if ids_only and self._native_json_append():
+            snapshot = self._read_json_insert_snapshot()
+            if snapshot is not None:
+                return snapshot
         if ids_only and self._native_memory_delta():
             if documents is not None:
                 index = self._storage._storage._insert_identity_index(self._name)
@@ -841,6 +858,11 @@ class MemoryTable(Table):
             is not _NATIVE_TABLE_INSERT_MULTIPLE
         ):
             return self.insert_multiple(documents)
+        if isinstance(snapshot, _JSONInsertSnapshot):
+            result = self._append_json_from_snapshot(documents, snapshot)
+            if result is not None:
+                return result
+            snapshot = self._read()
         if isinstance(snapshot, _InsertCandidates):
             result = self._append_from_candidates(documents, snapshot)
             if result is not None:
@@ -929,6 +951,86 @@ class MemoryTable(Table):
             index[3:] = []
         return list(range(first_id, self._last_id + 1))
 
+    def _native_json_append(self):
+        proxy = self._storage
+        storage = proxy._storage
+        return (
+            type(self) is MemoryTable
+            and type(proxy) is MemoryStorageProxy
+            and type(storage) is AtomicJSONStorage
+            and storage.merge_writes
+            and all(
+                getattr(getattr(owner, name), "__func__", None) is native
+                for owner, methods in (
+                    (self, _JSON_TABLE_HOOKS),
+                    (proxy, _JSON_PROXY_HOOKS),
+                    (storage, _JSON_STORAGE_HOOKS),
+                )
+                for name, native in methods
+            )
+        )
+
+    def _read_json_insert_snapshot(self):
+        storage = self._storage._storage
+        revision = storage.revision
+        rows = storage._load_cached().get(self._name, {})
+        if type(rows) is not dict or any(
+            type(row) is not dict or "_id" not in row for row in rows.values()
+        ):
+            return None
+        snapshot = {
+            int(key): {"_id": _copy_insert_id(row["_id"])}
+            for key, row in list(rows.items())
+        }
+        identities = [bson_value_identity_key(row["_id"]) for row in snapshot.values()]
+        if (
+            len(snapshot) != len(rows)
+            or any(key is None for key in identities)
+            or len(set(identities)) != len(identities)
+            or max(snapshot, default=0) != self._last_id
+            or not self._native_json_append()
+            or storage.revision != revision
+        ):
+            return None
+        return _JSONInsertSnapshot(snapshot, revision, self._last_id, set(identities))
+
+    def _append_json_from_snapshot(self, documents, snapshot):
+        storage = self._storage._storage
+        if storage.revision != snapshot.revision:
+            raise _RetryMemoryInsert
+        if not self._native_json_append() or self._last_id != snapshot.last_id:
+            return None
+        first_id = snapshot.last_id + 1
+        payload = clone_document(
+            {
+                self._name: {
+                    str(first_id + i): dict(doc) for i, doc in enumerate(documents)
+                }
+            }
+        )[self._name]
+        identities = [bson_value_identity_key(row["_id"]) for row in payload.values()]
+        # A codec callback may write or add a unique index under our reentrant
+        # database lock. Replan at collection level against the new generation.
+        if storage.revision != snapshot.revision:
+            raise _RetryMemoryInsert
+        if (
+            not self._native_json_append()
+            or self._last_id != snapshot.last_id
+            or any(key is None or key in snapshot.identities for key in identities)
+            or len(set(identities)) != len(identities)
+        ):
+            return None
+        data = dict(storage._cached_data)
+        table = dict(data.get(self._name, {}))
+        table.update(payload)
+        data[self._name] = table
+        # Retain private resident references and their serialized text. Publish
+        # the replacement snapshot only after the existing atomic writer succeeds.
+        storage._write_cached_tables(data, {self._name})
+        self._last_id = first_id + len(payload) - 1
+        self.clear_cache()
+        return list(range(first_id, self._last_id + 1))
+
     def _native_memory_delta(self):
         proxy = self._storage
         storage = proxy._storage
@@ -976,6 +1078,33 @@ _NATIVE_PROXY_WRITE = MemoryStorageProxy.write
 _NATIVE_PROXY_READ = MemoryStorageProxy.read
 _NATIVE_MEMORY_READ_TABLE = MemoryStorage.read_table
 _NATIVE_MEMORY_WRITE_TABLE = MemoryStorage.write_table
+_JSON_TABLE_HOOKS = tuple(
+    (name, getattr(Table, name))
+    for name in (
+        "all",
+        "insert_multiple",
+        "_read",
+        "_write",
+        "_get_next_id",
+        "clear_cache",
+    )
+)
+_JSON_PROXY_HOOKS = tuple(
+    (name, getattr(MemoryStorageProxy, name)) for name in ("read", "write")
+)
+_JSON_STORAGE_HOOKS = tuple(
+    (name, getattr(AtomicJSONStorage, name))
+    for name in (
+        "read",
+        "read_table",
+        "write_table",
+        "_merge_data",
+        "_serialize_table",
+        "_write_cached_tables",
+        "_load_cached",
+        "_file_signature",
+    )
+)
 
 
 class MemoryTinyDB(TinyDB):
