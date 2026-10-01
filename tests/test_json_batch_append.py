@@ -163,7 +163,7 @@ def test_failure_keeps_cached_rows_and_retry(tmp_path, monkeypatch, failure):
         assert col.find_one({"_id": "old"})["payload"] == [1]
 
 
-def test_unique_secondary_index_keeps_full_snapshot(tmp_path):
+def test_unique_secondary_index_rejects_duplicate(tmp_path):
     with TinyMongoClient(str(tmp_path), backend="json") as client:
         col = client.app.items
         col.insert_many([{"_id": "old", "email": "same"}])
