@@ -3118,7 +3118,11 @@ class TinyMongoCollection(object):
                 snapshot = (
                     self.table._read_insert_snapshot(
                         ids_only=not any(spec.unique for spec in specs),
-                        documents=stored_docs,
+                        documents=(
+                            stored_docs
+                            if _can_try_optimistic_insert_many(stored_docs)
+                            else None
+                        ),
                         fields=fields,
                         specs=specs,
                     )

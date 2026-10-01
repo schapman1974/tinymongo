@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from tinymongo import TinyMongoClient, indexes, storage_backends as sb
-from tinymongo.errors import DuplicateKeyError
+from tinymongo.errors import BulkWriteError, DuplicateKeyError
 
 
 def test_warm_unique_inserts_do_not_visit_resident_rows(monkeypatch):
@@ -72,7 +72,8 @@ def snapshot(col, document):
         "catalog",
     ],
 )
-def test_shared_cache_invalidates_after_mutation(mutation):
+@pytest.mark.parametrize("batch", [False, True])
+def test_shared_cache_invalidates_after_mutation(mutation, batch):
     address = "memory://" + uuid4().hex
     with connection(address) as client, connection(address) as peer:
         col = client.app.items
@@ -103,8 +104,13 @@ def test_shared_cache_invalidates_after_mutation(mutation):
         else:
             peer.app.items.drop_index("email_1")
             peer.app.items.create_index("email", name="new_name", unique=True)
-        col.insert_one({"_id": "new", "email": "new"})
-        assert storage._insert_identity_index("items")[3] is not cached
+        if batch:
+            col.insert_many([{"_id": "new", "email": "new"}])
+        else:
+            col.insert_one({"_id": "new", "email": "new"})
+        assert (storage._insert_identity_index("items")[3] is cached) == (
+            mutation == "bulk"
+        )
         with pytest.raises(DuplicateKeyError):
             col.insert_one({"_id": "conflict", "email": "new"})
         if mutation in ("update", "write", "write_table"):
@@ -160,7 +166,8 @@ def test_concurrent_clients_share_unique_cache():
     "stage",
     ["build", "lookup", "append_tokens", "clone", "append_validation", "identity"],
 )
-def test_reentrant_callback_retries_unique_validation(monkeypatch, stage):
+@pytest.mark.parametrize("batch", [False, True])
+def test_reentrant_callback_retries_unique_validation(monkeypatch, stage, batch):
     address = "memory://" + uuid4().hex
     with connection(address) as client, connection(address) as peer:
         col = client.app.items
@@ -221,8 +228,11 @@ def test_reentrant_callback_retries_unique_validation(monkeypatch, stage):
                 return original(rows, specs)
 
             monkeypatch.setattr(indexes, "validate_unique_documents", validate)
-        with pytest.raises(DuplicateKeyError):
-            col.insert_one({"_id": "new", "email": "new"})
+        with pytest.raises(BulkWriteError if batch else DuplicateKeyError):
+            if batch:
+                col.insert_many([{"_id": "new", "email": "new"}])
+            else:
+                col.insert_one({"_id": "new", "email": "new"})
         assert fired == [True]
         assert col.find_one({"_id": "new"}) is None
         assert col.find_one({"_id": "peer"})["email"] == "new"
