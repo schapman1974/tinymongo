@@ -2937,36 +2937,73 @@ class TinyMongoCollection(object):
             # A bare regex is a query predicate, but an ``_id`` collision is
             # always exact BSON identity. Looking it up through ``find_one``
             # could otherwise confuse a regex ID with a matching string ID.
-            snapshot = (
-                self.table._read_single_insert_snapshot(
-                    stored_doc,
-                    ids_only=not any(
-                        spec.unique for spec in self._index_specs.values()
-                    ),
-                )
-                if type(self.table) is MemoryTable
-                else None
-            )
-            documents = (
-                list(snapshot.values()) if snapshot is not None else self.table.all()
-            )
-            existing = next(
-                (item for item in documents if bson_values_equal(item.get("_id"), _id)),
-                None,
-            )
-            if existing is None:
-                self._validate_unique_post_image(documents + [stored_doc])
-                eid = (
-                    self.table.insert(stored_doc)
-                    if snapshot is None
-                    else self.table._insert_one_from_snapshot(stored_doc, snapshot)
-                )
-            else:
-                raise DuplicateKeyError(
-                    "_id:{0} already exists in collection:{1}".format(
-                        _id, self.tablename
+            while True:
+                revision = self.parent._current_memory_revision()
+                specs = tuple(self._index_specs.values())
+                fields = None
+                if getattr(
+                    self._validate_unique_post_image, "__func__", None
+                ) is _NATIVE_VALIDATE_UNIQUE_POST_IMAGE and not any(
+                    spec.partial_filter is not None for spec in specs
+                ):
+                    fields = {"_id"}
+                    fields.update(
+                        field.split(".")[0]
+                        for spec in specs
+                        if spec.unique or len(spec.keys) > 1
+                        for field, _ in spec.keys
                     )
+                snapshot = (
+                    self.table._read_single_insert_snapshot(
+                        stored_doc,
+                        ids_only=not any(spec.unique for spec in specs),
+                        fields=fields,
+                    )
+                    if type(self.table) is MemoryTable
+                    else None
                 )
+                documents = (
+                    list(snapshot.values())
+                    if snapshot is not None
+                    else self.table.all()
+                )
+                if (
+                    fields is not None
+                    and self.parent._current_memory_revision() != revision
+                ):
+                    # Native codec/equality callbacks can reenter the collection
+                    # lock. Reload the catalog and revalidate a fresh generation.
+                    self._refresh_table()
+                    continue
+                existing = next(
+                    (
+                        item
+                        for item in documents
+                        if bson_values_equal(item.get("_id"), _id)
+                    ),
+                    None,
+                )
+                if existing is None:
+                    self._validate_unique_post_image(documents + [stored_doc])
+                    if (
+                        fields is not None
+                        and self.parent._current_memory_revision() != revision
+                    ):
+                        self._refresh_table()
+                        continue
+                    eid = (
+                        self.table.insert(stored_doc)
+                        if snapshot is None
+                        else self.table._insert_one_from_snapshot(stored_doc, snapshot)
+                    )
+                else:
+                    raise DuplicateKeyError(
+                        "_id:{0} already exists in collection:{1}".format(
+                            _id, self.tablename
+                        )
+                    )
+
+                break
 
             self._invalidate_indexes()
             return InsertOneResult(eid=eid, inserted_id=_id)
@@ -4084,6 +4121,9 @@ class TinyMongoCollection(object):
             return _delete_result(len(items))
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
+
+
+_NATIVE_VALIDATE_UNIQUE_POST_IMAGE = TinyMongoCollection._validate_unique_post_image
 
 
 class TinyMongoCursor(object):
