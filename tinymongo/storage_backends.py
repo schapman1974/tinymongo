@@ -623,19 +623,25 @@ class MemoryTable(Table):
                     return
         self._init_last_id(native.read_table_ids(name))
 
-    def _read_single_insert_snapshot(self, document):
-        """Use candidates only when the single-write hooks remain native."""
+    def _read_single_insert_snapshot(self, document, ids_only=True):
+        """Read candidates or full unique-index rows while single-write hooks are native."""
         if (
             not self._native_memory_delta()
             or getattr(self.all, "__func__", None) is not _NATIVE_TABLE_ALL
             or getattr(self.insert, "__func__", None) is not _NATIVE_TABLE_INSERT
         ):
             return None
-        snapshot = self._read_insert_snapshot(ids_only=True, documents=[document])
+        snapshot = self._read_insert_snapshot(ids_only=ids_only, documents=[document])
+        if not ids_only:
+            return snapshot
         return snapshot if isinstance(snapshot, _InsertCandidates) else None
 
     def _insert_one_from_snapshot(self, document, snapshot):
         if getattr(self.insert, "__func__", None) is _NATIVE_TABLE_INSERT:
+            if not isinstance(snapshot, _InsertCandidates):
+                if self._native_memory_delta():
+                    return self._insert_multiple_from_snapshot([document], snapshot)[0]
+                return self.insert(document)
             result = self._append_from_candidates([document], snapshot)
             if result is not None:
                 return result[0]
