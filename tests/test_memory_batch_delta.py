@@ -153,3 +153,75 @@ def test_colliding_legacy_internal_ids_keep_full_replay():
     assert rows["01"] == {"_id": "same", "v": 2}
     assert rows["1"] == {"_id": "same", "v": 2}
     assert rows["2"] == {"_id": "new"}
+
+
+def test_memory_batch_does_not_copy_resident_payload(monkeypatch):
+    client = TinyMongoClient("memory://" + uuid4().hex, backend="memory")
+    collection = client.app.items
+    collection.insert_many([{"_id": "old", "nested": [1, {"payload": "resident"}]}])
+    original = sb.copy.deepcopy
+    copied = []
+
+    def track(value, *args, **kwargs):
+        if isinstance(value, dict) and any(
+            isinstance(row, dict) and "nested" in row for row in value.values()
+        ):
+            copied.append(value)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(sb.copy, "deepcopy", track)
+    collection.insert_many([{"_id": "new"}])
+    assert copied == []
+    assert collection.find_one({"_id": "old"})["nested"] == [1, {"payload": "resident"}]
+    client.close()
+
+
+@pytest.mark.parametrize("mode", ["replacement", "hook"])
+def test_id_snapshot_never_replaces_full_rows(monkeypatch, mode):
+    db = sb.MemoryTinyDB(uuid4().hex, storage=sb.MemoryStorage)
+    table = db.table("items")
+    table.insert({"_id": {"nested": [1]}, "payload": [2]})
+    snapshot = table._read_insert_snapshot(ids_only=True)
+    assert isinstance(snapshot, sb._InsertIDSnapshot)
+    snapshot[1]["_id"]["nested"].append(99)
+    assert table.all()[0]["_id"] == {"nested": [1]}
+    if mode == "replacement":
+        db._storage.merge_writes = False
+    else:
+        original = table._write
+        monkeypatch.setattr(table, "_write", lambda data: original(data))
+    table._insert_multiple_from_snapshot([{"_id": "new"}], snapshot)
+    assert table.all() == [{"_id": {"nested": [1]}, "payload": [2]}, {"_id": "new"}]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        {"1": {"payload": [1]}},
+        {"1": {"_id": 1}, "2": {"_id": 1.0}},
+        {"01": {"_id": "a"}, "1": {"_id": "b"}},
+        {"1": [("_id", "legacy"), ("payload", [1])]},
+    ],
+)
+def test_id_planning_legacy_falls_back(rows):
+    db = sb.MemoryTinyDB(uuid4().hex, storage=sb.MemoryStorage)
+    db._storage._entry["data"] = {"items": rows}
+    table = db.table("items")
+    assert not isinstance(
+        table._read_insert_snapshot(ids_only=True), sb._InsertIDSnapshot
+    )
+
+
+@pytest.mark.parametrize("ordered", [True, False])
+def test_id_planning_bson_duplicates(ordered):
+    from tinymongo.errors import BulkWriteError
+
+    client = TinyMongoClient("memory://" + uuid4().hex, backend="memory")
+    collection = client.app.items
+    collection.insert_many([{"_id": 1, "payload": [1]}])
+    with pytest.raises(BulkWriteError) as caught:
+        collection.insert_many([{"_id": 1.0}, {"_id": True}], ordered=ordered)
+    assert caught.value.details["nInserted"] == (0 if ordered else 1)
+    assert collection.find_one({"_id": 1})["payload"] == [1]
+    assert collection.count_documents({}) == (1 if ordered else 2)
+    client.close()
