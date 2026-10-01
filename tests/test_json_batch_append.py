@@ -275,6 +275,8 @@ def test_id_snapshot_callback_forces_fresh_planning(tmp_path, monkeypatch):
     with TinyMongoClient(str(tmp_path), backend="json") as client:
         col = client.app.items
         col.insert_many([{"_id": "old"}])
+        # Exercise the conservative full-snapshot path and its copy callback.
+        monkeypatch.setattr(sb.MemoryTable, "_read_json_candidates", lambda *a: None)
         original = sb._copy_insert_id
         calls = []
 

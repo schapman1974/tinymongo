@@ -6,9 +6,14 @@ from tinymongo import TinyMongoClient, storage_backends as sb
 from tinymongo.errors import BulkWriteError, DuplicateKeyError
 
 
+@pytest.mark.parametrize("candidates", [False, True])
 @pytest.mark.parametrize("stage", ["clone", "normalized_validation"])
 @pytest.mark.parametrize("change", ["insert", "index", "hook"])
-def test_batch_append_rechecks_callbacks(tmp_path, monkeypatch, stage, change):
+def test_batch_append_rechecks_callbacks(
+    tmp_path, monkeypatch, stage, change, candidates
+):
+    if not candidates:
+        monkeypatch.setattr(sb.MemoryTable, "_read_json_candidates", lambda *a: None)
     with TinyMongoClient(str(tmp_path), backend="json") as client:
         col = client.app.items
         col.insert_one({"_id": "old", "email": "old", "other": "same", "payload": [1]})
