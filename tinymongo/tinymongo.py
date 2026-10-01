@@ -42,6 +42,7 @@ from .sorting import bson_document_sort_value_key, sort_documents
 from .warning_context import capture_warning_origin, emit_warning, use_warning_origin
 from .storage_backends import (
     AtomicJSONStorage,
+    MemoryTable,
     MemoryTinyDB,
     clear_memory_database,
     clear_memory_namespace,
@@ -3034,17 +3035,27 @@ class TinyMongoCollection(object):
             if self.table is None:
                 self.build_table()
             self._refresh_table()
+            snapshot = (
+                self.table._read_insert_snapshot()
+                if type(self.table) is MemoryTable
+                else None
+            )
             accepted, write_errors = _plan_insert_many(
                 self,
                 stored_docs,
-                self.table.all(),
+                list(snapshot.values()) if snapshot is not None else self.table.all(),
                 list(self._index_specs.values()),
                 ordered,
                 original_documents=docs,
             )
 
             if accepted:
-                results = self.table.insert_multiple(accepted)
+                if snapshot is None:
+                    results = self.table.insert_multiple(accepted)
+                else:
+                    results = self.table._insert_multiple_from_snapshot(
+                        accepted, snapshot
+                    )
                 self._invalidate_indexes()
             else:
                 results = []

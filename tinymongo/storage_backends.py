@@ -551,6 +551,26 @@ class MemoryTable(Table):
         self._query_cache = LRUCache(capacity=cache_size)
         self._init_last_id(storage._storage.read_table_ids(name))
 
+    def _read_insert_snapshot(self):
+        """Return a detached native snapshot for a collection-locked batch."""
+        if type(self._storage) is not MemoryStorageProxy or type(
+            self._storage._storage
+        ) not in (MemoryStorage, AtomicJSONStorage):
+            return None
+        return self._read()
+
+    def _insert_multiple_from_snapshot(self, documents, snapshot):
+        # The collection has validated these mappings and retained its lock
+        # since reading this snapshot. Keep TinyDB ID allocation and _write's
+        # cache invalidation without reading/copying the same table again.
+        doc_ids = []
+        for document in documents:
+            doc_id = self._get_next_id()
+            doc_ids.append(doc_id)
+            snapshot[doc_id] = dict(document)
+        self._write(snapshot)
+        return doc_ids
+
 
 class MemoryTinyDB(TinyDB):
     table_class = MemoryTable
