@@ -139,3 +139,41 @@ def test_concurrent_single_writes_smoke(tmp_path):
         docs = list(client.integrationDB.singleInserts.find({}))
     assert len(docs) == expected
     assert len({doc["_id"] for doc in docs}) == expected
+
+
+def _unique_json_writer(db_dir, proc_id, start, errors):
+    from tinymongo.errors import DuplicateKeyError
+
+    try:
+        start.wait(timeout=30)
+        with tm.TinyMongoClient(db_dir, backend="json") as client:
+            for index in range(10):
+                try:
+                    client.integrationDB.uniqueInserts.insert_one(
+                        {"_id": f"{proc_id}-{index}", "email": str(index)}
+                    )
+                except DuplicateKeyError:
+                    pass
+    except Exception as exc:
+        errors.put(f"{type(exc).__name__}: {exc}")
+        raise
+
+
+@pytest.mark.integration
+def test_json_concurrent_unique_single_inserts(tmp_path):
+    db_dir = str(tmp_path / "json-unique")
+    with tm.TinyMongoClient(db_dir, backend="json") as client:
+        client.integrationDB.uniqueInserts.create_index("email", unique=True)
+    start = mp.Barrier(4)
+    errors = mp.Queue()
+    workers = [
+        mp.Process(target=_unique_json_writer, args=(db_dir, i, start, errors))
+        for i in range(4)
+    ]
+    for worker in workers:
+        worker.start()
+    assert _wait_for_workers(workers, errors) == []
+    with tm.TinyMongoClient(db_dir, backend="json") as client:
+        rows = list(client.integrationDB.uniqueInserts.find({}))
+    assert len(rows) == 10
+    assert {row["email"] for row in rows} == {str(i) for i in range(10)}

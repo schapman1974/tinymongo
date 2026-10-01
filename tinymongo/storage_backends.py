@@ -590,11 +590,12 @@ class _InsertIDSnapshot(dict):
 class _JSONInsertSnapshot(_InsertIDSnapshot):
     """Detached resident IDs bound to an atomic JSON file generation."""
 
-    def __init__(self, rows, revision, last_id, identities):
+    def __init__(self, rows, revision, last_id, identities, specs=()):
         super().__init__(rows)
         self.revision = revision
         self.last_id = last_id
         self.identities = identities
+        self.specs = specs
 
 
 class _InsertCandidates(_InsertIDSnapshot):
@@ -677,12 +678,11 @@ class MemoryTable(Table):
     ):
         """Read candidates or full unique-index rows while single-write hooks are native."""
         if (
-            ids_only
-            and fields is not None
+            fields is not None
             and self._native_json_append()
             and getattr(self.insert, "__func__", None) is _NATIVE_TABLE_INSERT
         ):
-            return self._read_json_insert_snapshot()
+            return self._read_json_insert_snapshot(fields=fields, specs=specs)
         if (
             not self._native_memory_delta()
             or getattr(self.all, "__func__", None) is not _NATIVE_TABLE_ALL
@@ -982,7 +982,7 @@ class MemoryTable(Table):
             )
         )
 
-    def _read_json_insert_snapshot(self):
+    def _read_json_insert_snapshot(self, fields=(), specs=()):
         storage = self._storage._storage
         revision = storage.revision
         rows = storage._load_cached().get(self._name, {})
@@ -991,7 +991,10 @@ class MemoryTable(Table):
         ):
             return None
         snapshot = {
-            int(key): {"_id": _copy_insert_id(row["_id"])}
+            int(key): {
+                **copy.deepcopy({k: row[k] for k in fields if k != "_id" and k in row}),
+                "_id": _copy_insert_id(row["_id"]),
+            }
             for key, row in list(rows.items())
         }
         identities = [bson_value_identity_key(row["_id"]) for row in snapshot.values()]
@@ -1004,7 +1007,9 @@ class MemoryTable(Table):
             or storage.revision != revision
         ):
             return None
-        return _JSONInsertSnapshot(snapshot, revision, self._last_id, set(identities))
+        return _JSONInsertSnapshot(
+            snapshot, revision, self._last_id, set(identities), specs
+        )
 
     def _append_json_from_snapshot(self, documents, snapshot):
         storage = self._storage._storage
@@ -1032,6 +1037,16 @@ class MemoryTable(Table):
             or len(set(identities)) != len(identities)
         ):
             return None
+        if snapshot.specs:
+            # Validate persisted values: BSON normalization may change an
+            # indexed value after collection-level validation.
+            _indexes.validate_unique_documents(
+                list(snapshot.values()) + list(payload.values()), snapshot.specs
+            )
+            if storage.revision != snapshot.revision:
+                raise _RetryMemoryInsert
+            if not self._native_json_append():
+                return None
         data = dict(storage._cached_data)
         table = dict(data.get(self._name, {}))
         table.update(payload)
