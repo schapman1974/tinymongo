@@ -73,11 +73,14 @@ def test_single_secondary_unique_constraint_uses_full_table():
         assert col.count_documents({}) == 1
 
 
+@pytest.mark.parametrize("unique", [False, True])
 @pytest.mark.parametrize("hook", ["all", "insert", "_read", "_write"])
-def test_single_native_table_hooks_are_preserved(monkeypatch, hook):
+def test_single_native_table_hooks_are_preserved(monkeypatch, hook, unique):
     with client() as conn:
         col = conn.app.items
         col.insert_one({"_id": "old", "payload": [1]})
+        if unique:
+            col.create_index("email", unique=True, sparse=True)
         original = getattr(sb.MemoryTable, hook)
         calls = []
 
@@ -166,3 +169,98 @@ def test_single_json_keeps_durable_path(tmp_path):
         col.insert_one({"_id": "new"})
     with TinyMongoClient(str(tmp_path), backend="json") as conn:
         assert conn.app.items.count_documents({}) == 2
+
+
+def test_unique_single_insert_copies_residents_only_once(monkeypatch):
+    with client() as conn:
+        col = conn.app.items
+        col.insert_many(
+            [{"_id": i, "email": str(i), "payload": [i]} for i in range(1000)]
+        )
+        col.create_index("email", unique=True)
+        visited = []
+        original_copy = sb.copy.deepcopy
+
+        def copied(value, *args, **kwargs):
+            if isinstance(value, dict) and "1" in value and "email" in value["1"]:
+                visited.append(len(value))
+            return original_copy(value, *args, **kwargs)
+
+        monkeypatch.setattr(sb.copy, "deepcopy", copied)
+        result = col.insert_one({"_id": 1000, "email": "1000", "payload": [1000]})
+        assert result.inserted_id == 1000
+        assert result.eid == 1001
+        assert visited == [1000]
+        assert col.find_one({"_id": 0})["payload"] == [0]
+
+
+@pytest.mark.parametrize("change", ["insert_hook", "write_hook", "replacement"])
+def test_unique_single_snapshot_rechecks_hooks(monkeypatch, change):
+    with client() as conn:
+        col = conn.app.items
+        col.insert_one({"_id": "old", "payload": [1]})
+        col.create_index("email", unique=True, sparse=True)
+        table = col.table
+        snapshot = table._read_single_insert_snapshot({"_id": "new"}, ids_only=False)
+        assert snapshot[1]["payload"] == [1]
+        calls = []
+        if change == "replacement":
+            table._storage._storage.merge_writes = False
+        else:
+            hook = "insert" if change == "insert_hook" else "_write"
+            original = getattr(table, hook)
+
+            def wrapped(*args):
+                calls.append(True)
+                return original(*args)
+
+            monkeypatch.setattr(table, hook, wrapped)
+        assert table._insert_one_from_snapshot({"_id": "new"}, snapshot) == 2
+        if change != "replacement":
+            assert calls
+        assert col.find_one({"_id": "old"})["payload"] == [1]
+        assert col.count_documents({}) == 2
+
+
+def test_unique_single_insert_preserves_partial_compound_and_isolation():
+    address = "memory://" + uuid4().hex
+    with client(address) as conn:
+        col = conn.app.items
+        col.create_index(
+            [("group", 1), ("email", 1)],
+            unique=True,
+            partialFilterExpression={"active": True},
+        )
+        doc = {
+            "_id": 1,
+            "group": "a",
+            "email": ["x", "y"],
+            "active": True,
+            "payload": [1],
+        }
+        col.insert_one(doc)
+        doc["payload"].append(2)
+        with pytest.raises(DuplicateKeyError):
+            col.insert_one({"_id": 2, "group": "a", "email": "y", "active": True})
+        col.insert_one({"_id": 3, "group": "a", "email": "y", "active": False})
+    with client(address) as conn:
+        assert conn.app.items.count_documents({}) == 2
+        assert conn.app.items.find_one({"_id": 1})["payload"] == [1]
+
+
+def test_unique_single_clients_serialize_conflicts():
+    address = "memory://" + uuid4().hex
+    with client(address) as a, client(address) as b:
+        a.app.items.create_index("email", unique=True)
+
+        def insert(pair):
+            conn, ident = pair
+            try:
+                conn.app.items.insert_one({"_id": ident, "email": "shared"})
+                return True
+            except DuplicateKeyError:
+                return False
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(insert, [(a, 1), (b, 2)])) == [False, True]
+        assert a.app.items.count_documents({}) == b.app.items.count_documents({}) == 1

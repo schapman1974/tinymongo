@@ -2938,9 +2938,13 @@ class TinyMongoCollection(object):
             # always exact BSON identity. Looking it up through ``find_one``
             # could otherwise confuse a regex ID with a matching string ID.
             snapshot = (
-                self.table._read_single_insert_snapshot(stored_doc)
+                self.table._read_single_insert_snapshot(
+                    stored_doc,
+                    ids_only=not any(
+                        spec.unique for spec in self._index_specs.values()
+                    ),
+                )
                 if type(self.table) is MemoryTable
-                and not any(spec.unique for spec in self._index_specs.values())
                 else None
             )
             documents = (
