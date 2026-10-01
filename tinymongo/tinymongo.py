@@ -3044,7 +3044,10 @@ class TinyMongoCollection(object):
             self._refresh_table()
             snapshot = (
                 self.table._read_insert_snapshot(
-                    ids_only=not any(spec.unique for spec in self._index_specs.values())
+                    ids_only=not any(
+                        spec.unique for spec in self._index_specs.values()
+                    ),
+                    documents=stored_docs,
                 )
                 if type(self.table) is MemoryTable
                 else None
