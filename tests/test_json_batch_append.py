@@ -78,6 +78,7 @@ def test_duplicate_batch_keeps_partial_success(tmp_path, ordered):
         ("storage", "write_table"),
         ("storage", "_merge_data"),
         ("storage", "_serialize_table"),
+        ("storage", "_serialize_table_parts"),
         ("storage", "_write_cached_tables"),
         ("storage", "_load_cached"),
         ("storage", "_file_signature"),

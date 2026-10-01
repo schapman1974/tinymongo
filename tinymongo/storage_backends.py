@@ -131,6 +131,7 @@ class AtomicJSONStorage(Storage):
         self._cached_data = {}
         self._serialized_tables = {}
         self._serialized_documents = {}
+        self._serialized_keys = {}
         self._insert_indexes = {}
         os.makedirs(self._directory, exist_ok=True)
 
@@ -172,6 +173,7 @@ class AtomicJSONStorage(Storage):
                 self._read_chunks = {}
             self._cached_data = data
             self._serialized_tables = chunks
+            self._serialized_keys = {}
             self._serialized_documents = {name: None for name in chunks}
             self._cached_signature = signature
         return self._cached_data
@@ -202,13 +204,17 @@ class AtomicJSONStorage(Storage):
             self._release_lock(rlock, lock)
 
     def _serialize_table(self, name, table):
+        chunks, documents, _ = self._serialize_table_parts(name, table)
+        return chunks, documents
+
+    def _serialize_table_parts(self, name, table):
         # Legacy or reserved-marker table shapes keep the full codec path.
         if (
             not isinstance(table, dict)
             or set(table) == {"__tinymongo_type_v1__", "value"}
             or any("\x00" in str(key) for key in table)
         ):
-            return (json_dumps(table, ensure_ascii=False),), {}
+            return (json_dumps(table, ensure_ascii=False),), {}, {}
         previous = self._cached_data.get(name, {})
         cached = self._serialized_documents.get(name, {})
         if cached is None:
@@ -219,11 +225,21 @@ class AtomicJSONStorage(Storage):
                 else {}
             )
         documents = {}
+        keys = {}
+        previous_keys = self._serialized_keys.get(name, {})
         pieces = ["{"]
         for index, (key, document) in enumerate(table.items()):
             if index:
                 pieces.append(", ")
-            pieces.append(json_dumps(str(key), ensure_ascii=False) + ": ")
+            # Only exact immutable strings are reusable. Legacy/custom key
+            # objects retain their conversion behavior on every serialization.
+            if type(key) is str and key in previous_keys:
+                prefix = previous_keys[key]
+            else:
+                prefix = json_dumps(str(key), ensure_ascii=False) + ": "
+            if type(key) is str:
+                keys[key] = prefix
+            pieces.append(prefix)
             if key in cached and (
                 previous[key] is document
                 or storage_values_equal(previous[key], document)
@@ -234,15 +250,24 @@ class AtomicJSONStorage(Storage):
             documents[key] = chunk
             pieces.append(chunk)
         pieces.append("}")
-        return tuple(pieces), documents
+        return tuple(pieces), documents, keys
 
     def _write_cached_tables(self, data, changed):
         chunks = {}
         documents = {}
+        keys = {}
         for name, table in data.items():
             if name not in changed and name in self._serialized_tables:
                 chunks[name] = self._serialized_tables[name]
                 documents[name] = self._serialized_documents[name]
+                keys[name] = self._serialized_keys.get(name, {})
+            elif (
+                getattr(self._serialize_table, "__func__", None)
+                is _NATIVE_JSON_SERIALIZE
+            ):
+                chunks[name], documents[name], keys[name] = self._serialize_table_parts(
+                    name, table
+                )
             else:
                 chunks[name], documents[name] = self._serialize_table(name, table)
         fd, tmp = tempfile.mkstemp(prefix="tmp", dir=self._directory)
@@ -269,6 +294,7 @@ class AtomicJSONStorage(Storage):
             self._cached_data = data
             self._serialized_tables = chunks
             self._serialized_documents = documents
+            self._serialized_keys = keys
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -304,6 +330,7 @@ class AtomicJSONStorage(Storage):
             self._cached_data = {}
             self._serialized_tables = {}
             self._serialized_documents = {}
+            self._serialized_keys = {}
         finally:
             self._release_lock(rlock, lock)
 
@@ -1231,6 +1258,7 @@ class MemoryTable(Table):
         ) == len(identities)
 
 
+_NATIVE_JSON_SERIALIZE = AtomicJSONStorage._serialize_table
 _NATIVE_TABLE_ALL = Table.all
 _NATIVE_TABLE_INSERT = Table.insert
 _NATIVE_TABLE_INSERT_MULTIPLE = Table.insert_multiple
@@ -1268,6 +1296,7 @@ _JSON_STORAGE_HOOKS = tuple(
         "write_table",
         "_merge_data",
         "_serialize_table",
+        "_serialize_table_parts",
         "_write_cached_tables",
         "_load_cached",
         "_file_signature",
