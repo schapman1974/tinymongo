@@ -5,7 +5,8 @@ import tempfile
 import threading
 from typing import Any
 from tinydb import TinyDB
-from tinydb.database import Document, StorageProxy
+from tinydb.database import Document, StorageProxy, Table
+from tinydb.utils import LRUCache
 from tinydb.storages import Storage
 from urllib.parse import urlparse
 from .bson_codec import clone as clone_document
@@ -171,6 +172,12 @@ class AtomicJSONStorage(Storage):
             self._release_lock(rlock, lock)
 
     def read_table(self, name):
+        return self._read_table(name, copy.deepcopy)
+
+    def read_table_ids(self, name):
+        return self._read_table(name, _table_ids)
+
+    def _read_table(self, name, snapshot):
         rlock, lock = self._acquire_lock()
         try:
             data = self._load_cached()
@@ -178,7 +185,7 @@ class AtomicJSONStorage(Storage):
                 data = dict(data)
                 data[name] = {}
                 self._write_cached_tables(data, {name})
-            return copy.deepcopy(data[name])
+            return snapshot(data[name])
         finally:
             self._release_lock(rlock, lock)
 
@@ -457,13 +464,19 @@ class MemoryStorage(AtomicJSONStorage):
             return set(self._entry["data"] or {})
 
     def read_table(self, name):
+        return self._read_table(name, copy.deepcopy)
+
+    def read_table_ids(self, name):
+        return self._read_table(name, _table_ids)
+
+    def _read_table(self, name, snapshot):
         with self.collection_lock:
             if self._entry["data"] is None:
                 self._entry["data"] = {}
             if name not in self._entry["data"]:
                 self._entry["data"][name] = {}
                 self._entry["revision"] += 1
-            return copy.deepcopy(self._entry["data"][name])
+            return snapshot(self._entry["data"][name])
 
     def write_table(self, name, data):
         with self.collection_lock:
@@ -508,7 +521,39 @@ class MemoryStorageProxy(StorageProxy):
         self._storage.write_table(self._table_name, rows)
 
 
+def _table_ids(table):
+    # Native rows need only their internal IDs. Retain TinyDB's conversion and
+    # validation for legacy non-dict rows, including iterable key/value pairs.
+    if type(table) is dict and all(type(row) is dict for row in table.values()):
+        return [int(key) for key in table]
+    return list(
+        {
+            int(key): Document(value, int(key))
+            for key, value in copy.deepcopy(table).items()
+        }
+    )
+
+
+class MemoryTable(Table):
+    """Initialize native table IDs without copying resident documents."""
+
+    def __init__(self, storage, name, cache_size=10):
+        # Custom proxies/storage may implement additional read transformations.
+        if (
+            type(self) is not MemoryTable
+            or type(storage) is not MemoryStorageProxy
+            or type(storage._storage) not in (MemoryStorage, AtomicJSONStorage)
+        ):
+            super().__init__(storage, name, cache_size)
+            return
+        self._storage = storage
+        self._name = name
+        self._query_cache = LRUCache(capacity=cache_size)
+        self._init_last_id(storage._storage.read_table_ids(name))
+
+
 class MemoryTinyDB(TinyDB):
+    table_class = MemoryTable
     storage_proxy_class = MemoryStorageProxy
 
     def tables(self):
