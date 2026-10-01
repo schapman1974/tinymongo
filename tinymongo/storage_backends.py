@@ -534,6 +534,10 @@ def _table_ids(table):
     )
 
 
+class _InsertIDSnapshot(dict):
+    """Detached IDs for a native memory delta write, never a full table."""
+
+
 class MemoryTable(Table):
     """Initialize native table IDs without copying resident documents."""
 
@@ -551,12 +555,22 @@ class MemoryTable(Table):
         self._query_cache = LRUCache(capacity=cache_size)
         self._init_last_id(storage._storage.read_table_ids(name))
 
-    def _read_insert_snapshot(self):
+    def _read_insert_snapshot(self, ids_only=False):
         """Return a detached native snapshot for a collection-locked batch."""
         if type(self._storage) is not MemoryStorageProxy or type(
             self._storage._storage
         ) not in (MemoryStorage, AtomicJSONStorage):
             return None
+        if ids_only and self._native_memory_delta():
+            rows = (self._storage._storage._entry["data"] or {}).get(self._name, {})
+            if type(rows) is dict and all(type(row) is dict for row in rows.values()):
+                snapshot = _InsertIDSnapshot(
+                    (int(key), {"_id": copy.deepcopy(row["_id"])})
+                    for key, row in rows.items()
+                    if "_id" in row
+                )
+                if len(snapshot) == len(rows) and self._enumerable_insert_ids(snapshot):
+                    return snapshot
         return self._read()
 
     def _insert_multiple_from_snapshot(self, documents, snapshot):
@@ -566,9 +580,28 @@ class MemoryTable(Table):
         # A native memory merge can persist only accepted new rows. Keep the
         # full snapshot for custom hooks, replacement writes and legacy IDs:
         # those paths may transform resident rows or rely on replaying them.
+        delta = self._native_memory_delta() and len(
+            (self._storage._storage._entry["data"] or {}).get(self._name, {})
+        ) == len(snapshot)
+        if delta:
+            delta = self._enumerable_insert_ids(snapshot)
+        if isinstance(snapshot, _InsertIDSnapshot) and not delta:
+            # A hook or merge mode changed while planning. Partial rows must
+            # never reach a replacement/custom write as a full table.
+            snapshot = self._read()
+        target = {} if delta else snapshot
+        doc_ids = []
+        for document in documents:
+            doc_id = self._get_next_id()
+            doc_ids.append(doc_id)
+            target[doc_id] = dict(document)
+        self._write(target)
+        return doc_ids
+
+    def _native_memory_delta(self):
         proxy = self._storage
         storage = proxy._storage
-        delta = (
+        return (
             type(self) is MemoryTable
             and type(storage) is MemoryStorage
             and storage.merge_writes
@@ -581,24 +614,17 @@ class MemoryTable(Table):
             and getattr(proxy.read, "__func__", None) is _NATIVE_PROXY_READ
             and getattr(storage.read_table, "__func__", None)
             is _NATIVE_MEMORY_READ_TABLE
-            and len((storage._entry["data"] or {}).get(self._name, {})) == len(snapshot)
         )
-        if delta:
-            identities = [
-                bson_value_identity_key(row.get("_id", _MISSING_ID))
-                for row in snapshot.values()
-            ]
-            delta = all(identity is not None for identity in identities) and len(
-                set(identities)
-            ) == len(identities)
-        target = {} if delta else snapshot
-        doc_ids = []
-        for document in documents:
-            doc_id = self._get_next_id()
-            doc_ids.append(doc_id)
-            target[doc_id] = dict(document)
-        self._write(target)
-        return doc_ids
+
+    @staticmethod
+    def _enumerable_insert_ids(snapshot):
+        identities = [
+            bson_value_identity_key(row.get("_id", _MISSING_ID))
+            for row in snapshot.values()
+        ]
+        return all(identity is not None for identity in identities) and len(
+            set(identities)
+        ) == len(identities)
 
 
 _NATIVE_TABLE_READ = Table._read
