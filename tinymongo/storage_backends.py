@@ -13,7 +13,7 @@ from .bson_codec import clone as clone_document
 from .bson_codec import dumps as json_dumps
 from .bson_codec import loads as json_loads
 from .bson_codec import storage_values_equal
-from .bson_types import bson_value_identity_key, bson_values_equal
+from .bson_types import bson_value_identity_key, bson_values_equal, object_id_type
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
 from .json_chunks import load_table_chunks, retained_document_chunks
@@ -42,6 +42,15 @@ SUPPORTED_BACKEND_NAMES = (
     "mariadb",
 )
 _MISSING_ID = object()
+_ObjectId = object_id_type()
+
+
+def _copy_insert_id(value):
+    """Detach native ObjectIds cheaply while retaining custom copy semantics."""
+    if _ObjectId is not None and type(value) is _ObjectId:
+        # ObjectId exposes __setstate__, so sharing the instance is unsafe.
+        return _ObjectId(value.binary)
+    return copy.deepcopy(value)
 
 
 _memory_registry: dict[str, dict[str, Any]] = {}
@@ -565,7 +574,7 @@ class MemoryTable(Table):
             rows = (self._storage._storage._entry["data"] or {}).get(self._name, {})
             if type(rows) is dict and all(type(row) is dict for row in rows.values()):
                 snapshot = _InsertIDSnapshot(
-                    (int(key), {"_id": copy.deepcopy(row["_id"])})
+                    (int(key), {"_id": _copy_insert_id(row["_id"])})
                     for key, row in rows.items()
                     if "_id" in row
                 )
