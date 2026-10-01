@@ -1,10 +1,10 @@
-"""Retain plain JSON table text without bypassing BSON write validation."""
+"""Retain JSON table text without bypassing BSON write validation."""
 
 import json
 import math
 import re
 
-from .bson_codec import loads
+from .bson_codec import decode_value, encode_value, loads
 
 _WHITESPACE = re.compile(r"[ \t\n\r]*")
 _MARKER_KEYS = {"__tinymongo_type_v1__", "value"}
@@ -19,10 +19,18 @@ def _valid_unicode(value):
 
 
 def _reusable(value):
-    # Tagged values must pass through the codec when written. Legacy invalid
-    # keys, surrogate strings and nonfinite numbers also need its normal path.
+    # Reuse only canonical scalar tags whose codec round trip is unchanged.
+    # Other tags, legacy invalid keys, surrogate strings and nonfinite numbers
+    # still need the normal write path.
     if isinstance(value, dict):
-        return set(value) != _MARKER_KEYS and all(
+        if set(value) == _MARKER_KEYS:
+            if value["__tinymongo_type_v1__"] not in (
+                "objectid",
+                "datetime",
+            ) or not isinstance(value["value"], str):
+                return False
+            return encode_value(decode_value(value)) == value
+        return all(
             "\x00" not in key and _valid_unicode(key) and _reusable(item)
             for key, item in value.items()
         )

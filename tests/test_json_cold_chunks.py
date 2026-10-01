@@ -11,9 +11,16 @@ from tinymongo.errors import InvalidDocument, StorageCorruptionError
 from tinymongo.json_chunks import load_table_chunks
 
 
-def test_first_write_does_not_serialize_untouched_plain_table(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["plain", "datetime", "objectid"])
+def test_first_write_does_not_serialize_untouched_plain_table(
+    tmp_path, monkeypatch, kind
+):
     path = tmp_path / "db.json"
     archive = {"1": {"_id": "large", "body": "é😀" * 50_000}}
+    if kind == "datetime":
+        archive["1"]["tagged"] = datetime(2026, 1, 1)
+    elif kind == "objectid":
+        archive["1"]["tagged"] = pytest.importorskip("bson").ObjectId()
     path.write_text(dumps({"archive": archive}))
     storage = sb.AtomicJSONStorage(str(path))
     original = sb.json_dumps
@@ -89,9 +96,52 @@ def test_tagged_tables_keep_codec_normalization(tmp_path):
     path.write_text(dumps({"archive": archive}))
     storage = sb.AtomicJSONStorage(str(path))
     assert storage.table_names() == {"archive"}
-    assert storage._serialized_tables == {}
+    assert "archive" in storage._serialized_tables
     storage.write_table("target", {1: {"_id": 1}})
     assert storage.read()["archive"] == archive
+
+
+@pytest.mark.parametrize(
+    "marker,payload",
+    [
+        ("datetime", "2026-01-01T00:00:00.123456"),
+        ("datetime", "2026-01-01T00:00:00+04:00"),
+        ("datetime", "2026-01-01"),
+        ("datetime", "invalid"),
+        ("datetime", 1),
+        ("datetime", "\ud800"),
+        ("objectid", "0123456789ABCDEF01234567"),
+        ("objectid", "invalid"),
+        ("future", "value"),
+        ([], 1),
+        ("mapping", [["a", 1], ["a", 2]]),
+        ("float", "nan"),
+    ],
+)
+def test_noncanonical_tags_follow_existing_write_normalization(
+    tmp_path, marker, payload
+):
+    if marker == "objectid":
+        pytest.importorskip("bson")
+    path = tmp_path / "db.json"
+    text = json.dumps(
+        {"archive": {"1": {"tag": {"__tinymongo_type_v1__": marker, "value": payload}}}}
+    )
+    path.write_text(text)
+    data, chunks = load_table_chunks(text)
+    assert chunks == {}
+    expected = loads(dumps(data))
+    storage = sb.AtomicJSONStorage(str(path))
+    # A lone surrogate still fails in the existing UTF-8 persistence path.
+    if payload == "\ud800":
+        with pytest.raises(UnicodeEncodeError):
+            storage.write_table("target", {1: {"_id": "new"}})
+        assert path.read_text() == text
+    else:
+        storage.write_table("target", {1: {"_id": "new"}})
+        actual = storage.read()
+        del actual["target"]
+        assert dumps(actual) == dumps(expected)
 
 
 @pytest.mark.parametrize("bad", ['{"bad\\u0000key":0}', '{"x":"\\ud800"}'])
