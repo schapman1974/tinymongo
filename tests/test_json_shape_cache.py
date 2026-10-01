@@ -1,5 +1,7 @@
 """Warm JSON shape validation follows the validated table and file revision."""
 
+from pathlib import Path
+
 import pytest
 
 from tinymongo import TinyMongoClient, storage_backends as sb
@@ -102,3 +104,21 @@ def test_public_reads_cannot_mutate_validated_table(tmp_path):
         col.insert_one({"_id": 2})
         assert col.find_one({"_id": 0}) == {"_id": 0, "payload": [0]}
         assert storage._insert_indexes["items"][4] is storage._cached_data["items"]
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_legacy_file_missing_id_keeps_full_snapshot(tmp_path, warm):
+    with TinyMongoClient(str(tmp_path), backend="json") as client:
+        col = client.app.items
+        col.insert_one({"_id": "old", "payload": [1]})
+        storage = col.table._storage._storage
+        if not warm:
+            storage._insert_indexes.clear()
+        # An external legacy writer invalidates a warm shape proof as well as
+        # taking the ordinary cold fallback path.
+        Path(storage.path).write_text(
+            sb.json_dumps({"items": {"1": {"payload": [1]}}}), encoding="utf8"
+        )
+        snapshot = col.table._read_insert_snapshot(fields={"_id"})
+        assert not isinstance(snapshot, sb._InsertIDSnapshot)
+        assert snapshot[1] == {"payload": [1]}
