@@ -252,7 +252,36 @@ class AtomicJSONStorage(Storage):
         pieces.append("}")
         return tuple(pieces), documents, keys
 
-    def _write_cached_tables(self, data, changed):
+    def _prepare_append_text(self, name, payload):
+        """Stage native append text without changing any published cache."""
+        previous = self._cached_data.get(name, {})
+        documents = self._serialized_documents.get(name)
+        keys = self._serialized_keys.get(name, {})
+        chunks = self._serialized_tables.get(name)
+        if (
+            not chunks
+            or documents is None
+            or len(documents) != len(previous)
+            or len(keys) != len(previous)
+            or chunks[0] != "{"
+        ):
+            return None
+        pieces = list(chunks)
+        pieces.pop()
+        documents = dict(documents)
+        keys = dict(keys)
+        for key, row in payload.items():
+            if documents:
+                pieces.append(", ")
+            prefix = json_dumps(key, ensure_ascii=False) + ": "
+            chunk = json_dumps(row, ensure_ascii=False)
+            pieces.extend((prefix, chunk))
+            documents[key] = chunk
+            keys[key] = prefix
+        pieces.append("}")
+        return tuple(pieces), documents, keys
+
+    def _write_cached_tables(self, data, changed, prepared=None):
         chunks = {}
         documents = {}
         keys = {}
@@ -261,6 +290,8 @@ class AtomicJSONStorage(Storage):
                 chunks[name] = self._serialized_tables[name]
                 documents[name] = self._serialized_documents[name]
                 keys[name] = self._serialized_keys.get(name, {})
+            elif prepared is not None and name in prepared:
+                chunks[name], documents[name], keys[name] = prepared[name]
             elif (
                 getattr(self._serialize_table, "__func__", None)
                 is _NATIVE_JSON_SERIALIZE
@@ -1212,7 +1243,19 @@ class MemoryTable(Table):
         data[self._name] = table
         # Retain private resident references and their serialized text. Publish
         # the replacement snapshot only after the existing atomic writer succeeds.
-        storage._write_cached_tables(data, {self._name})
+        original_data = storage._cached_data
+        prepared = storage._prepare_append_text(self._name, payload)
+        if (
+            storage.revision != snapshot.revision
+            or storage._cached_data is not original_data
+        ):
+            raise _RetryMemoryInsert
+        if not self._native_json_append() or self._last_id != snapshot.last_id:
+            return None
+        if prepared is None:
+            storage._write_cached_tables(data, {self._name})
+        else:
+            storage._write_cached_tables(data, {self._name}, {self._name: prepared})
         self._last_id = first_id + len(payload) - 1
         if snapshot.index is not None:
             index = snapshot.index
@@ -1297,6 +1340,7 @@ _JSON_STORAGE_HOOKS = tuple(
         "_merge_data",
         "_serialize_table",
         "_serialize_table_parts",
+        "_prepare_append_text",
         "_write_cached_tables",
         "_load_cached",
         "_file_signature",
