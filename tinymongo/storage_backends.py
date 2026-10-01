@@ -677,6 +677,13 @@ class MemoryTable(Table):
     ):
         """Read candidates or full unique-index rows while single-write hooks are native."""
         if (
+            ids_only
+            and fields is not None
+            and self._native_json_append()
+            and getattr(self.insert, "__func__", None) is _NATIVE_TABLE_INSERT
+        ):
+            return self._read_json_insert_snapshot()
+        if (
             not self._native_memory_delta()
             or getattr(self.all, "__func__", None) is not _NATIVE_TABLE_ALL
             or getattr(self.insert, "__func__", None) is not _NATIVE_TABLE_INSERT
@@ -767,6 +774,11 @@ class MemoryTable(Table):
 
     def _insert_one_from_snapshot(self, document, snapshot):
         if getattr(self.insert, "__func__", None) is _NATIVE_TABLE_INSERT:
+            if isinstance(snapshot, _JSONInsertSnapshot):
+                result = self._append_json_from_snapshot([document], snapshot)
+                if result is not None:
+                    return result[0]
+                return self.insert(document)
             if not isinstance(snapshot, _InsertCandidates):
                 if self._native_memory_delta():
                     return self._insert_multiple_from_snapshot([document], snapshot)[0]
