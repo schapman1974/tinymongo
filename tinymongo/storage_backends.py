@@ -131,6 +131,7 @@ class AtomicJSONStorage(Storage):
         self._cached_data = {}
         self._serialized_tables = {}
         self._serialized_documents = {}
+        self._insert_indexes = {}
         os.makedirs(self._directory, exist_ok=True)
 
     def _file_signature(self):
@@ -156,6 +157,7 @@ class AtomicJSONStorage(Storage):
         # deletions invalidate both decoded values and serialized table chunks.
         signature = self._file_signature()
         if signature != self._cached_signature:
+            self._insert_indexes.clear()
             # Keep read() overrides/mocks in the load path. Only the native
             # implementation supplies chunks, and public reads retain none.
             self._read_chunks = {}
@@ -262,6 +264,7 @@ class AtomicJSONStorage(Storage):
                 os.fsync(handle.fileno())
             os.replace(tmp, self.path)
             _fsync_dir(self._directory)
+            self._insert_indexes.clear()
             self._cached_signature = self._file_signature()
             self._cached_data = data
             self._serialized_tables = chunks
@@ -296,6 +299,7 @@ class AtomicJSONStorage(Storage):
     def close(self):
         rlock, lock = self._acquire_lock()
         try:
+            self._insert_indexes.clear()
             self._cached_signature = None
             self._cached_data = {}
             self._serialized_tables = {}
@@ -596,6 +600,8 @@ class _JSONInsertSnapshot(_InsertIDSnapshot):
         self.last_id = last_id
         self.identities = identities
         self.specs = specs
+        self.index = None
+        self.unique = None
 
 
 class _InsertCandidates(_InsertIDSnapshot):
@@ -682,7 +688,9 @@ class MemoryTable(Table):
             and self._native_json_append()
             and getattr(self.insert, "__func__", None) is _NATIVE_TABLE_INSERT
         ):
-            return self._read_json_insert_snapshot(fields=fields, specs=specs)
+            return self._read_json_insert_snapshot(
+                fields=fields, specs=specs, documents=[document]
+            )
         if (
             not self._native_memory_delta()
             or getattr(self.all, "__func__", None) is not _NATIVE_TABLE_ALL
@@ -844,7 +852,9 @@ class MemoryTable(Table):
             if not self._native_json_append():
                 return self._read() if ids_only else None
             snapshot = self._read_json_insert_snapshot(
-                fields=() if ids_only else fields, specs=() if ids_only else specs
+                fields=() if ids_only else fields,
+                specs=() if ids_only else specs,
+                documents=documents,
             )
             if snapshot is not None:
                 return snapshot
@@ -1006,7 +1016,78 @@ class MemoryTable(Table):
             )
         )
 
-    def _read_json_insert_snapshot(self, fields=(), specs=()):
+    def _read_json_candidates(self, rows, revision, documents, fields, specs):
+        storage = self._storage._storage
+        if (
+            documents is None
+            or (not specs and set(fields) - {"_id"})
+            or any(
+                len(spec.keys) != 1 or spec.partial_filter is not None for spec in specs
+            )
+        ):
+            return None
+        specs = tuple(spec for spec in specs if spec.unique)
+        signature = tuple((s.keys, s.name, s.sparse) for s in specs)
+        index = storage._insert_indexes.get(self._name)
+        if index is None or index[0] != revision or index[3].signature != signature:
+            identities = {}
+            unique = _UniqueInsertIndex(revision, specs)
+            last_id = 0
+            for key, row in list(rows.items()):
+                if type(key) is not str or not key.isdecimal() or str(int(key)) != key:
+                    return None
+                identity = bson_value_identity_key(row["_id"])
+                if identity is None or identity in identities:
+                    return None
+                projected = copy.deepcopy({k: row[k] for k in fields if k in row})
+                try:
+                    tokens = unique.tokens(projected)
+                except Exception:
+                    return None
+                if unique.matches(tokens):
+                    return None
+                identities[identity] = key
+                unique.add(key, tokens)
+                last_id = max(last_id, int(key))
+            index = [revision, identities, last_id, unique]
+        unique = index[3]
+        keys = set()
+        try:
+            for doc in documents:
+                identity = bson_value_identity_key(doc["_id"])
+                if identity is None:
+                    return None
+                if identity in index[1]:
+                    keys.add(index[1][identity])
+                keys.update(unique.matches(unique.tokens(doc)))
+        except Exception:
+            return None
+        if storage.revision != revision:
+            return None
+        snapshot = _JSONInsertSnapshot(
+            {
+                int(key): copy.deepcopy(
+                    {k: rows[key][k] for k in set(fields) | {"_id"} if k in rows[key]}
+                )
+                for key in sorted(keys, key=unique.order.__getitem__)
+            },
+            revision,
+            index[2],
+            index[1],
+            specs,
+        )
+        if (
+            storage.revision != revision
+            or self._last_id != index[2]
+            or not self._native_json_append()
+        ):
+            return None
+        storage._insert_indexes[self._name] = index
+        snapshot.index = index
+        snapshot.unique = unique
+        return snapshot
+
+    def _read_json_insert_snapshot(self, fields=(), specs=(), documents=None):
         storage = self._storage._storage
         revision = storage.revision
         rows = storage._load_cached().get(self._name, {})
@@ -1014,6 +1095,11 @@ class MemoryTable(Table):
             type(row) is not dict or "_id" not in row for row in rows.values()
         ):
             return None
+        candidates = self._read_json_candidates(
+            rows, revision, documents, fields, specs
+        )
+        if candidates is not None:
+            return candidates
         snapshot = {
             int(key): {
                 **copy.deepcopy({k: row[k] for k in fields if k != "_id" and k in row}),
@@ -1061,7 +1147,29 @@ class MemoryTable(Table):
             or len(set(identities)) != len(identities)
         ):
             return None
-        if snapshot.specs:
+        token_rows = []
+        if snapshot.unique is not None:
+            unique = snapshot.unique
+            for row in payload.values():
+                tokens = unique.tokens(row)
+                if storage.revision != snapshot.revision:
+                    raise _RetryMemoryInsert
+                keys = unique.matches(tokens)
+                residents = storage._cached_data[self._name]
+                conflicts = [
+                    copy.deepcopy(residents[key])
+                    for key in sorted(keys, key=unique.order.__getitem__)
+                ]
+                if storage.revision != snapshot.revision:
+                    raise _RetryMemoryInsert
+                _indexes.validate_unique_documents(conflicts + [row], snapshot.specs)
+                token_rows.append(tokens)
+            _indexes.validate_unique_documents(payload.values(), snapshot.specs)
+            if storage.revision != snapshot.revision:
+                raise _RetryMemoryInsert
+            if not self._native_json_append():
+                return None
+        elif snapshot.specs:
             # Validate persisted values: BSON normalization may change an
             # indexed value after collection-level validation.
             _indexes.validate_unique_documents(
@@ -1079,6 +1187,15 @@ class MemoryTable(Table):
         # the replacement snapshot only after the existing atomic writer succeeds.
         storage._write_cached_tables(data, {self._name})
         self._last_id = first_id + len(payload) - 1
+        if snapshot.index is not None:
+            index = snapshot.index
+            index[1].update(zip(identities, payload))
+            index[0] = storage.revision
+            index[2] = self._last_id
+            for key, tokens in zip(payload, token_rows):
+                snapshot.unique.add(key, tokens)
+            snapshot.unique.revision = index[0]
+            storage._insert_indexes[self._name] = index
         self.clear_cache()
         return list(range(first_id, self._last_id + 1))
 
