@@ -563,13 +563,50 @@ class MemoryTable(Table):
         # The collection has validated these mappings and retained its lock
         # since reading this snapshot. Keep TinyDB ID allocation and _write's
         # cache invalidation without reading/copying the same table again.
+        # A native memory merge can persist only accepted new rows. Keep the
+        # full snapshot for custom hooks, replacement writes and legacy IDs:
+        # those paths may transform resident rows or rely on replaying them.
+        proxy = self._storage
+        storage = proxy._storage
+        delta = (
+            type(self) is MemoryTable
+            and type(storage) is MemoryStorage
+            and storage.merge_writes
+            and type(proxy) is MemoryStorageProxy
+            and getattr(self._read, "__func__", None) is _NATIVE_TABLE_READ
+            and getattr(self._write, "__func__", None) is _NATIVE_TABLE_WRITE
+            and getattr(proxy.write, "__func__", None) is _NATIVE_PROXY_WRITE
+            and getattr(storage.write_table, "__func__", None)
+            is _NATIVE_MEMORY_WRITE_TABLE
+            and getattr(proxy.read, "__func__", None) is _NATIVE_PROXY_READ
+            and getattr(storage.read_table, "__func__", None)
+            is _NATIVE_MEMORY_READ_TABLE
+            and len((storage._entry["data"] or {}).get(self._name, {})) == len(snapshot)
+        )
+        if delta:
+            identities = [
+                bson_value_identity_key(row.get("_id", _MISSING_ID))
+                for row in snapshot.values()
+            ]
+            delta = all(identity is not None for identity in identities) and len(
+                set(identities)
+            ) == len(identities)
+        target = {} if delta else snapshot
         doc_ids = []
         for document in documents:
             doc_id = self._get_next_id()
             doc_ids.append(doc_id)
-            snapshot[doc_id] = dict(document)
-        self._write(snapshot)
+            target[doc_id] = dict(document)
+        self._write(target)
         return doc_ids
+
+
+_NATIVE_TABLE_READ = Table._read
+_NATIVE_TABLE_WRITE = Table._write
+_NATIVE_PROXY_WRITE = MemoryStorageProxy.write
+_NATIVE_PROXY_READ = MemoryStorageProxy.read
+_NATIVE_MEMORY_READ_TABLE = MemoryStorage.read_table
+_NATIVE_MEMORY_WRITE_TABLE = MemoryStorage.write_table
 
 
 class MemoryTinyDB(TinyDB):
