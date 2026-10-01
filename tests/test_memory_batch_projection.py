@@ -1,5 +1,6 @@
 """Batch unique validation must not copy unrelated resident payloads."""
 
+import copy
 import importlib
 
 import pytest
@@ -218,6 +219,12 @@ def test_batch_legacy_fallback(tmp_path, backend, malformation):
         rows = (
             storage._entry["data"] if backend == "memory" else storage._cached_data
         )["items"]
+        if backend == "json":
+            # Native JSON writes and file reloads replace the private snapshot.
+            # Inject legacy data the same way, rather than mutating a snapshot
+            # whose shape the warm insert index has already validated.
+            rows = copy.deepcopy(rows)
+            storage._cached_data["items"] = rows
         if malformation == "missing":
             rows["1"].pop("_id")
         elif malformation == "subclass":

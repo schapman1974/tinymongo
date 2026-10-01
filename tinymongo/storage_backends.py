@@ -1107,7 +1107,12 @@ class MemoryTable(Table):
         specs = tuple(spec for spec in specs if spec.unique)
         signature = tuple((s.keys, s.name, s.sparse) for s in specs)
         index = storage._insert_indexes.get(self._name)
-        if index is None or index[0] != revision or index[3].signature != signature:
+        if (
+            index is None
+            or index[0] != revision
+            or index[3].signature != signature
+            or index[4] is not rows
+        ):
             identities = {}
             unique = _UniqueInsertIndex(revision, specs)
             last_id = 0
@@ -1127,7 +1132,7 @@ class MemoryTable(Table):
                 identities[identity] = key
                 unique.add(key, tokens)
                 last_id = max(last_id, int(key))
-            index = [revision, identities, last_id, unique]
+            index = [revision, identities, last_id, unique, rows]
         unique = index[3]
         keys = set()
         try:
@@ -1169,8 +1174,14 @@ class MemoryTable(Table):
         storage = self._storage._storage
         revision = storage.revision
         rows = storage._load_cached().get(self._name, {})
-        if type(rows) is not dict or any(
-            type(row) is not dict or "_id" not in row for row in rows.values()
+        # A published native index validates this exact private table snapshot.
+        # Public reads are detached and native writes replace the snapshot, so
+        # its rows need checking only after the revision or table changes.
+        index = storage._insert_indexes.get(self._name)
+        validated = index is not None and index[0] == revision and index[4] is rows
+        if not validated and (
+            type(rows) is not dict
+            or any(type(row) is not dict or "_id" not in row for row in rows.values())
         ):
             return None
         candidates = self._read_json_candidates(
@@ -1282,6 +1293,7 @@ class MemoryTable(Table):
             index[1].update(zip(identities, payload))
             index[0] = storage.revision
             index[2] = self._last_id
+            index[4] = table
             for key, tokens in zip(payload, token_rows):
                 snapshot.unique.add(key, tokens)
             snapshot.unique.revision = index[0]
