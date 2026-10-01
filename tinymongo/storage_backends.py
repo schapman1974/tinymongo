@@ -15,7 +15,7 @@ from .bson_codec import storage_values_equal
 from .bson_types import bson_value_identity_key, bson_values_equal
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
-from .json_chunks import load_table_chunks
+from .json_chunks import load_table_chunks, retained_document_chunks
 
 try:
     import duckdb as _duckdb
@@ -159,7 +159,7 @@ class AtomicJSONStorage(Storage):
                 self._read_chunks = {}
             self._cached_data = data
             self._serialized_tables = chunks
-            self._serialized_documents = {name: {} for name in chunks}
+            self._serialized_documents = {name: None for name in chunks}
             self._cached_signature = signature
         return self._cached_data
 
@@ -192,6 +192,13 @@ class AtomicJSONStorage(Storage):
             return (json_dumps(table, ensure_ascii=False),), {}
         previous = self._cached_data.get(name, {})
         cached = self._serialized_documents.get(name, {})
+        if cached is None:
+            # None denotes validated cold table text, not a warm codec fallback.
+            cached = (
+                retained_document_chunks(self._serialized_tables[name][0])
+                if isinstance(previous, dict)
+                else {}
+            )
         documents = {}
         pieces = ["{"]
         for index, (key, document) in enumerate(table.items()):
