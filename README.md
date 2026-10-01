@@ -255,9 +255,10 @@ Available backends:
 - `mysql` or `mariadb`: Remote MariaDB/MySQL storage using one SQL table per database collection.
 
 JSON storage caches decoded tables and their serialized text per open database.
-Opening an existing file also retains plain JSON table text so the first write
-can reuse untouched tables. Tables containing BSON tags or legacy values that
-need write validation use the codec path instead. Retaining text uses additional
+Opening an existing file also retains eligible JSON table text so the first write
+can reuse untouched tables, including canonical ObjectId and datetime tags.
+Other BSON tags and legacy values that need write normalization use the codec
+path instead. Retaining text uses additional
 memory even for read-only database handles.
 Warm collection operations copy only the selected table and reuse serialized
 text for unchanged documents, comparing their exact storage representations
