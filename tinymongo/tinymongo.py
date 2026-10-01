@@ -2937,14 +2937,26 @@ class TinyMongoCollection(object):
             # A bare regex is a query predicate, but an ``_id`` collision is
             # always exact BSON identity. Looking it up through ``find_one``
             # could otherwise confuse a regex ID with a matching string ID.
-            documents = self.table.all()
+            snapshot = (
+                self.table._read_single_insert_snapshot(stored_doc)
+                if type(self.table) is MemoryTable
+                and not any(spec.unique for spec in self._index_specs.values())
+                else None
+            )
+            documents = (
+                list(snapshot.values()) if snapshot is not None else self.table.all()
+            )
             existing = next(
                 (item for item in documents if bson_values_equal(item.get("_id"), _id)),
                 None,
             )
             if existing is None:
                 self._validate_unique_post_image(documents + [stored_doc])
-                eid = self.table.insert(stored_doc)
+                eid = (
+                    self.table.insert(stored_doc)
+                    if snapshot is None
+                    else self.table._insert_one_from_snapshot(stored_doc, snapshot)
+                )
             else:
                 raise DuplicateKeyError(
                     "_id:{0} already exists in collection:{1}".format(
