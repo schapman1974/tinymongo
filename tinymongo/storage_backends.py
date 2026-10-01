@@ -466,6 +466,7 @@ class MemoryStorage(AtomicJSONStorage):
             if self.merge_writes and self._entry["data"] is not None:
                 payload = self._merge_data(self._entry["data"], payload)
             self._entry["data"] = copy.deepcopy(payload)
+            self._entry.pop("insert_indexes", None)
             self._entry["revision"] += 1
 
     def table_names(self):
@@ -484,6 +485,7 @@ class MemoryStorage(AtomicJSONStorage):
                 self._entry["data"] = {}
             if name not in self._entry["data"]:
                 self._entry["data"][name] = {}
+                self._entry.pop("insert_indexes", None)
                 self._entry["revision"] += 1
             return snapshot(self._entry["data"][name])
 
@@ -497,13 +499,44 @@ class MemoryStorage(AtomicJSONStorage):
             if self._entry["data"] is None:
                 self._entry["data"] = {}
             self._entry["data"][name] = payload[name]
+            self._entry.pop("insert_indexes", None)
             self._entry["revision"] += 1
+
+    def _insert_identity_index(self, name):
+        """Cache only canonical, uniquely identified rows at this revision."""
+        entry = self._entry
+        cached = entry.get("insert_indexes", {}).get(name)
+        if cached is not None and cached[0] == entry["revision"]:
+            return cached
+        rows = (entry["data"] or {}).get(name, {})
+        identities = {}
+        last_id = 0
+        if type(rows) is not dict:
+            return None
+        for key, row in rows.items():
+            if (
+                type(key) is not str
+                or not key.isdecimal()
+                or str(int(key)) != key
+                or type(row) is not dict
+                or "_id" not in row
+            ):
+                return None
+            identity = bson_value_identity_key(row["_id"])
+            if identity is None or identity in identities:
+                return None
+            identities[identity] = key
+            last_id = max(last_id, int(key))
+        cached = [entry["revision"], identities, last_id]
+        entry.setdefault("insert_indexes", {})[name] = cached
+        return cached
 
     def purge_table(self, name):
         with self.collection_lock:
             data = self._entry["data"] or {}
             if name in data:
                 del data[name]
+                self._entry.pop("insert_indexes", None)
                 self._entry["revision"] += 1
 
     def close(self):
@@ -547,6 +580,15 @@ class _InsertIDSnapshot(dict):
     """Detached IDs for a native memory delta write, never a full table."""
 
 
+class _InsertCandidates(_InsertIDSnapshot):
+    """Detached conflict candidates, carrying the native storage generation."""
+
+    def __init__(self, rows, index):
+        super().__init__(rows)
+        self.index = index
+        self.revision = index[0]
+
+
 class MemoryTable(Table):
     """Initialize native table IDs without copying resident documents."""
 
@@ -564,13 +606,28 @@ class MemoryTable(Table):
         self._query_cache = LRUCache(capacity=cache_size)
         self._init_last_id(storage._storage.read_table_ids(name))
 
-    def _read_insert_snapshot(self, ids_only=False):
+    def _read_insert_snapshot(self, ids_only=False, documents=None):
         """Return a detached native snapshot for a collection-locked batch."""
         if type(self._storage) is not MemoryStorageProxy or type(
             self._storage._storage
         ) not in (MemoryStorage, AtomicJSONStorage):
             return None
         if ids_only and self._native_memory_delta():
+            if documents is not None:
+                index = self._storage._storage._insert_identity_index(self._name)
+                keys = [bson_value_identity_key(doc["_id"]) for doc in documents]
+                if index is not None and all(key is not None for key in keys):
+                    rows = self._storage._storage._entry["data"][self._name]
+                    return _InsertCandidates(
+                        {
+                            int(index[1][key]): {
+                                "_id": _copy_insert_id(rows[index[1][key]]["_id"])
+                            }
+                            for key in keys
+                            if key in index[1]
+                        },
+                        index,
+                    )
             rows = (self._storage._storage._entry["data"] or {}).get(self._name, {})
             if type(rows) is dict and all(type(row) is dict for row in rows.values()):
                 snapshot = _InsertIDSnapshot(
@@ -589,6 +646,12 @@ class MemoryTable(Table):
         # A native memory merge can persist only accepted new rows. Keep the
         # full snapshot for custom hooks, replacement writes and legacy IDs:
         # those paths may transform resident rows or rely on replaying them.
+        if isinstance(snapshot, _InsertCandidates):
+            result = self._append_from_candidates(documents, snapshot)
+            if result is not None:
+                return result
+            # Candidate rows are never a complete replacement snapshot.
+            snapshot = self._read()
         delta = self._native_memory_delta() and len(
             (self._storage._storage._entry["data"] or {}).get(self._name, {})
         ) == len(snapshot)
@@ -607,6 +670,40 @@ class MemoryTable(Table):
         self._write(target)
         return doc_ids
 
+    def _append_from_candidates(self, documents, snapshot):
+        storage = self._storage._storage
+        entry = storage._entry
+        if not self._native_memory_delta() or entry["revision"] != snapshot.revision:
+            return None
+        index = snapshot.index
+        if self._last_id != index[2]:
+            return None
+        # Normalize and detach before mutating anything. Codec callbacks can
+        # reenter the database lock, so validate the generation again afterward.
+        first_id = index[2] + 1
+        payload = clone_document(
+            {
+                self._name: {
+                    str(first_id + i): dict(doc) for i, doc in enumerate(documents)
+                }
+            }
+        )[self._name]
+        identities = [bson_value_identity_key(row["_id"]) for row in payload.values()]
+        if (
+            not self._native_memory_delta()
+            or entry["revision"] != snapshot.revision
+            or any(key is None or key in index[1] for key in identities)
+            or len(set(identities)) != len(identities)
+        ):
+            return None
+        self.clear_cache()
+        entry["data"][self._name].update(payload)
+        index[1].update(zip(identities, payload))
+        self._last_id = index[2] = first_id + len(payload) - 1
+        entry["revision"] += 1
+        index[0] = entry["revision"]
+        return list(range(first_id, self._last_id + 1))
+
     def _native_memory_delta(self):
         proxy = self._storage
         storage = proxy._storage
@@ -614,6 +711,9 @@ class MemoryTable(Table):
             type(self) is MemoryTable
             and type(storage) is MemoryStorage
             and storage.merge_writes
+            and getattr(storage._merge_data, "__func__", None) is _NATIVE_MEMORY_MERGE
+            and getattr(self.clear_cache, "__func__", None) is _NATIVE_TABLE_CLEAR_CACHE
+            and getattr(self._get_next_id, "__func__", None) is _NATIVE_TABLE_NEXT_ID
             and type(proxy) is MemoryStorageProxy
             and getattr(self._read, "__func__", None) is _NATIVE_TABLE_READ
             and getattr(self._write, "__func__", None) is _NATIVE_TABLE_WRITE
@@ -636,6 +736,9 @@ class MemoryTable(Table):
         ) == len(identities)
 
 
+_NATIVE_MEMORY_MERGE = MemoryStorage._merge_data
+_NATIVE_TABLE_CLEAR_CACHE = Table.clear_cache
+_NATIVE_TABLE_NEXT_ID = Table._get_next_id
 _NATIVE_TABLE_READ = Table._read
 _NATIVE_TABLE_WRITE = Table._write
 _NATIVE_PROXY_WRITE = MemoryStorageProxy.write
