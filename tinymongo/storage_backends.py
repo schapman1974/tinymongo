@@ -576,6 +576,24 @@ class MemoryTinyDB(TinyDB):
     table_class = MemoryTable
     storage_proxy_class = MemoryStorageProxy
 
+    def _insert_new_table(self, name, documents):
+        """Persist a new internal table once; caller holds the database lock."""
+        if (
+            type(self) is not MemoryTinyDB
+            or self._cls_table is not MemoryTable
+            or self._cls_storage_proxy is not MemoryStorageProxy
+            or type(self._storage) not in (MemoryStorage, AtomicJSONStorage)
+            or name in self._table_cache
+            or name in self._storage.table_names()
+        ):
+            return False
+        # Match TinyDB's initial internal IDs without making an empty table
+        # durable first. A failed write publishes neither data nor table cache.
+        self._storage.write_table(
+            name, {i: dict(document) for i, document in enumerate(documents, 1)}
+        )
+        return True
+
     def tables(self):
         return self._storage.table_names()
 

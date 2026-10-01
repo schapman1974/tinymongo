@@ -2493,9 +2493,9 @@ class TinyMongoCollection(object):
                 return existing.name
             if spec.unique or len(spec.keys) > 1:
                 self._validate_unique_post_image(self.table.all(), [spec])
-            self.parent.tinydb.table(INDEX_CATALOG_TABLE).insert(
-                self._index_document(spec)
-            )
+            document = self._index_document(spec)
+            if not self._insert_new_index_catalog([document]):
+                self.parent.tinydb.table(INDEX_CATALOG_TABLE).insert(document)
             self._index_specs[spec.name] = spec
             self._indexes.add(spec.field)
             self._index_cache.pop(spec.field, None)
@@ -2524,13 +2524,20 @@ class TinyMongoCollection(object):
         finally:
             self._release_collection_lock(rlock, portalocker_lock)
 
+    def _insert_new_index_catalog(self, documents):
+        db = self.parent.tinydb
+        return isinstance(db, MemoryTinyDB) and db._insert_new_table(
+            INDEX_CATALOG_TABLE, documents
+        )
+
     def _flush_index_batch(self, pending):
         if not pending:
             return
         documents = [self._index_document(spec) for spec in pending]
         pending.clear()
         try:
-            self.parent.tinydb.table(INDEX_CATALOG_TABLE).insert_multiple(documents)
+            if not self._insert_new_index_catalog(documents):
+                self.parent.tinydb.table(INDEX_CATALOG_TABLE).insert_multiple(documents)
         except BaseException:
             # Discard staged metadata and TinyDB caches after a failed write.
             self._refresh_table()
