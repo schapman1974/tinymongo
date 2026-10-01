@@ -15,6 +15,7 @@ from .bson_codec import storage_values_equal
 from .bson_types import bson_value_identity_key, bson_values_equal
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
+from .json_chunks import load_table_chunks
 
 try:
     import duckdb as _duckdb
@@ -113,6 +114,8 @@ class AtomicJSONStorage(Storage):
         self.path = path
         self._directory = os.path.dirname(path) or "."
         self.merge_writes = True
+        self._retain_read_chunks = False
+        self._read_chunks = {}
         self._cached_signature = None
         self._cached_data = {}
         self._serialized_tables = {}
@@ -142,10 +145,21 @@ class AtomicJSONStorage(Storage):
         # deletions invalidate both decoded values and serialized table chunks.
         signature = self._file_signature()
         if signature != self._cached_signature:
-            data = self.read() or {}
+            # Keep read() overrides/mocks in the load path. Only the native
+            # implementation supplies chunks, and public reads retain none.
+            self._read_chunks = {}
+            self._retain_read_chunks = (
+                getattr(self.read, "__func__", None) is AtomicJSONStorage.read
+            )
+            try:
+                data = self.read() or {}
+                chunks = self._read_chunks
+            finally:
+                self._retain_read_chunks = False
+                self._read_chunks = {}
             self._cached_data = data
-            self._serialized_tables = {}
-            self._serialized_documents = {}
+            self._serialized_tables = chunks
+            self._serialized_documents = {name: {} for name in chunks}
             self._cached_signature = signature
         return self._cached_data
 
@@ -292,7 +306,11 @@ class AtomicJSONStorage(Storage):
             if not os.path.exists(self.path) or os.path.getsize(self.path) == 0:
                 return {}
             with open(self.path, "r", encoding="utf8") as handle:
-                return json_loads(handle.read())
+                text = handle.read()
+                if self._retain_read_chunks:
+                    data, self._read_chunks = load_table_chunks(text)
+                    return data
+                return json_loads(text)
         except (OSError, ValueError, TypeError) as exc:
             raise StorageCorruptionError(
                 "Cannot read JSON database {0}: {1}".format(self.path, exc)
