@@ -270,6 +270,13 @@ still atomically replace and sync the complete JSON file, so large databases
 retain whole-file I/O costs and the cache requires additional memory. The file
 format is unchanged.
 
+Native memory single inserts cache identity and unique-token owners for
+single-field indexes, including sparse and multikey indexes. After the first
+scan, validation visits matching conflict candidates instead of every resident
+row. The cache uses additional memory proportional to index entries and is
+rebuilt after general writes or catalog changes. Compound and partial indexes,
+custom storage hooks, and legacy row shapes retain full validation.
+
 Install only the drivers you need:
 
 ```bash

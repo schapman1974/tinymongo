@@ -44,6 +44,7 @@ from .storage_backends import (
     AtomicJSONStorage,
     MemoryTable,
     MemoryTinyDB,
+    _RetryMemoryInsert,
     clear_memory_database,
     clear_memory_namespace,
     get_storage_class,
@@ -2958,6 +2959,7 @@ class TinyMongoCollection(object):
                         stored_doc,
                         ids_only=not any(spec.unique for spec in specs),
                         fields=fields,
+                        specs=specs,
                     )
                     if type(self.table) is MemoryTable
                     else None
@@ -2991,11 +2993,17 @@ class TinyMongoCollection(object):
                     ):
                         self._refresh_table()
                         continue
-                    eid = (
-                        self.table.insert(stored_doc)
-                        if snapshot is None
-                        else self.table._insert_one_from_snapshot(stored_doc, snapshot)
-                    )
+                    try:
+                        eid = (
+                            self.table.insert(stored_doc)
+                            if snapshot is None
+                            else self.table._insert_one_from_snapshot(
+                                stored_doc, snapshot
+                            )
+                        )
+                    except _RetryMemoryInsert:
+                        self._refresh_table()
+                        continue
                 else:
                     raise DuplicateKeyError(
                         "_id:{0} already exists in collection:{1}".format(

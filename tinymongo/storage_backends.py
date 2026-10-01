@@ -17,6 +17,7 @@ from .bson_types import bson_value_identity_key, bson_values_equal, object_id_ty
 from .parquet_storage import _acquire_rlock, _fsync_dir, _local_rlocks, portalocker
 from .errors import StorageCorruptionError
 from .json_chunks import load_table_chunks, retained_document_chunks
+from . import indexes as _indexes
 
 try:
     import duckdb as _duckdb
@@ -505,6 +506,7 @@ class MemoryStorage(AtomicJSONStorage):
     def _insert_identity_index(self, name):
         """Cache only canonical, uniquely identified rows at this revision."""
         entry = self._entry
+        revision = entry["revision"]
         cached = entry.get("insert_indexes", {}).get(name)
         if cached is not None and cached[0] == entry["revision"]:
             return cached
@@ -513,7 +515,7 @@ class MemoryStorage(AtomicJSONStorage):
         last_id = 0
         if type(rows) is not dict:
             return None
-        for key, row in rows.items():
+        for key, row in list(rows.items()):
             if (
                 type(key) is not str
                 or not key.isdecimal()
@@ -527,7 +529,9 @@ class MemoryStorage(AtomicJSONStorage):
                 return None
             identities[identity] = key
             last_id = max(last_id, int(key))
-        cached = [entry["revision"], identities, last_id]
+        if entry["revision"] != revision:
+            return None
+        cached = [revision, identities, last_id]
         entry.setdefault("insert_indexes", {})[name] = cached
         return cached
 
@@ -587,6 +591,38 @@ class _InsertCandidates(_InsertIDSnapshot):
         super().__init__(rows)
         self.index = index
         self.revision = index[0]
+        self.unique = None
+
+
+class _RetryMemoryInsert(Exception):
+    """A callback changed the generation after candidate validation."""
+
+
+class _UniqueInsertIndex:
+    """Revision-bound unique token owners, without resident document references."""
+
+    def __init__(self, revision, specs):
+        self.revision = revision
+        self.signature = tuple((s.keys, s.name, s.sparse) for s in specs)
+        self.specs = specs
+        self.owners = [{} for _ in specs]
+        self.order = {}
+
+    def tokens(self, document):
+        return tuple(_indexes.index_entry_tokens(document, spec) for spec in self.specs)
+
+    def add(self, key, tokens):
+        self.order[key] = len(self.order)
+        for owners, entries in zip(self.owners, tokens):
+            owners.update((token, key) for token in entries)
+
+    def matches(self, tokens):
+        return {
+            owners[token]
+            for owners, entries in zip(self.owners, tokens)
+            for token in entries
+            if token in owners
+        }
 
 
 class MemoryTable(Table):
@@ -623,7 +659,9 @@ class MemoryTable(Table):
                     return
         self._init_last_id(native.read_table_ids(name))
 
-    def _read_single_insert_snapshot(self, document, ids_only=True, fields=None):
+    def _read_single_insert_snapshot(
+        self, document, ids_only=True, fields=None, specs=()
+    ):
         """Read candidates or full unique-index rows while single-write hooks are native."""
         if (
             not self._native_memory_delta()
@@ -632,6 +670,9 @@ class MemoryTable(Table):
         ):
             return None
         if not ids_only and fields is not None:
+            candidates = self._read_unique_candidates(document, fields, specs)
+            if candidates is not None:
+                return candidates
             storage = self._storage._storage
             revision = storage._entry["revision"]
             rows = (storage._entry["data"] or {}).get(self._name, {})
@@ -655,6 +696,62 @@ class MemoryTable(Table):
             return snapshot
         return snapshot if isinstance(snapshot, _InsertCandidates) else None
 
+    def _read_unique_candidates(self, document, fields, specs):
+        if not specs or any(
+            len(spec.keys) != 1 or spec.partial_filter is not None for spec in specs
+        ):
+            return None
+        specs = tuple(spec for spec in specs if spec.unique)
+        storage = self._storage._storage
+        revision = storage._entry["revision"]
+        index = storage._insert_identity_index(self._name)
+        identity = bson_value_identity_key(document["_id"])
+        if index is None or identity is None or storage._entry["revision"] != revision:
+            return None
+        rows = storage._entry["data"][self._name]
+        unique = index[3] if len(index) > 3 else None
+        signature = tuple((s.keys, s.name, s.sparse) for s in specs)
+        if (
+            unique is None
+            or unique.revision != revision
+            or unique.signature != signature
+        ):
+            unique = _UniqueInsertIndex(revision, specs)
+            # Copy indexed roots before tokenizing: legacy BSON callbacks must
+            # not receive live stored values or mutate an active iterator.
+            for key, row in list(rows.items()):
+                projected = copy.deepcopy({k: row[k] for k in fields if k in row})
+                try:
+                    tokens = unique.tokens(projected)
+                except Exception:
+                    return None  # Preserve full validation/error ordering.
+                if unique.matches(tokens):
+                    return None  # Legacy residents already violate uniqueness.
+                unique.add(key, tokens)
+        try:
+            tokens = unique.tokens(document)
+        except Exception:
+            return None  # The collection checks duplicate IDs before indexes.
+        if storage._entry["revision"] != revision:
+            return None
+        keys = unique.matches(tokens)
+        if identity in index[1]:
+            keys.add(index[1][identity])
+        snapshot = _InsertCandidates(
+            {
+                int(key): copy.deepcopy(
+                    {k: rows[key][k] for k in fields if k in rows[key]}
+                )
+                for key in sorted(keys, key=unique.order.__getitem__)
+            },
+            index,
+        )
+        if not self._native_memory_delta() or storage._entry["revision"] != revision:
+            return None
+        index[3:] = [unique]
+        snapshot.unique = unique
+        return snapshot
+
     def _insert_one_from_snapshot(self, document, snapshot):
         if getattr(self.insert, "__func__", None) is _NATIVE_TABLE_INSERT:
             if not isinstance(snapshot, _InsertCandidates):
@@ -664,6 +761,10 @@ class MemoryTable(Table):
             result = self._append_from_candidates([document], snapshot)
             if result is not None:
                 return result[0]
+            if snapshot.unique is not None and (
+                self._storage._storage._entry["revision"] != snapshot.revision
+            ):
+                raise _RetryMemoryInsert
         return self.insert(document)
 
     def _read_insert_snapshot(self, ids_only=False, documents=None):
@@ -756,12 +857,42 @@ class MemoryTable(Table):
             or len(set(identities)) != len(identities)
         ):
             return None
+        unique = snapshot.unique
+        token_rows = []
+        if unique is not None:
+            # Normalization can change indexed values. Validate the actual
+            # persisted values against their owners before publishing anything.
+            for row in payload.values():
+                tokens = unique.tokens(row)
+                if entry["revision"] != snapshot.revision:
+                    return None
+                keys = unique.matches(tokens)
+                residents = entry["data"][self._name]
+                conflicts = [
+                    copy.deepcopy(residents[key])
+                    for key in sorted(keys, key=unique.order.__getitem__)
+                ]
+                if entry["revision"] != snapshot.revision:
+                    return None
+                _indexes.validate_unique_documents(conflicts + [row], unique.specs)
+                token_rows.append(tokens)
+            if (
+                not self._native_memory_delta()
+                or entry["revision"] != snapshot.revision
+            ):
+                return None
         self.clear_cache()
         entry["data"][self._name].update(payload)
         index[1].update(zip(identities, payload))
         self._last_id = index[2] = first_id + len(payload) - 1
         entry["revision"] += 1
         index[0] = entry["revision"]
+        if unique is not None:
+            for key, tokens in zip(payload, token_rows):
+                unique.add(key, tokens)
+            unique.revision = entry["revision"]
+        else:
+            index[3:] = []
         return list(range(first_id, self._last_id + 1))
 
     def _native_memory_delta(self):
