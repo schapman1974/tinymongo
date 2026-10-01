@@ -3120,6 +3120,7 @@ class TinyMongoCollection(object):
                         ids_only=not any(spec.unique for spec in specs),
                         documents=stored_docs,
                         fields=fields,
+                        specs=specs,
                     )
                     if type(self.table) is MemoryTable
                     else None

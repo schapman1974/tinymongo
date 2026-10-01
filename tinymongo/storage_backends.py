@@ -792,7 +792,9 @@ class MemoryTable(Table):
                 raise _RetryMemoryInsert
         return self.insert(document)
 
-    def _read_insert_snapshot(self, ids_only=False, documents=None, fields=None):
+    def _read_insert_snapshot(
+        self, ids_only=False, documents=None, fields=None, specs=()
+    ):
         """Return a detached native snapshot for a collection-locked batch."""
         if type(self._storage) is not MemoryStorageProxy or type(
             self._storage._storage
@@ -827,8 +829,14 @@ class MemoryTable(Table):
                     and storage._entry["revision"] == revision
                 ):
                     return snapshot
-        if ids_only and self._native_json_append():
-            snapshot = self._read_json_insert_snapshot()
+        if type(self._storage._storage) is AtomicJSONStorage and (
+            ids_only or fields is not None
+        ):
+            if not self._native_json_append():
+                return self._read() if ids_only else None
+            snapshot = self._read_json_insert_snapshot(
+                fields=() if ids_only else fields, specs=() if ids_only else specs
+            )
             if snapshot is not None:
                 return snapshot
         if ids_only and self._native_memory_delta():

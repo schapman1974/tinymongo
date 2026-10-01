@@ -1,7 +1,6 @@
 """Batch unique validation must not copy unrelated resident payloads."""
 
 import importlib
-from uuid import uuid4
 
 import pytest
 
@@ -11,10 +10,12 @@ from bson import ObjectId
 
 from tinymongo import TinyMongoClient, storage_backends as sb
 
+pytestmark = pytest.mark.parametrize("backend", ["memory", "json"])
 
-def test_unique_batch_does_not_copy_resident_payload(monkeypatch):
-    address = "memory://" + uuid4().hex
-    with TinyMongoClient(address, backend="memory") as client:
+
+def test_unique_batch_does_not_copy_resident_payload(tmp_path, backend, monkeypatch):
+    address = "memory://" + tmp_path.name if backend == "memory" else str(tmp_path)
+    with TinyMongoClient(address, backend=backend) as client:
         col = client.app.items
         documents = [
             {"_id": ObjectId(), "email": str(i), "payload": list(range(100))}
@@ -39,7 +40,7 @@ def test_unique_batch_does_not_copy_resident_payload(monkeypatch):
             patch.setattr(sb.copy, "deepcopy", observe)
             col.insert_many([{"email": "new-1"}, {"email": "new-2"}])
         assert copied == []
-    with TinyMongoClient(address, backend="memory") as client:
+    with TinyMongoClient(address, backend=backend) as client:
         assert client.app.items.count_documents({}) == 22
         assert client.app.items.find_one({"_id": documents[0]["_id"]})[
             "payload"
@@ -57,7 +58,9 @@ def test_unique_batch_does_not_copy_resident_payload(monkeypatch):
         ([("group", 1), ("email", 1)], {}, ["a", "b"], "b"),
     ],
 )
-def test_batch_projection_preserves_duplicate_order(ordered, field, options, old, new):
+def test_batch_projection_preserves_duplicate_order(
+    tmp_path, backend, ordered, field, options, old, new
+):
     def row(key, value):
         result = {"_id": key, "group": "g"}
         result["profile" if field == "profile.email" else "email"] = (
@@ -65,7 +68,10 @@ def test_batch_projection_preserves_duplicate_order(ordered, field, options, old
         )
         return result
 
-    with TinyMongoClient("memory://" + uuid4().hex, backend="memory") as client:
+    with TinyMongoClient(
+        ("memory://" + tmp_path.name if backend == "memory" else str(tmp_path)),
+        backend=backend,
+    ) as client:
         col = client.app.items
         col.create_index(field, unique=True, **options)
         col.insert_one(dict(row("old", old), payload=[1]))
@@ -88,12 +94,14 @@ def test_batch_projection_preserves_duplicate_order(ordered, field, options, old
 
 @pytest.mark.parametrize("stage", ["copy", "plan"])
 @pytest.mark.parametrize("mutation", ["insert", "catalog"])
-def test_batch_retries_reentrant_changes(monkeypatch, stage, mutation):
+def test_batch_retries_reentrant_changes(
+    tmp_path, backend, monkeypatch, stage, mutation
+):
     module = importlib.import_module("tinymongo.tinymongo")
-    address = "memory://" + uuid4().hex
+    address = "memory://" + tmp_path.name if backend == "memory" else str(tmp_path)
     with (
-        TinyMongoClient(address, backend="memory") as client,
-        TinyMongoClient(address, backend="memory") as peer,
+        TinyMongoClient(address, backend=backend) as client,
+        TinyMongoClient(address, backend=backend) as peer,
     ):
         col = client.app.items
         col.insert_one(
@@ -113,7 +121,11 @@ def test_batch_retries_reentrant_changes(monkeypatch, stage, mutation):
             original = sb.copy.deepcopy
 
             def copied(value, *args, **kwargs):
-                if not fired and isinstance(value, dict) and value.get("_id") == "old":
+                if (
+                    not fired
+                    and isinstance(value, dict)
+                    and value.get("email") == "old"
+                ):
                     mutate()
                 return original(value, *args, **kwargs)
 
@@ -136,8 +148,11 @@ def test_batch_retries_reentrant_changes(monkeypatch, stage, mutation):
 
 
 @pytest.mark.parametrize("change", ["replacement", "all", "insert_multiple", "_write"])
-def test_batch_projection_hook_fallback(monkeypatch, change):
-    with TinyMongoClient("memory://" + uuid4().hex, backend="memory") as client:
+def test_batch_projection_hook_fallback(tmp_path, backend, monkeypatch, change):
+    with TinyMongoClient(
+        ("memory://" + tmp_path.name if backend == "memory" else str(tmp_path)),
+        backend=backend,
+    ) as client:
         col = client.app.items
         col.insert_one({"_id": "old", "email": "a", "payload": [1]})
         table = col.table
@@ -162,8 +177,11 @@ def test_batch_projection_hook_fallback(monkeypatch, change):
 
 
 @pytest.mark.parametrize("change", ["replacement", "insert_multiple", "_write"])
-def test_batch_hook_change_after_projection(monkeypatch, change):
-    with TinyMongoClient("memory://" + uuid4().hex, backend="memory") as client:
+def test_batch_hook_change_after_projection(tmp_path, backend, monkeypatch, change):
+    with TinyMongoClient(
+        ("memory://" + tmp_path.name if backend == "memory" else str(tmp_path)),
+        backend=backend,
+    ) as client:
         col = client.app.items
         col.insert_one({"_id": "old", "email": "a", "payload": [1]})
         table = col.table
@@ -189,11 +207,17 @@ def test_batch_hook_change_after_projection(monkeypatch, change):
 @pytest.mark.parametrize(
     "malformation", ["missing", "subclass", "opaque", "duplicate", "internal_collision"]
 )
-def test_batch_legacy_fallback(malformation):
-    with TinyMongoClient("memory://" + uuid4().hex, backend="memory") as client:
+def test_batch_legacy_fallback(tmp_path, backend, malformation):
+    with TinyMongoClient(
+        ("memory://" + tmp_path.name if backend == "memory" else str(tmp_path)),
+        backend=backend,
+    ) as client:
         col = client.app.items
         col.insert_one({"_id": "old", "payload": [1]})
-        rows = col.table._storage._storage._entry["data"]["items"]
+        storage = col.table._storage._storage
+        rows = (
+            storage._entry["data"] if backend == "memory" else storage._cached_data
+        )["items"]
         if malformation == "missing":
             rows["1"].pop("_id")
         elif malformation == "subclass":
@@ -213,8 +237,13 @@ def test_batch_legacy_fallback(malformation):
         assert snapshot[1]["payload"] == [1]
 
 
-def test_batch_projection_detaches_roots_and_keeps_partial_predicates():
-    with TinyMongoClient("memory://" + uuid4().hex, backend="memory") as client:
+def test_batch_projection_detaches_roots_and_keeps_partial_predicates(
+    tmp_path, backend
+):
+    with TinyMongoClient(
+        ("memory://" + tmp_path.name if backend == "memory" else str(tmp_path)),
+        backend=backend,
+    ) as client:
         col = client.app.items
         col.insert_one(
             {
@@ -236,8 +265,11 @@ def test_batch_projection_detaches_roots_and_keeps_partial_predicates():
             col.insert_many([{"profile": {"email": "a"}, "active": True}])
 
 
-def test_batch_includes_compound_roots_and_sparse_types(monkeypatch):
-    with TinyMongoClient("memory://" + uuid4().hex, backend="memory") as client:
+def test_batch_includes_compound_roots_and_sparse_types(tmp_path, backend, monkeypatch):
+    with TinyMongoClient(
+        ("memory://" + tmp_path.name if backend == "memory" else str(tmp_path)),
+        backend=backend,
+    ) as client:
         col = client.app.items
         col.create_index("email", unique=True, sparse=True)
         col.create_index([("left", 1), ("right", 1)])
@@ -260,8 +292,11 @@ def test_batch_includes_compound_roots_and_sparse_types(monkeypatch):
             col.insert_many([{"email": 1.0}])
 
 
-def test_collection_batch_preserves_custom_all_hook(monkeypatch):
-    with TinyMongoClient("memory://" + uuid4().hex, backend="memory") as client:
+def test_collection_batch_preserves_custom_all_hook(tmp_path, backend, monkeypatch):
+    with TinyMongoClient(
+        ("memory://" + tmp_path.name if backend == "memory" else str(tmp_path)),
+        backend=backend,
+    ) as client:
         col = client.app.items
         col.insert_one({"_id": "old", "email": "a", "payload": [1]})
         col.create_index("email", unique=True)
