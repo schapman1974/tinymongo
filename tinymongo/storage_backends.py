@@ -604,7 +604,24 @@ class MemoryTable(Table):
         self._storage = storage
         self._name = name
         self._query_cache = LRUCache(capacity=cache_size)
-        self._init_last_id(storage._storage.read_table_ids(name))
+        native = storage._storage
+        if (
+            self._native_memory_delta()
+            and getattr(self._init_last_id, "__func__", None)
+            is _NATIVE_TABLE_INIT_LAST_ID
+            and getattr(native.read_table_ids, "__func__", None)
+            is _NATIVE_MEMORY_READ_TABLE_IDS
+            and getattr(native._read_table, "__func__", None)
+            is _NATIVE_MEMORY_READ_TABLE_SNAPSHOT
+        ):
+            # Reuse only an already-built index. Cold/legacy tables retain
+            # TinyDB's complete ID conversion and validation path below.
+            with native.collection_lock:
+                cached = native._entry.get("insert_indexes", {}).get(name)
+                if cached is not None and cached[0] == native._entry["revision"]:
+                    self._last_id = cached[2]
+                    return
+        self._init_last_id(native.read_table_ids(name))
 
     def _read_insert_snapshot(self, ids_only=False, documents=None):
         """Return a detached native snapshot for a collection-locked batch."""
@@ -736,6 +753,9 @@ class MemoryTable(Table):
         ) == len(identities)
 
 
+_NATIVE_TABLE_INIT_LAST_ID = Table._init_last_id
+_NATIVE_MEMORY_READ_TABLE_IDS = MemoryStorage.read_table_ids
+_NATIVE_MEMORY_READ_TABLE_SNAPSHOT = MemoryStorage._read_table
 _NATIVE_MEMORY_MERGE = MemoryStorage._merge_data
 _NATIVE_TABLE_CLEAR_CACHE = Table.clear_cache
 _NATIVE_TABLE_NEXT_ID = Table._get_next_id
