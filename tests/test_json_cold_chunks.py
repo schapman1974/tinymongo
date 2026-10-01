@@ -34,7 +34,6 @@ def test_first_write_does_not_serialize_untouched_plain_table(
     storage.write_table("target", {1: {"_id": "new"}})
     assert loads(path.read_text())["archive"] == archive
     # On its first dirty write the table switches to document-level caching.
-    monkeypatch.setattr(sb, "json_dumps", original)
     storage.write_table("archive", {2: {"_id": "second"}})
     assert len(storage.read_table("archive")) == 2
     storage.close()
@@ -211,3 +210,79 @@ def test_read_overrides_and_public_reads_remain_isolated(tmp_path, monkeypatch):
         assert storage._serialized_tables == {}
     storage.close()
     assert storage.read()["archive"]["1"]["x"] == "override"
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "{}",
+        ' { "1" : {"_id":"one","x":1e2,"z":-0.0,"v":[null,true,"é😀"]} } ',
+        '{"1":{"_id":"wrong"},"1":{"_id":"right","x":1,"x":2}}',
+        '{"1":null,"2":[],"3":true,"4":1.0}',
+    ],
+)
+def test_cold_changed_table_keeps_json_semantics(tmp_path, table):
+    path = tmp_path / "db.json"
+    text = '{"docs":' + table + "}"
+    path.write_text(text)
+    storage = sb.AtomicJSONStorage(str(path))
+    storage.merge_writes = False
+    before = loads(text)["docs"]
+    storage.write_table("docs", dict(before, added={"_id": "new"}))
+    assert dumps(storage.read()["docs"]) == dumps(dict(before, added={"_id": "new"}))
+    # Replacement/deletion must never reuse a document solely by its key.
+    storage.write_table("docs", {"1": {"_id": "replacement", "x": -0.0}})
+    assert dumps(storage.read()["docs"]) == dumps(
+        {"1": {"_id": "replacement", "x": -0.0}}
+    )
+
+
+def test_cold_documents_publish_only_after_persistence(tmp_path, monkeypatch):
+    path = tmp_path / "db.json"
+    path.write_text('{"docs":{"1":{"_id":"one","body":"old"}}}')
+    storage = sb.AtomicJSONStorage(str(path))
+    storage.table_names()
+    cold_cache = storage._serialized_documents
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            sb.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("fail"))
+        )
+        with pytest.raises(OSError, match="fail"):
+            storage.write_table("docs", {"2": {"_id": "failed"}})
+    assert storage._serialized_documents is cold_cache
+    assert cold_cache["docs"] is None
+    assert "2" not in storage.read()["docs"]
+    # An external writer invalidates the source text before the retry.
+    path.write_text('{"docs":{"1":{"_id":"one","body":"external"}}}')
+    storage.write_table("docs", {"2": {"_id": "success"}})
+    assert storage.read()["docs"]["1"]["body"] == "external"
+    assert storage.read()["docs"]["2"]["_id"] == "success"
+
+
+def test_warm_legacy_table_replacement_does_not_split_fallback_text(tmp_path):
+    path = tmp_path / "db.json"
+    path.write_text('{"docs":[1,2]}')
+    storage = sb.AtomicJSONStorage(str(path))
+    storage.write_table("other", {})
+    storage.merge_writes = False
+    storage.write_table("docs", {"1": {"_id": "new"}})
+    assert storage.read()["docs"] == {"1": {"_id": "new"}}
+
+
+def test_cold_scalar_tagged_table_can_be_replaced(tmp_path):
+    path = tmp_path / "db.json"
+    path.write_text(dumps({"docs": datetime(2026, 1, 1)}))
+    storage = sb.AtomicJSONStorage(str(path))
+    storage.merge_writes = False
+    storage.write_table("docs", {"value": {"_id": "new"}})
+    assert storage.read()["docs"] == {"value": {"_id": "new"}}
+
+
+@pytest.mark.parametrize("value", [1.0, True, -0.0, {"b": 2, "a": 1}])
+def test_cold_changed_document_must_match_storage_representation(tmp_path, value):
+    path = tmp_path / "db.json"
+    path.write_text('{"docs":{"1":{"_id":"one","value":1}}}')
+    storage = sb.AtomicJSONStorage(str(path))
+    data = {"1": {"_id": "one", "value": value}}
+    storage.write_table("docs", data)
+    assert dumps(storage.read()["docs"]) == dumps(data)

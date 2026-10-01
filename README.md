@@ -257,6 +257,8 @@ Available backends:
 JSON storage caches decoded tables and their serialized text per open database.
 Opening an existing file also retains eligible JSON table text so the first write
 can reuse untouched tables, including canonical ObjectId and datetime tags.
+The first change to an eligible table parses its retained text once to reuse
+unchanged document text, avoiding serialization of the resident payload.
 Other BSON tags and legacy values that need write normalization use the codec
 path instead. Retaining text uses additional
 memory even for read-only database handles.

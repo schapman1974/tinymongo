@@ -85,3 +85,25 @@ def load_table_chunks(text):
     if set(raw) == _MARKER_KEYS:
         chunks = {}
     return loads(raw), chunks
+
+
+def retained_document_chunks(text):
+    """Split a table already validated and retained by load_table_chunks.
+
+    Only cold changed tables pay this parse. The decoder supplies value offsets
+    without scanning large strings in Python; duplicate keys keep the last
+    value, just as the decoded table does. No cache is published here.
+    """
+    decoder = json.JSONDecoder()
+    position = _WHITESPACE.match(text, 1).end()
+    chunks = {}
+    while text[position] != "}":
+        key, position = decoder.raw_decode(text, position)
+        position = _WHITESPACE.match(text, position).end()
+        start = _WHITESPACE.match(text, position + 1).end()
+        _, position = decoder.raw_decode(text, start)
+        chunks[key] = text[start:position]
+        position = _WHITESPACE.match(text, position).end()
+        if text[position] == ",":
+            position = _WHITESPACE.match(text, position + 1).end()
+    return chunks
