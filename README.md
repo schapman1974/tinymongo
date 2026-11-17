@@ -264,9 +264,12 @@ path instead. Retaining text uses additional
 memory even for read-only database handles.
 Warm collection operations copy only the selected table and reuse serialized
 text for unchanged documents, comparing their exact storage representations
-(including BSON types and field order). External file changes invalidate the
-cache, and closing the database releases it. Writes
-still atomically replace and sync the complete JSON file, so large databases
+(including BSON types and field order). External changes detected through file
+identity, size, or timestamps invalidate the cache. External writers should
+atomically replace the file or ensure its modification time changes; same-size
+in-place edits with unchanged metadata may not be detected. Closing the database
+releases the cache. Writes still atomically replace and sync the complete JSON
+file, so large databases
 retain whole-file I/O costs and the cache requires additional memory. The file
 format is unchanged.
 

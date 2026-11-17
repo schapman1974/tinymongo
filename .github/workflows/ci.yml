@@ -519,6 +519,7 @@ jobs:
           tests/test_client_read_fidelity.py
           tests/test_common_api.py
           tests/test_durable_indexes.py
+          tests/test_json_cold_chunks.py
           tests/test_multi_write.py
           tests/test_projection_memory.py
           tests/test_sqlite_bulk_updates.py
@@ -547,6 +548,7 @@ jobs:
           tests/test_client_configuration.py
           tests/test_common_api.py
           tests/test_durable_indexes.py
+          tests/test_json_cold_chunks.py
           tests/test_multi_write.py
           tests/test_projection_memory.py
           tests/test_sqlite_bulk_updates.py
